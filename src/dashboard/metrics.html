@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Metrics — StateKeep</title>
+  <link rel="stylesheet" href="/dashboard/assets/style.css">
+  <script src="/dashboard/assets/app.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+</head>
+<body>
+  <header>
+    <div class="header-inner">
+      <h1 class="logo"><a href="/dashboard/index.html">⚙ StateKeep</a></h1>
+      <nav>
+        <a href="/dashboard/actors.html">Actors</a>
+        <a href="/dashboard/definitions.html">Definitions</a>
+        <a href="/dashboard/scheduled.html">Scheduled</a>
+        <a href="/dashboard/workers.html">Workers</a>
+        <a href="/dashboard/scenarios.html">Scenarios</a>
+        <a href="/dashboard/metrics.html" class="active">Metrics</a>
+        <a href="/dashboard/archives.html">Archives</a>
+      </nav>
+      <button onclick="logout()" class="btn-sm">Sign out</button>
+    </div>
+  </header>
+
+  <main>
+    <h2>Metrics</h2>
+    <p class="subtitle">Auto-refreshes every 60s.</p>
+
+    <div class="metrics-grid">
+      <div class="card"><canvas id="chart-actors"></canvas></div>
+      <div class="card"><canvas id="chart-latency"></canvas></div>
+      <div class="card"><canvas id="chart-ffi"></canvas></div>
+      <div class="card"><canvas id="chart-wal"></canvas></div>
+    </div>
+
+    <div class="card">
+      <h3>Raw Prometheus Output</h3>
+      <pre id="raw-metrics" style="max-height:400px;overflow:auto;font-size:12px"></pre>
+    </div>
+  </main>
+
+  <script>
+    function logout() { sessionStorage.removeItem('sk_apikey'); window.location.href = '/dashboard/login.html'; }
+
+    function makeChart(id, label, datasets) {
+      return new Chart(document.getElementById(id).getContext('2d'), {
+        type: 'line',
+        data: { labels: [], datasets },
+        options: { responsive: true, plugins: { legend: { display: true } }, scales: { y: { beginAtZero: true } } },
+      });
+    }
+
+    const chartActors  = makeChart('chart-actors',  'Actors', [
+      { label: 'Active',    data: [], borderColor: '#4caf50', fill: false },
+      { label: 'Migrating', data: [], borderColor: '#ff9800', fill: false },
+    ]);
+    const chartLatency = makeChart('chart-latency', 'API Latency (ms)', [
+      { label: 'p50', data: [], borderColor: '#2196f3', fill: false },
+      { label: 'p95', data: [], borderColor: '#9c27b0', fill: false },
+      { label: 'p99', data: [], borderColor: '#f44336', fill: false },
+    ]);
+    const chartFfi = makeChart('chart-ffi', 'FFI Calls Total', [
+      { label: 'FFI calls', data: [], borderColor: '#00bcd4', fill: false },
+    ]);
+    const chartWal = makeChart('chart-wal', 'WAL Size (bytes)', [
+      { label: 'WAL size', data: [], borderColor: '#795548', fill: false },
+    ]);
+
+    function parsePrometheus(text) {
+      const m = {};
+      for (const line of text.split('\n')) {
+        if (line.startsWith('#') || !line.trim()) continue;
+        const parts = line.trim().split(/\s+/);
+        if (parts.length >= 2) m[parts[0]] = parseFloat(parts[1]);
+      }
+      return m;
+    }
+
+    function pushToChart(chart, label, ...values) {
+      chart.data.labels.push(label);
+      values.forEach((v, i) => chart.data.datasets[i].data.push(v ?? 0));
+      if (chart.data.labels.length > 30) {
+        chart.data.labels.shift();
+        chart.data.datasets.forEach(d => d.data.shift());
+      }
+      chart.update();
+    }
+
+    async function refreshMetrics() {
+      try {
+        const res = await fetch('/v1/metrics');
+        const rawText = await res.text();
+        document.getElementById('raw-metrics').textContent = rawText;
+        const m   = parsePrometheus(rawText);
+        const lbl = new Date().toLocaleTimeString();
+        pushToChart(chartActors,  lbl, m['statekeep_actors_active'], m['statekeep_actors_migrating']);
+        pushToChart(chartLatency, lbl, m['statekeep_api_latency_p50_ms'], m['statekeep_api_latency_p95_ms'], m['statekeep_api_latency_p99_ms']);
+        pushToChart(chartFfi,     lbl, m['statekeep_ffi_calls_total']);
+        pushToChart(chartWal,     lbl, m['statekeep_wal_size_bytes']);
+      } catch {}
+    }
+
+    refreshMetrics();
+    setInterval(refreshMetrics, 60_000);
+  </script>
+</body>
+</html>

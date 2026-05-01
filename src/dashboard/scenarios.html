@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>StateKeep — Scenario Tester</title>
+  <link rel="stylesheet" href="/dashboard/assets/style.css">
+  <script src="/dashboard/assets/app.js"></script>
+  <style>
+    body { font-family: system-ui, sans-serif; background: #f5f5f0; margin: 0; }
+    nav { background: #1a1a1a; color: #fff; padding: 0 24px; display: flex; align-items: center; gap: 24px; height: 52px; }
+    nav a { color: #ccc; text-decoration: none; font-size: 14px; } nav a:hover { color: #fff; }
+    .page { max-width: 900px; margin: 32px auto; padding: 0 16px; }
+    h1 { font-size: 22px; font-weight: 600; margin: 0 0 4px; }
+    .subtitle { color: #666; font-size: 13px; margin: 0 0 24px; }
+    .card { background: #fff; border: 1px solid #ddd; border-radius: 10px; padding: 24px; margin-bottom: 20px; }
+    label { display: block; font-size: 13px; font-weight: 500; margin-bottom: 6px; }
+    textarea { width: 100%; box-sizing: border-box; font-family: monospace; font-size: 13px; border: 1px solid #ddd; border-radius: 8px; padding: 12px; resize: vertical; }
+    button { padding: 9px 20px; background: #1a1a1a; color: #fff; border: none; border-radius: 8px; font-size: 14px; cursor: pointer; margin-right: 8px; }
+    button:hover { background: #333; }
+    button.sec { background: #f0f0eb; color: #1a1a1a; border: 1px solid #ddd; }
+    .result { margin-top: 24px; }
+    .badge { display: inline-block; padding: 2px 10px; border-radius: 99px; font-size: 12px; font-weight: 500; }
+    .pass { background: #e6f4ea; color: #1a5c2a; }
+    .fail { background: #fce8e8; color: #8c1a1a; }
+    .scenario-block { border: 1px solid #eee; border-radius: 8px; padding: 16px; margin-bottom: 12px; }
+    .scenario-title { font-weight: 500; margin-bottom: 8px; display: flex; align-items: center; gap: 8px; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th { text-align: left; padding: 6px 10px; background: #f9f9f7; border-bottom: 1px solid #eee; font-weight: 500; }
+    td { padding: 6px 10px; border-bottom: 1px solid #f0f0eb; }
+    .step-pass { color: #1a5c2a; } .step-fail { color: #8c1a1a; font-weight: 500; }
+    .summary-bar { display: flex; gap: 16px; margin-bottom: 16px; font-size: 14px; }
+    .summary-bar span { font-weight: 500; }
+    pre { background: #f9f9f7; border: 1px solid #eee; border-radius: 6px; padding: 12px; font-size: 12px; overflow-x: auto; margin: 0; }
+  </style>
+</head>
+<body>
+  <nav>
+    <span style="font-weight:600;color:#fff;font-size:15px">StateKeep</span>
+    <a href="/dashboard/index.html">Overview</a>
+    <a href="/dashboard/definitions.html">Definitions</a>
+    <a href="/dashboard/actors.html">Actors</a>
+    <a href="/dashboard/scheduled.html">Scheduled</a>
+    <a href="/dashboard/workers.html">Workers</a>
+    <a href="/dashboard/scenarios.html" style="color:#fff">Scenarios</a>
+    <a href="/dashboard/metrics.html">Metrics</a>
+    <a href="/dashboard/archives.html">Archives</a>
+  </nav>
+  <div class="page">
+    <h1>Scenario Tester</h1>
+    <p class="subtitle">Validate a machine definition and run event sequences before deploying. Nothing is persisted.</p>
+
+    <div class="card">
+      <label>Machine definition + scenarios (JSON)</label>
+      <textarea id="scenarioInput" rows="20" placeholder='{
+  "definition": {
+    "id": "order",
+    "initial": "pending",
+    "states": {
+      "pending":   { "on": { "PAY": "paid", "CANCEL": "cancelled" } },
+      "paid":      { "on": { "SHIP": "shipped" } },
+      "shipped":   { "on": { "DELIVER": "delivered" } },
+      "delivered": { "type": "final" },
+      "cancelled": { "type": "final" }
+    }
+  },
+  "scenarios": [
+    {
+      "name": "happy path",
+      "events": ["PAY", "SHIP", "DELIVER"],
+      "expectedStates": ["paid", "shipped", "delivered"],
+      "expectDone": true
+    },
+    {
+      "name": "cancellation",
+      "events": ["CANCEL"],
+      "expectedStates": ["cancelled"],
+      "expectDone": true
+    }
+  ]
+}'></textarea>
+      <div style="margin-top:12px;display:flex;gap:8px">
+        <button onclick="runValidate()">Validate only</button>
+        <button onclick="runScenarios()">Run scenarios</button>
+        <button class="sec" onclick="loadExample()">Load example</button>
+      </div>
+    </div>
+
+    <div class="result" id="result" style="display:none"></div>
+  </div>
+  <script>
+    const EXAMPLE = {
+      definition: {
+        id: "order", initial: "pending",
+        states: {
+          pending:   { on: { PAY: "paid", CANCEL: "cancelled" } },
+          paid:      { on: { SHIP: "shipped" } },
+          shipped:   { on: { DELIVER: "delivered" } },
+          delivered: { type: "final" },
+          cancelled: { type: "final" }
+        }
+      },
+      scenarios: [
+        { name: "happy path", events: ["PAY","SHIP","DELIVER"], expectedStates: ["paid","shipped","delivered"], expectDone: true },
+        { name: "cancellation", events: ["CANCEL"], expectedStates: ["cancelled"], expectDone: true },
+        { name: "ship without paying (should stay pending)", events: ["SHIP"], expectedStates: ["pending"], expectDone: false }
+      ]
+    };
+
+    function loadExample() {
+      document.getElementById('scenarioInput').value = JSON.stringify(EXAMPLE, null, 2);
+    }
+
+    function showResult(html) {
+      const el = document.getElementById('result');
+      el.style.display = 'block';
+      el.innerHTML = html;
+    }
+
+    async function runValidate() {
+      let body;
+      try { body = JSON.parse(document.getElementById('scenarioInput').value); } catch { showResult('<div class="card" style="color:#c00">Invalid JSON</div>'); return; }
+      if (!body.definition) { showResult('<div class="card" style="color:#c00">Missing "definition" field</div>'); return; }
+      const res = await apiFetch('/v1/definitions/validate', { method: 'POST', body: JSON.stringify({ definition: body.definition }) });
+      if (!res) return;
+      const data = await res.json();
+      if (data.valid) {
+        showResult(`<div class="card">
+          <div class="scenario-title"><span class="badge pass">Valid</span> Machine definition is valid</div>
+          <div style="font-size:13px;color:#444;margin-top:8px">
+            Initial state: <strong>${data.initialState}</strong> &nbsp;·&nbsp;
+            ${data.stateCount} states: ${data.states.join(', ')} &nbsp;·&nbsp;
+            Final: ${data.finalStates.length > 0 ? data.finalStates.join(', ') : 'none'}
+          </div>
+        </div>`);
+      } else {
+        showResult(`<div class="card"><div class="scenario-title"><span class="badge fail">Invalid</span></div><pre>${data.error}</pre></div>`);
+      }
+    }
+
+    async function runScenarios() {
+      let body;
+      try { body = JSON.parse(document.getElementById('scenarioInput').value); } catch { showResult('<div class="card" style="color:#c00">Invalid JSON</div>'); return; }
+      const res = await apiFetch('/v1/definitions/scenario', { method: 'POST', body: JSON.stringify(body) });
+      if (!res) return;
+      const data = await res.json();
+      if (data.error) { showResult(`<div class="card" style="color:#c00">${data.error}</div>`); return; }
+
+      const { summary, results } = data;
+      let html = `<div class="card">
+        <div class="summary-bar">
+          <span class="badge ${summary.allPass ? 'pass' : 'fail'}">${summary.allPass ? 'All passing' : 'Some failing'}</span>
+          <span>${summary.passed} / ${summary.total} scenarios passed</span>
+        </div>`;
+
+      for (const r of results) {
+        html += `<div class="scenario-block">
+          <div class="scenario-title">
+            <span class="badge ${r.passed ? 'pass' : 'fail'}">${r.passed ? 'PASS' : 'FAIL'}</span>
+            ${r.name}
+          </div>`;
+        if (r.error) html += `<div style="color:#c00;font-size:13px;margin-bottom:8px">${r.error}</div>`;
+        if (r.steps.length > 0) {
+          html += `<table><thead><tr><th>Step</th><th>Event</th><th>State</th><th>Expected</th><th></th></tr></thead><tbody>`;
+          for (const s of r.steps) {
+            html += `<tr>
+              <td>${s.step}</td>
+              <td><code>${s.event}</code></td>
+              <td><code>${JSON.stringify(s.state)}</code></td>
+              <td><code>${s.expected}</code></td>
+              <td class="${s.pass ? 'step-pass' : 'step-fail'}">${s.pass ? '✓' : '✗'}</td>
+            </tr>`;
+          }
+          html += `</tbody></table>`;
+        }
+        html += `<div style="font-size:12px;color:#888;margin-top:8px">Final: <code>${JSON.stringify(r.finalState)}</code> &nbsp;·&nbsp; Done: ${r.done}</div>`;
+        html += `</div>`;
+      }
+      html += `</div>`;
+      showResult(html);
+    }
+  </script>
+</body>
+</html>

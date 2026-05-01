@@ -1,0 +1,340 @@
+name: StateKeep CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+env:
+  NODE_VERSION: '22'
+  PORT: '3099'
+
+jobs:
+  # ── Stage 1: Unit + Property (no server, fastest) ───────────────────────────
+  unit:
+    name: "L1+L4: Unit & Property Tests"
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate test encryption key
+        run: echo "STATEKEEP_ENCRYPTION_KEY=$(openssl rand -hex 32)" >> $GITHUB_ENV
+
+      - name: L1 — FFI Loader & Hashing
+        env:
+          STATEKEEP_DB_PATH: /tmp/test-ffi-${{ github.run_id }}.db
+        run: node --test test/level1/unit.ffi.js
+
+      - name: L1 — SQLite Persistence & Auth
+        env:
+          STATEKEEP_DB_PATH: /tmp/test-db-${{ github.run_id }}.db
+        run: node --test test/level1/unit.db.js
+
+      - name: L4 — Property-Based Invariants
+        env:
+          STATEKEEP_DB_PATH: /tmp/test-prop-${{ github.run_id }}.db
+        run: node --test test/level4/property.js
+
+  # ── Stage 2: C FFI Direct Tests ────────────────────────────────────────────
+  c-ffi:
+    name: "C FFI Direct Tests"
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: sudo apt-get install -y gcc make
+
+      - name: Build mock engine
+        run: make -C mock
+
+      - name: Build and run C FFI tests
+        run: make -C test/c test
+
+  # ── Stage 3: Integration Tests (server required) ─────────────────────────
+  integration:
+    name: "L2+L3: Integration & Migration Tests"
+    runs-on: ubuntu-22.04
+    needs: [unit]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build mock engine
+        run: |
+          sudo apt-get install -y gcc make
+          make -C mock
+
+      - name: Generate test encryption key
+        run: echo "STATEKEEP_ENCRYPTION_KEY=$(openssl rand -hex 32)" >> $GITHUB_ENV
+
+      - name: Start API server (mock engine)
+        env:
+          STATEKEEP_DB_PATH: /tmp/test-integ-${{ github.run_id }}.db
+          STATEKEEP_ENGINE_PATH: ./mock/libapv-mock.so
+          LOG_DIR: /tmp/statekeep-logs
+          STATEKEEP_DATA_DIR: /tmp/statekeep-data
+        run: |
+          mkdir -p /tmp/statekeep-logs /tmp/statekeep-data
+          node src/api/server.js &
+          echo "SERVER_PID=$!" >> $GITHUB_ENV
+          # Wait for server to be ready
+          for i in $(seq 1 40); do
+            curl -sf http://127.0.0.1:3099/v1/health && break
+            sleep 0.5
+          done
+
+      - name: L2 — Event Flow Integration
+        env:
+          STATEKEEP_DB_PATH: /tmp/test-integ-${{ github.run_id }}.db
+          STATEKEEP_ENGINE_PATH: ./mock/libapv-mock.so
+        run: node --test test/level2/integration.eventflow.js
+
+      - name: L2 — Concurrency & Auth
+        env:
+          STATEKEEP_DB_PATH: /tmp/test-integ-${{ github.run_id }}.db
+          STATEKEEP_ENGINE_PATH: ./mock/libapv-mock.so
+        run: node --test test/level2/integration.concurrency.js
+
+      - name: L3 — Migration Tests
+        env:
+          STATEKEEP_DB_PATH: /tmp/test-integ-${{ github.run_id }}.db
+          STATEKEEP_ENGINE_PATH: ./mock/libapv-mock.so
+        run: node --test test/level3/migration.js
+
+      - name: L6 — Chaos & Failure Tests
+        env:
+          STATEKEEP_DB_PATH: /tmp/test-integ-${{ github.run_id }}.db
+          STATEKEEP_ENGINE_PATH: ./mock/libapv-mock.so
+        run: node --test test/level6/chaos.js
+
+      - name: L7 — Edge Cases & Compatibility
+        env:
+          STATEKEEP_DB_PATH: /tmp/test-integ-${{ github.run_id }}.db
+          STATEKEEP_ENGINE_PATH: ./mock/libapv-mock.so
+        run: node --test test/level7/edge.js
+
+      - name: Stop server
+        if: always()
+        run: kill $SERVER_PID 2>/dev/null || true
+
+      - name: Upload server logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: server-logs-${{ github.run_id }}
+          path: /tmp/statekeep-logs/
+
+
+  # ── Stage 3b: Statechart Tests ──────────────────────────────────────────────
+  statechart:
+    name: "SC1-SC7: Statechart Tests"
+    runs-on: ubuntu-22.04
+    needs: [unit]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Generate test encryption key
+        run: echo "STATEKEEP_ENCRYPTION_KEY=$(openssl rand -hex 32)" >> $GITHUB_ENV
+
+      - name: Start API server
+        env:
+          STATEKEEP_DB_PATH: /tmp/test-sc-${{ github.run_id }}.db
+          LOG_DIR: /tmp/statekeep-sc-logs
+          STATEKEEP_DATA_DIR: /tmp/statekeep-sc-data
+        run: |
+          mkdir -p /tmp/statekeep-sc-logs /tmp/statekeep-sc-data
+          node src/api/server.js &
+          echo "SC_SERVER_PID=$!" >> $GITHUB_ENV
+          for i in $(seq 1 40); do
+            curl -sf http://127.0.0.1:3099/v1/health && break
+            sleep 0.3
+          done
+
+      - name: SC1 — Valid Statecharts
+        env:
+          STATEKEEP_DB_PATH: /tmp/test-sc-${{ github.run_id }}.db
+        run: node --test test/statechart/sc1.valid.js
+
+      - name: SC2 — Structural Breakage
+        env:
+          STATEKEEP_DB_PATH: /tmp/test-sc-${{ github.run_id }}.db
+        run: node --test test/statechart/sc2.structural.js
+
+      - name: SC3 — Logically Stuck Machines
+        env:
+          STATEKEEP_DB_PATH: /tmp/test-sc-${{ github.run_id }}.db
+        run: node --test test/statechart/sc3.stuck.js
+
+      - name: SC4 — Migration Scenarios
+        env:
+          STATEKEEP_DB_PATH: /tmp/test-sc-${{ github.run_id }}.db
+        run: node --test test/statechart/sc4.migration.js
+
+      - name: SC5 — Complex Multi-Actor
+        env:
+          STATEKEEP_DB_PATH: /tmp/test-sc-${{ github.run_id }}.db
+        run: node --test test/statechart/sc5.complex.js
+
+      - name: SC6 — GC and Snapshot Workers
+        env:
+          STATEKEEP_DB_PATH: /tmp/test-sc-${{ github.run_id }}.db
+        run: node --test test/statechart/sc6.workers.js
+
+      - name: SC7 — E2E Regression
+        env:
+          STATEKEEP_DB_PATH: /tmp/test-sc-${{ github.run_id }}.db
+        run: node --test test/statechart/sc7.e2e.js
+
+      - name: SC8 — Confirm-Token + needs_rescue
+        env:
+          STATEKEEP_DB_PATH: /tmp/test-sc-${{ github.run_id }}.db
+        run: node --test test/statechart/sc8.confirmtoken.js
+
+      - name: SC9 — Migration Routing (unit)
+        run: node --test test/statechart/sc9.unit.js
+
+      - name: SC9 — Migration Routing (HTTP)
+        env:
+          STATEKEEP_DB_PATH: /tmp/test-sc-${{ github.run_id }}.db
+        run: node --test test/statechart/sc9.migration-routing.js
+
+      - name: Stop server
+        if: always()
+        run: kill $SC_SERVER_PID 2>/dev/null || true
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sc-logs-${{ github.run_id }}
+          path: /tmp/statekeep-sc-logs/
+
+  # ── Stage 4: Legacy Tests (backward compat) ──────────────────────────────
+  legacy:
+    name: "Legacy Test Suite"
+    runs-on: ubuntu-22.04
+    needs: [unit]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build mock engine
+        run: |
+          sudo apt-get install -y gcc make
+          make -C mock
+
+      - name: Generate test encryption key
+        run: echo "STATEKEEP_ENCRYPTION_KEY=$(openssl rand -hex 32)" >> $GITHUB_ENV
+
+      - name: Start server
+        env:
+          STATEKEEP_DB_PATH: /tmp/test-legacy-${{ github.run_id }}.db
+          STATEKEEP_ENGINE_PATH: ./mock/libapv-mock.so
+          LOG_DIR: /tmp/statekeep-logs-legacy
+          STATEKEEP_DATA_DIR: /tmp/statekeep-data-legacy
+        run: |
+          mkdir -p /tmp/statekeep-logs-legacy /tmp/statekeep-data-legacy
+          node src/api/server.js &
+          echo "LEGACY_SERVER_PID=$!" >> $GITHUB_ENV
+          for i in $(seq 1 40); do
+            curl -sf http://127.0.0.1:3099/v1/health && break
+            sleep 0.5
+          done
+
+      - name: Run legacy test suite
+        env:
+          STATEKEEP_DB_PATH: /tmp/test-legacy-${{ github.run_id }}.db
+          STATEKEEP_ENGINE_PATH: ./mock/libapv-mock.so
+        run: node --test test/test_*.js
+
+      - name: Stop server
+        if: always()
+        run: kill $LEGACY_SERVER_PID 2>/dev/null || true
+
+  # ── Stage 5: Coverage Report ─────────────────────────────────────────────
+  coverage:
+    name: "Coverage Report"
+    runs-on: ubuntu-22.04
+    needs: [integration, legacy, statechart]
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build mock engine
+        run: |
+          sudo apt-get install -y gcc make
+          make -C mock
+
+      - name: Generate encryption key
+        run: echo "STATEKEEP_ENCRYPTION_KEY=$(openssl rand -hex 32)" >> $GITHUB_ENV
+
+      - name: Start server
+        env:
+          STATEKEEP_DB_PATH: /tmp/test-cov-${{ github.run_id }}.db
+          STATEKEEP_ENGINE_PATH: ./mock/libapv-mock.so
+          LOG_DIR: /tmp/statekeep-logs-cov
+          STATEKEEP_DATA_DIR: /tmp/statekeep-data-cov
+        run: |
+          mkdir -p /tmp/statekeep-logs-cov /tmp/statekeep-data-cov
+          node src/api/server.js &
+          echo "COV_SERVER_PID=$!" >> $GITHUB_ENV
+          for i in $(seq 1 40); do
+            curl -sf http://127.0.0.1:3099/v1/health && break
+            sleep 0.5
+          done
+
+      - name: Run coverage
+        env:
+          STATEKEEP_DB_PATH: /tmp/test-cov-${{ github.run_id }}.db
+          STATEKEEP_ENGINE_PATH: ./mock/libapv-mock.so
+        run: npm run test:coverage
+
+      - name: Stop server
+        if: always()
+        run: kill $COV_SERVER_PID 2>/dev/null || true
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ github.run_id }}
+          path: coverage/

@@ -1,0 +1,179 @@
+/**
+ * src/api/routes/archives.js
+ *
+ * GET  /v1/archives              — List archived actors for the requesting org
+ * POST /v1/actors/:id/restore    — Restore an archived actor to active status
+ */
+
+import { mkdirSync, readFileSync, writeFileSync } from 'fs';
+import { gunzipSync, gzipSync } from 'zlib';
+import { join } from 'path';
+import { getDb, encrypt } from '../../registry/db.js';
+import { findActorById, createActor, updateActorStatus } from '../../registry/actorRepo.js';
+import { cancelAllPendingForActor } from '../../registry/scheduledEventRepo.js';
+import { adminMiddleware } from '../middleware/auth.js';
+import { evictFromHotRegistry } from '../../runtime/actorManager.js';
+
+const ARCHIVE_DIR = join(process.env.STATEKEEP_DATA_DIR ?? '/opt/statekeep/data', 'archives');
+
+export async function archiveRoutes(fastify) {
+
+  // ── GET /v1/archives ───────────────────────────────────────────────────────
+  fastify.get('/v1/archives', {
+    schema: {
+      querystring: {
+        type: 'object',
+        properties: {
+          machineId: { type: 'string' },
+          limit:     { type: 'integer', minimum: 1, maximum: 200, default: 50 },
+          offset:    { type: 'integer', minimum: 0, default: 0 },
+        },
+      },
+    },
+  }, async (request, reply) => {
+    const { machineId, limit, offset } = request.query;
+    const db = getDb();
+
+    let rows;
+    if (machineId) {
+      rows = db.prepare(`
+        SELECT actor_id, org_id, machine_id, archived_at, state_value, definition_id
+        FROM actor_archives
+        WHERE org_id = ? AND machine_id = ?
+        ORDER BY archived_at DESC
+        LIMIT ? OFFSET ?
+      `).all(request.orgId, machineId, limit, offset);
+    } else {
+      rows = db.prepare(`
+        SELECT actor_id, org_id, machine_id, archived_at, state_value, definition_id
+        FROM actor_archives
+        WHERE org_id = ?
+        ORDER BY archived_at DESC
+        LIMIT ? OFFSET ?
+      `).all(request.orgId, limit, offset);
+    }
+
+    const archives = rows.map(r => ({
+      actorId:      r.actor_id,
+      orgId:        r.org_id,
+      machineId:    r.machine_id,
+      archivedAt:   r.archived_at,
+      stateValue:   r.state_value ? JSON.parse(r.state_value) : null,
+      definitionId: r.definition_id,
+    }));
+
+    return reply.send({ archives, count: archives.length });
+  });
+
+  // ── POST /v1/actors/:id/restore ────────────────────────────────────────────
+  fastify.post('/v1/actors/:id/restore', {
+    schema: {
+      params: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
+    },
+  }, async (request, reply) => {
+    const { id } = request.params;
+    const db     = getDb();
+
+    const archiveRow = db.prepare(`
+      SELECT * FROM actor_archives WHERE actor_id = ? AND org_id = ?
+    `).get(id, request.orgId);
+
+    if (!archiveRow) {
+      return reply.code(404).send({ error: `No archive found for actor ${id}` });
+    }
+
+    // Read and decompress the archive file
+    let archiveData;
+    try {
+      const compressed = readFileSync(archiveRow.file_path);
+      archiveData = JSON.parse(gunzipSync(compressed).toString('utf8'));
+    } catch (err) {
+      return reply.code(500).send({ error: `Failed to read archive file: ${err.message}` });
+    }
+
+    // Re-insert actor as active (re-encrypts context with current key)
+    const actor = findActorById(id);
+    if (actor && actor.status === 'archived') {
+      // Actor row exists but is archived — restore in-place
+      updateActorStatus(id, 'active');
+    } else if (!actor) {
+      // Actor row was deleted — re-create from archive
+      createActor({
+        id:                 archiveData.id,
+        definitionId:       archiveData.definitionId,
+        orgId:              archiveData.orgId,
+        stateValue:         archiveData.stateValue,
+        context:            archiveData.context,
+        logicalStartTick:   archiveData.logicalStartTick,
+        historyFingerprint: archiveData.historyFingerprint,
+      });
+    } else {
+      return reply.code(409).send({ error: `Actor ${id} is already active (status: ${actor.status})` });
+    }
+
+    // Remove archive record
+    db.prepare(`DELETE FROM actor_archives WHERE actor_id = ?`).run(id);
+
+    const restored = findActorById(id);
+    return reply.code(201).send(restored);
+  });
+
+  // ── POST /v1/admin/actors/:id/force-archive (non-production only) ──────────
+  // Replicates gc-worker archive logic on demand — used by E2E tests to avoid
+  // waiting 24 h for natural GC to trigger archival.
+  if (process.env.NODE_ENV !== 'production') {
+    fastify.post('/v1/admin/actors/:id/force-archive', {
+      preHandler: adminMiddleware,
+      schema: {
+        params: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
+      },
+    }, async (request, reply) => {
+      const { id } = request.params;
+      const db     = getDb();
+
+      const actor = findActorById(id);
+      if (!actor)                    return reply.code(404).send({ error: `Actor ${id} not found` });
+      if (actor.status === 'archived') return reply.code(409).send({ error: 'Actor is already archived' });
+
+      const def       = db.prepare('SELECT machine_id FROM definitions WHERE id = ?').get(actor.definitionId);
+      const machineId = def?.machine_id ?? actor.definitionId;
+      const now       = Date.now();
+
+      mkdirSync(ARCHIVE_DIR, { recursive: true });
+
+      const archiveData = {
+        id:                 actor.id,
+        orgId:              actor.orgId,
+        definitionId:       actor.definitionId,
+        stateValue:         actor.stateValue,
+        context:            actor.context,
+        historyFingerprint: actor.historyFingerprint,
+        logicalStartTick:   actor.logicalStartTick,
+        archivedAt:         now,
+      };
+
+      const filename = join(ARCHIVE_DIR, `${actor.orgId}_${actor.id}.json.gz`);
+      writeFileSync(filename, gzipSync(JSON.stringify(archiveData)));
+
+      cancelAllPendingForActor(id, actor.orgId);
+      updateActorStatus(id, 'archived');
+      evictFromHotRegistry(id);
+
+      db.prepare(`
+        INSERT OR REPLACE INTO actor_archives
+          (actor_id, org_id, machine_id, archived_at, file_path, state_value, definition_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        actor.id,
+        actor.orgId,
+        machineId,
+        now,
+        filename,
+        actor.stateValue ? JSON.stringify(actor.stateValue) : null,
+        actor.definitionId,
+      );
+
+      return reply.code(200).send({ archivedAt: now, filePath: filename });
+    });
+  }
+}

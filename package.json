@@ -1,0 +1,67 @@
+{
+  "name": "statekeep",
+  "version": "1.0.0",
+  "description": "Hosted State Machine Platform with Pluggable Migration Engine",
+  "type": "module",
+  "license": "UNLICENSED",
+  "private": true,
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "bin": {
+    "statekeep": "src/cli/index.js"
+  },
+  "scripts": {
+    "start": "node --env-file=.env src/api/server.js",
+    "migrate-worker": "node src/workers/migrate-worker.js",
+    "gc-worker": "node src/workers/gc-worker.js",
+    "snapshot-worker": "node src/workers/snapshot-worker.js",
+    "metrics-worker": "node src/workers/metrics-worker.js",
+    "test": "node --test test/*.js",
+    "test:unit": "node --test test/level1/unit.ffi.js test/level1/unit.db.js",
+    "test:properties": "node --test test/level4/property.js",
+    "test:integration": "node --test test/level2/integration.eventflow.js test/level2/integration.concurrency.js",
+    "test:migration": "node --test test/level3/migration.js",
+    "test:chaos": "node --test test/level6/chaos.js",
+    "test:edge": "node --test test/level7/edge.js",
+    "test:stress": "STRESS=1 node --test test/level5/stress.js",
+    "test:all": "bash scripts/run-tests.sh",
+    "test:mock": "MOCK_ENGINE=1 bash scripts/run-tests.sh",
+    "test:coverage": "c8 node --test test/*.js",
+    "test:c": "make -C test/c test",
+    "build:mock": "make -C mock",
+    "test:statechart": "bash scripts/run-statechart-tests.sh",
+    "test:sc1": "node --test test/statechart/sc1.valid.js",
+    "test:sc2": "node --test test/statechart/sc2.structural.js",
+    "test:sc3": "node --test test/statechart/sc3.stuck.js",
+    "test:sc4": "node --test test/statechart/sc4.migration.js",
+    "test:sc5": "node --test test/statechart/sc5.complex.js",
+    "test:sc6": "node --test test/statechart/sc6.workers.js",
+    "test:sc7": "node --test test/statechart/sc7.e2e.js",
+    "test:sc8": "node --test test/statechart/sc8.confirmtoken.js",
+    "test:sc9": "node --test test/statechart/sc9.unit.js",
+    "test:sc9:http": "node --test test/statechart/sc9.migration-routing.js",
+    "test:e2e": "playwright test",
+    "test:e2e:api": "playwright test --project=api",
+    "test:e2e:dashboard": "playwright test --project=dashboard",
+    "test:e2e:headed": "playwright test --headed"
+  },
+  "dependencies": {
+    "@fastify/rate-limit": "^9.1.0",
+    "@fastify/static": "^7.0.4",
+    "@fastify/websocket": "^10.0.1",
+    "bcryptjs": "^2.4.3",
+    "better-sqlite3": "^9.4.5",
+    "fastify": "^4.27.0",
+    "koffi": "^2.8.9",
+    "package.json": "^2.0.1",
+    "pino": "^9.1.0",
+    "pino-roll": "^1.0.0",
+    "uuid": "^10.0.0",
+    "xstate": "^5.14.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.44.0",
+    "c8": "^10.1.2"
+  }
+}

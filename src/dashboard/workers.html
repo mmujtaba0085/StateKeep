@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Worker Health — StateKeep</title>
+  <link rel="stylesheet" href="/dashboard/assets/style.css">
+</head>
+<body>
+  <header>
+    <div class="header-inner">
+      <h1 class="logo"><a href="/dashboard/">⚙ StateKeep</a></h1>
+      <nav>
+        <a href="/dashboard/actors.html">Actors</a>
+        <a href="/dashboard/definitions.html">Definitions</a>
+        <a href="/dashboard/scheduled.html">Scheduled</a>
+        <a href="/dashboard/workers.html" class="active">Workers</a>
+        <a href="/dashboard/scenarios.html">Scenarios</a>
+        <a href="/dashboard/metrics.html">Metrics</a>
+        <a href="/dashboard/archives.html">Archives</a>
+      </nav>
+      <div id="key-status" class="key-status" style="cursor:pointer" onclick="signOut()">Sign out</div>
+    </div>
+  </header>
+
+  <main>
+    <h2>Worker Health</h2>
+
+    <div id="status-banner" class="status-banner" style="display:none"></div>
+
+    <div class="toolbar">
+      <button onclick="loadWorkers()">Refresh</button>
+      <span id="poll-label" style="margin-left:8px;color:#888;font-size:.85em">Auto-refresh every 10s</span>
+      <span id="last-checked" style="margin-left:16px;color:#888;font-size:.85em"></span>
+    </div>
+
+    <div id="workers-grid" class="workers-grid">
+      <p class="empty">Loading…</p>
+    </div>
+  </main>
+
+  <script>
+    // No auth required — mirrors the public /v1/health/workers endpoint
+    async function loadWorkers() {
+      try {
+        const res  = await fetch('/v1/health/workers');
+        const data = await res.json();
+
+        document.getElementById('last-checked').textContent =
+          `Checked at ${new Date(data.checkedAt).toLocaleTimeString()}`;
+
+        const banner = document.getElementById('status-banner');
+        banner.style.display = 'block';
+        if (data.healthy) {
+          banner.className = 'status-banner status-ok';
+          banner.textContent = 'All workers healthy';
+        } else {
+          const stale = data.workers.filter(w => !w.healthy).length;
+          banner.className = 'status-banner status-error';
+          banner.textContent = `${stale} worker${stale !== 1 ? 's' : ''} stale`;
+        }
+
+        const grid = document.getElementById('workers-grid');
+        if (!data.workers.length) {
+          grid.innerHTML = '<p class="empty">No workers registered. Start the worker processes.</p>';
+          return;
+        }
+
+        grid.innerHTML = data.workers.map(w => `
+          <div class="worker-card ${w.healthy ? 'healthy' : 'stale'}">
+            <div class="worker-type">${w.workerType}</div>
+            <div class="worker-badge ${w.healthy ? 'badge-ok' : 'badge-stale'}">
+              ${w.healthy ? 'Healthy' : 'Stale'}
+            </div>
+            <div class="worker-detail"><span>PID</span><strong>${w.pid}</strong></div>
+            <div class="worker-detail"><span>Started</span><strong>${new Date(w.startedAt).toLocaleTimeString()}</strong></div>
+            <div class="worker-detail"><span>Last beat</span><strong>${new Date(w.lastBeat).toLocaleTimeString()}</strong></div>
+            <div class="worker-detail"><span>Stale for</span><strong>${w.staleSecs}s</strong></div>
+          </div>
+        `).join('');
+      } catch (err) {
+        document.getElementById('workers-grid').innerHTML =
+          `<p class="empty">Error: ${err.message}</p>`;
+      }
+    }
+
+    function signOut() {
+      sessionStorage.removeItem('sk_api_key');
+      location.href = '/dashboard/login.html';
+    }
+
+    loadWorkers();
+    setInterval(loadWorkers, 10000);
+  </script>
+
+  <style>
+    .status-banner {
+      padding: 10px 16px;
+      border-radius: 6px;
+      margin-bottom: 16px;
+      font-weight: 600;
+    }
+    .status-ok    { background: #d1e7dd; color: #0a3622; }
+    .status-error { background: #f8d7da; color: #58151c; }
+
+    .workers-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+      gap: 16px;
+      margin-top: 16px;
+    }
+    .worker-card {
+      border: 1px solid #dee2e6;
+      border-radius: 8px;
+      padding: 16px;
+      background: #fff;
+    }
+    .worker-card.stale { border-color: #f5c2c7; background: #fff5f5; }
+    .worker-type { font-size: 1.1em; font-weight: bold; margin-bottom: 6px; text-transform: capitalize; }
+    .worker-badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: .8em; margin-bottom: 10px; }
+    .badge-ok    { background: #d1e7dd; color: #0a3622; }
+    .badge-stale { background: #f8d7da; color: #58151c; }
+    .worker-detail { display: flex; justify-content: space-between; font-size: .85em; margin: 3px 0; color: #555; }
+  </style>
+</body>
+</html>
