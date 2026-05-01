@@ -1,0 +1,63 @@
+{
+  "title": "StateKeep",
+  "uid": "statekeep-main",
+  "schemaVersion": 38,
+  "version": 1,
+  "refresh": "1m",
+  "time": { "from": "now-3h", "to": "now" },
+  "panels": [
+    {
+      "id": 1, "type": "timeseries", "title": "Active Actor Count",
+      "gridPos": { "x": 0, "y": 0, "w": 12, "h": 8 },
+      "targets": [
+        { "expr": "statekeep_actors_active",    "legendFormat": "Active",    "datasource": "Prometheus" },
+        { "expr": "statekeep_actors_migrating", "legendFormat": "Migrating", "datasource": "Prometheus" },
+        { "expr": "statekeep_actors_archived",  "legendFormat": "Archived",  "datasource": "Prometheus" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" } }
+    },
+    {
+      "id": 2, "type": "timeseries", "title": "Migration Success / Failure Rate",
+      "gridPos": { "x": 12, "y": 0, "w": 12, "h": 8 },
+      "targets": [
+        { "expr": "rate(statekeep_migration_jobs_pending[5m])", "legendFormat": "Pending/s", "datasource": "Prometheus" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "reqps" } }
+    },
+    {
+      "id": 3, "type": "timeseries", "title": "API Latency (ms)",
+      "gridPos": { "x": 0, "y": 8, "w": 12, "h": 8 },
+      "targets": [
+        { "expr": "statekeep_api_latency_p50_ms", "legendFormat": "p50", "datasource": "Prometheus" },
+        { "expr": "statekeep_api_latency_p95_ms", "legendFormat": "p95", "datasource": "Prometheus" },
+        { "expr": "statekeep_api_latency_p99_ms", "legendFormat": "p99", "datasource": "Prometheus" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ms" } }
+    },
+    {
+      "id": 4, "type": "timeseries", "title": "Memory Usage (RSS)",
+      "gridPos": { "x": 12, "y": 8, "w": 12, "h": 8 },
+      "targets": [
+        { "expr": "process_resident_memory_bytes{job='node_exporter'}", "legendFormat": "RSS", "datasource": "Prometheus" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "bytes" } }
+    },
+    {
+      "id": 5, "type": "timeseries", "title": "Engine FFI Call Latency (ms)",
+      "gridPos": { "x": 0, "y": 16, "w": 12, "h": 8 },
+      "targets": [
+        { "expr": "statekeep_ffi_latency_p50_ms", "legendFormat": "p50", "datasource": "Prometheus" },
+        { "expr": "statekeep_ffi_latency_p99_ms", "legendFormat": "p99", "datasource": "Prometheus" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ms" } }
+    },
+    {
+      "id": 6, "type": "timeseries", "title": "SQLite WAL Size",
+      "gridPos": { "x": 12, "y": 16, "w": 12, "h": 8 },
+      "targets": [
+        { "expr": "statekeep_wal_size_bytes", "legendFormat": "WAL bytes", "datasource": "Prometheus" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "bytes" } }
+    }
+  ]
+}

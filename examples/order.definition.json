@@ -1,0 +1,16 @@
+{
+  "id": "order-v1",
+  "definition": {
+    "id": "order",
+    "initial": "pending",
+    "states": {
+      "pending":   { "on": { "PAY": "paid", "CANCEL": "cancelled" } },
+      "paid":      { "on": { "SHIP": "shipped", "REFUND": "refunded" } },
+      "shipped":   { "on": { "DELIVER": "delivered", "RETURN": "returning" } },
+      "returning": { "on": { "RECEIVED": "refunded" } },
+      "delivered": { "type": "final" },
+      "refunded":  { "type": "final" },
+      "cancelled": { "type": "final" }
+    }
+  }
+}

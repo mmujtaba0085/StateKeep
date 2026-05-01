@@ -1,0 +1,41 @@
+{
+  "definitionId": "onboarding-v1",
+  "definition": {
+    "id": "onboarding",
+    "initial": "email_verification",
+    "states": {
+      "email_verification": { "on": { "EMAIL_VERIFIED": "profile_setup", "SKIP": "profile_setup" } },
+      "profile_setup":      { "on": { "PROFILE_COMPLETE": "kyc_check", "BACK": "email_verification" } },
+      "kyc_check":          { "on": { "KYC_PASSED": "active", "KYC_FAILED": "suspended" } },
+      "active":             { "on": { "SUSPEND": "suspended", "CLOSE": "closed" } },
+      "suspended":          { "on": { "REINSTATE": "active", "CLOSE": "closed" } },
+      "closed":             { "type": "final" }
+    }
+  },
+  "scenarios": [
+    {
+      "name": "full onboarding — email → profile → kyc pass → active",
+      "events": ["EMAIL_VERIFIED", "PROFILE_COMPLETE", "KYC_PASSED"],
+      "expectedStates": ["profile_setup", "kyc_check", "active"],
+      "expectDone": false
+    },
+    {
+      "name": "kyc failure → suspension",
+      "events": ["EMAIL_VERIFIED", "PROFILE_COMPLETE", "KYC_FAILED"],
+      "expectedStates": ["profile_setup", "kyc_check", "suspended"],
+      "expectDone": false
+    },
+    {
+      "name": "skip email, complete onboarding",
+      "events": ["SKIP", "PROFILE_COMPLETE", "KYC_PASSED"],
+      "expectedStates": ["profile_setup", "kyc_check", "active"],
+      "expectDone": false
+    },
+    {
+      "name": "account closure",
+      "events": ["EMAIL_VERIFIED", "PROFILE_COMPLETE", "KYC_PASSED", "CLOSE"],
+      "expectedStates": ["profile_setup", "kyc_check", "active", "closed"],
+      "expectDone": true
+    }
+  ]
+}

@@ -1,0 +1,19 @@
+global:
+  scrape_interval:     15s
+  evaluation_interval: 15s
+  external_labels:
+    env: production
+
+scrape_configs:
+  # StateKeep API metrics (Prometheus text format)
+  - job_name: statekeep_api
+    static_configs:
+      - targets: ['host.docker.internal:3000']
+    metrics_path: /v1/metrics
+    scrape_interval: 60s
+
+  # Node Exporter (host system metrics)
+  - job_name: node_exporter
+    static_configs:
+      - targets: ['host.docker.internal:9100']
+    scrape_interval: 30s
