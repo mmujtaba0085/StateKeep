@@ -1,0 +1,108 @@
+{
+  "scenario": "Bank Account Lifecycle",
+  "description": "Complete account lifecycle from creation through closure",
+  "steps": [
+    {
+      "step": 1,
+      "description": "Create new savings account",
+      "endpoint": "POST /api/accounts",
+      "body": {
+        "customerId": "CUST-002",
+        "type": "savings",
+        "currency": "USD"
+      },
+      "expectedResponse": {
+        "status": "pending"
+      }
+    },
+    {
+      "step": 2,
+      "description": "Begin identity verification",
+      "endpoint": "PUT /api/accounts/{accountId}/verify",
+      "body": {
+        "documentId": "DL-987654",
+        "documentType": "DRIVER_LICENSE"
+      },
+      "expectedResponse": {
+        "status": "verifying"
+      }
+    },
+    {
+      "step": 3,
+      "description": "Complete verification and activate",
+      "endpoint": "PUT /api/accounts/{accountId}/activate",
+      "expectedResponse": {
+        "status": "active"
+      }
+    },
+    {
+      "step": 4,
+      "description": "Make initial deposit",
+      "endpoint": "POST /api/transactions",
+      "body": {
+        "sourceAccount": "external",
+        "destinationAccount": "{accountId}",
+        "amount": 10000,
+        "type": "deposit",
+        "description": "Initial deposit"
+      },
+      "expectedResponse": {
+        "status": "initiated"
+      }
+    },
+    {
+      "step": 5,
+      "description": "Account available for transactions",
+      "note": "Account can now send transfers, make withdrawals, etc."
+    },
+    {
+      "step": 6,
+      "description": "Request account closure after extended use",
+      "endpoint": "PUT /api/accounts/{accountId}/request-close",
+      "expectedResponse": {
+        "status": "closureRequested"
+      }
+    },
+    {
+      "step": 7,
+      "description": "Customer withdraws all funds",
+      "endpoint": "POST /api/transactions",
+      "body": {
+        "sourceAccount": "{accountId}",
+        "destinationAccount": "external",
+        "amount": 10000,
+        "type": "withdrawal"
+      }
+    },
+    {
+      "step": 8,
+      "description": "Confirm closure and close account",
+      "endpoint": "PUT /api/accounts/{accountId}/confirm-close",
+      "expectedResponse": {
+        "status": "closed"
+      }
+    }
+  ],
+  "alternativePath": {
+    "description": "Account suspension and reactivation",
+    "steps": [
+      {
+        "scenario": "Suspicious activity detected",
+        "action": "Suspend account",
+        "endpoint": "PUT /api/accounts/{accountId}/suspend",
+        "body": {
+          "reason": "Multiple failed login attempts"
+        }
+      },
+      {
+        "scenario": "After investigation",
+        "action": "Reactivate account",
+        "endpoint": "PUT /api/accounts/{accountId}/reactivate"
+      }
+    ]
+  },
+  "expectedOutcomes": {
+    "finalStatus": "closed",
+    "balance": 0
+  }
+}

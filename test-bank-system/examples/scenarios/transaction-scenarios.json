@@ -1,0 +1,146 @@
+{
+  "scenario": "Multi-Step Transaction Processing",
+  "description": "Various transaction scenarios including transfers, deposits, and error handling",
+  "scenarios": [
+    {
+      "name": "Successful Fund Transfer",
+      "steps": [
+        {
+          "step": 1,
+          "action": "Initiate transfer",
+          "endpoint": "POST /api/transactions",
+          "body": {
+            "sourceAccount": "ACC-001",
+            "destinationAccount": "ACC-002",
+            "amount": 5000,
+            "type": "transfer",
+            "description": "Payment for services"
+          }
+        },
+        {
+          "step": 2,
+          "action": "Validate transaction",
+          "endpoint": "PUT /api/transactions/{transactionId}/validate"
+        },
+        {
+          "step": 3,
+          "action": "Authorize transfer",
+          "endpoint": "PUT /api/transactions/{transactionId}/authorize"
+        },
+        {
+          "step": 4,
+          "action": "Process transaction",
+          "endpoint": "PUT /api/transactions/{transactionId}/process"
+        },
+        {
+          "step": 5,
+          "action": "Settle transaction",
+          "endpoint": "PUT /api/transactions/{transactionId}/settle",
+          "expectedStatus": "settled"
+        }
+      ]
+    },
+    {
+      "name": "Transaction with Retry (Network Timeout)",
+      "steps": [
+        {
+          "step": 1,
+          "action": "Initiate -> Validate -> Authorize -> Process",
+          "expectedStatus": "processing"
+        },
+        {
+          "step": 2,
+          "action": "Network timeout detected",
+          "endpoint": "PUT /api/transactions/{transactionId}/fail",
+          "body": {
+            "errorMessage": "Network timeout"
+          },
+          "alternativeFlow": {
+            "action": "Set to pending for retry",
+            "endpoint": "PUT /api/transactions/{transactionId}/pending"
+          }
+        },
+        {
+          "step": 3,
+          "action": "Retry processing",
+          "endpoint": "PUT /api/transactions/{transactionId}/retry"
+        },
+        {
+          "step": 4,
+          "action": "Settle after successful retry",
+          "endpoint": "PUT /api/transactions/{transactionId}/settle"
+        }
+      ]
+    },
+    {
+      "name": "Failed Transaction (Insufficient Funds)",
+      "steps": [
+        {
+          "step": 1,
+          "action": "Initiate transfer with insufficient balance",
+          "endpoint": "POST /api/transactions",
+          "body": {
+            "sourceAccount": "ACC-003",
+            "destinationAccount": "ACC-004",
+            "amount": 50000,
+            "type": "transfer"
+          }
+        },
+        {
+          "step": 2,
+          "action": "Validate - detects insufficient funds",
+          "endpoint": "PUT /api/transactions/{transactionId}/validate",
+          "expectedStatus": "failed"
+        },
+        {
+          "step": 3,
+          "action": "Notify customer",
+          "note": "Transaction cannot proceed"
+        }
+      ]
+    },
+    {
+      "name": "Deposit to Account",
+      "steps": [
+        {
+          "step": 1,
+          "action": "Initiate external deposit",
+          "endpoint": "POST /api/transactions",
+          "body": {
+            "sourceAccount": "EXTERNAL_BANK",
+            "destinationAccount": "ACC-005",
+            "amount": 15000,
+            "type": "deposit"
+          }
+        },
+        {
+          "step": 2,
+          "action": "Validate -> Authorize -> Process -> Settle",
+          "expectedStatus": "settled"
+        }
+      ]
+    }
+  ],
+  "queryExamples": [
+    {
+      "description": "Get all transactions for an account",
+      "endpoint": "GET /api/transactions/account/{accountId}",
+      "note": "Shows both outgoing and incoming transactions"
+    },
+    {
+      "description": "Get all pending transactions",
+      "endpoint": "GET /api/transactions/status/pending",
+      "note": "Useful for retry operations"
+    },
+    {
+      "description": "Get all settled transactions",
+      "endpoint": "GET /api/transactions/status/settled",
+      "note": "For reconciliation"
+    },
+    {
+      "description": "Get all failed transactions",
+      "endpoint": "GET /api/transactions/status/failed",
+      "note": "For error analysis"
+    }
+  ]
+}

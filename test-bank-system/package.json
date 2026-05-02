@@ -1,0 +1,32 @@
+{
+  "name": "bank-system-test",
+  "version": "1.0.0",
+  "description": "Live testing environment for Bank/Loan Application System - to be integrated with StateKeep",
+  "main": "src/api/server.js",
+  "scripts": {
+    "start": "node src/api/server.js",
+    "dev": "node --watch src/api/server.js",
+    "test": "jest",
+    "test:watch": "jest --watchAll",
+    "test:loan": "jest src/tests/loanApplication.test.js",
+    "test:account": "jest src/tests/account.test.js",
+    "test:transaction": "jest src/tests/transaction.test.js"
+    ,"test:integration": "jest src/tests/statekeep.integration.test.js src/tests/statekeep.runtime.integration.test.js",
+    "test:statekeep": "node scripts/precheck-statekeep.js && jest src/tests/statekeep.integration.test.js src/tests/statekeep.runtime.integration.test.js --runInBand"
+  },
+  "keywords": [
+    "banking",
+    "loan",
+    "statechart",
+    "statekeep"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.18.2",
+    "uuid": "^9.0.0"
+  },
+  "devDependencies": {
+    "jest": "^29.5.0"
+  }
+}

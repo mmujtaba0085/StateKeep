@@ -1,0 +1,71 @@
+{
+  "name": "LoanApplicationWorkflow",
+  "description": "State machine for loan application processing workflow",
+  "initial": "idle",
+  "states": {
+    "idle": {
+      "description": "Initial state - no application in progress",
+      "on": {
+        "SUBMIT_APPLICATION": "submitted"
+      }
+    },
+    "submitted": {
+      "description": "Application received and waiting for review",
+      "on": {
+        "START_REVIEW": "underReview",
+        "CANCEL": "cancelled"
+      }
+    },
+    "underReview": {
+      "description": "Application is being reviewed by loan officer",
+      "on": {
+        "REQUEST_MORE_INFO": "waitingForInfo",
+        "APPROVE": "approved",
+        "REJECT": "rejected"
+      }
+    },
+    "waitingForInfo": {
+      "description": "Waiting for additional documentation from applicant",
+      "on": {
+        "PROVIDE_INFO": "underReview",
+        "CANCEL": "cancelled"
+      }
+    },
+    "approved": {
+      "description": "Loan has been approved, waiting for disbursement",
+      "on": {
+        "DISBURSE": "disbursed",
+        "DECLINE": "rejected"
+      }
+    },
+    "rejected": {
+      "description": "Loan application has been rejected",
+      "on": {
+        "REAPPLY": "submitted"
+      },
+      "type": "final"
+    },
+    "cancelled": {
+      "description": "Application was cancelled",
+      "on": {
+        "REAPPLY": "submitted"
+      },
+      "type": "final"
+    },
+    "disbursed": {
+      "description": "Loan has been disbursed to applicant",
+      "type": "final"
+    }
+  },
+  "context": {
+    "applicantId": null,
+    "applicationId": null,
+    "loanAmount": null,
+    "interestRate": null,
+    "term": null,
+    "status": "idle",
+    "createdAt": null,
+    "updatedAt": null,
+    "notes": []
+  }
+}

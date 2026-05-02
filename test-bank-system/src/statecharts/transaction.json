@@ -1,0 +1,61 @@
+{
+  "name": "TransactionProcessing",
+  "description": "State machine for financial transaction lifecycle",
+  "initial": "initiated",
+  "states": {
+    "initiated": {
+      "description": "Transaction has been initiated",
+      "on": {
+        "VALIDATE": "validating"
+      }
+    },
+    "validating": {
+      "description": "Transaction details are being validated",
+      "on": {
+        "VALIDATION_PASSED": "authorized",
+        "VALIDATION_FAILED": "failed"
+      }
+    },
+    "authorized": {
+      "description": "Transaction has been authorized",
+      "on": {
+        "PROCESS": "processing"
+      }
+    },
+    "processing": {
+      "description": "Transaction is being processed",
+      "on": {
+        "SUCCESS": "settled",
+        "ERROR": "failed",
+        "TIMEOUT": "pending"
+      }
+    },
+    "pending": {
+      "description": "Transaction is pending (awaiting retry or manual intervention)",
+      "on": {
+        "RETRY": "processing",
+        "CANCEL": "failed"
+      }
+    },
+    "settled": {
+      "description": "Transaction has been successfully settled",
+      "type": "final"
+    },
+    "failed": {
+      "description": "Transaction has failed",
+      "type": "final"
+    }
+  },
+  "context": {
+    "transactionId": null,
+    "sourceAccount": null,
+    "destinationAccount": null,
+    "amount": null,
+    "currency": "USD",
+    "type": "transfer",
+    "status": "initiated",
+    "timestamp": null,
+    "reference": null,
+    "errorMessage": null
+  }
+}

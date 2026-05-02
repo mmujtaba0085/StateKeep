@@ -1,0 +1,145 @@
+{
+  "scenario": "Complete Loan Application Workflow",
+  "description": "Full end-to-end loan application from submission to disbursement",
+  "steps": [
+    {
+      "step": 1,
+      "description": "Customer submits loan application",
+      "endpoint": "POST /api/loans/apply",
+      "body": {
+        "applicantId": "CUST-001",
+        "amount": 50000,
+        "interestRate": 6.5,
+        "term": 60
+      },
+      "expectedResponse": {
+        "status": "submitted",
+        "id": "generated-uuid"
+      }
+    },
+    {
+      "step": 2,
+      "description": "Loan officer starts review",
+      "endpoint": "PUT /api/loans/{applicationId}/review",
+      "body": {
+        "reviewerId": "OFFICER-001"
+      },
+      "expectedResponse": {
+        "status": "underReview"
+      }
+    },
+    {
+      "step": 3,
+      "description": "Officer requests additional documents",
+      "endpoint": "PUT /api/loans/{applicationId}/request-info",
+      "body": {
+        "documents": [
+          "Tax Returns - Last 2 Years",
+          "Employment Letter",
+          "Bank Statements",
+          "Identity Proof"
+        ]
+      },
+      "expectedResponse": {
+        "status": "waitingForInfo"
+      }
+    },
+    {
+      "step": 4,
+      "description": "Customer provides requested documents",
+      "endpoint": "PUT /api/loans/{applicationId}/provide-info",
+      "body": {
+        "documents": [
+          "tax-return-2023.pdf",
+          "tax-return-2022.pdf",
+          "employment-letter.pdf",
+          "bank-statement-last3months.pdf",
+          "passport-scan.pdf"
+        ]
+      },
+      "expectedResponse": {
+        "status": "underReview"
+      }
+    },
+    {
+      "step": 5,
+      "description": "Officer approves the loan",
+      "endpoint": "PUT /api/loans/{applicationId}/approve",
+      "body": {
+        "approverId": "OFFICER-001"
+      },
+      "expectedResponse": {
+        "status": "approved",
+        "approvalAmount": 50000
+      }
+    },
+    {
+      "step": 6,
+      "description": "Create bank account for loan recipient",
+      "endpoint": "POST /api/accounts",
+      "body": {
+        "customerId": "CUST-001",
+        "type": "savings",
+        "currency": "USD"
+      },
+      "expectedResponse": {
+        "status": "pending",
+        "id": "generated-account-id"
+      }
+    },
+    {
+      "step": 7,
+      "description": "Verify customer identity for account",
+      "endpoint": "PUT /api/accounts/{accountId}/verify",
+      "body": {
+        "documentId": "PASSPORT-123456",
+        "documentType": "PASSPORT"
+      },
+      "expectedResponse": {
+        "status": "verifying"
+      }
+    },
+    {
+      "step": 8,
+      "description": "Complete account verification",
+      "endpoint": "PUT /api/accounts/{accountId}/activate",
+      "expectedResponse": {
+        "status": "active"
+      }
+    },
+    {
+      "step": 9,
+      "description": "Disburse loan to account",
+      "endpoint": "PUT /api/loans/{applicationId}/disburse",
+      "body": {
+        "accountId": "generated-account-id"
+      },
+      "expectedResponse": {
+        "status": "disbursed",
+        "disbursedTo": "account-id",
+        "amount": 50000
+      }
+    },
+    {
+      "step": 10,
+      "description": "Verify account balance updated",
+      "endpoint": "GET /api/accounts/{accountId}",
+      "expectedResponse": {
+        "status": "active",
+        "balance": 50000
+      },
+      "note": "Balance would be updated by disbursement transaction"
+    }
+  ],
+  "expectedOutcomes": {
+    "loanStatus": "disbursed",
+    "accountStatus": "active",
+    "accountBalance": 50000
+  },
+  "timeline": "Typically takes 3-5 business days in real scenarios",
+  "actors": {
+    "customer": "CUST-001",
+    "loanOfficer": "OFFICER-001",
+    "approver": "OFFICER-001"
+  }
+}

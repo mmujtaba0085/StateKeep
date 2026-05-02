@@ -1,0 +1,65 @@
+{
+  "name": "AccountLifecycle",
+  "description": "State machine for bank account lifecycle management",
+  "initial": "pending",
+  "states": {
+    "pending": {
+      "description": "Account created but not yet activated",
+      "on": {
+        "VERIFY_IDENTITY": "verifying",
+        "CANCEL": "cancelled"
+      }
+    },
+    "verifying": {
+      "description": "Account identity verification in progress",
+      "on": {
+        "VERIFICATION_PASSED": "active",
+        "VERIFICATION_FAILED": "rejected",
+        "REQUEST_MORE_INFO": "pending"
+      }
+    },
+    "active": {
+      "description": "Account is active and can be used for transactions",
+      "on": {
+        "SUSPEND": "suspended",
+        "REQUEST_CLOSE": "closureRequested"
+      }
+    },
+    "suspended": {
+      "description": "Account is temporarily suspended",
+      "on": {
+        "REACTIVATE": "active",
+        "REQUEST_CLOSE": "closureRequested"
+      }
+    },
+    "closureRequested": {
+      "description": "Customer has requested account closure",
+      "on": {
+        "CONFIRM_CLOSURE": "closed",
+        "CANCEL_CLOSURE": "active"
+      }
+    },
+    "closed": {
+      "description": "Account is permanently closed",
+      "type": "final"
+    },
+    "rejected": {
+      "description": "Account was rejected during verification",
+      "type": "final"
+    },
+    "cancelled": {
+      "description": "Account was cancelled before activation",
+      "type": "final"
+    }
+  },
+  "context": {
+    "accountId": null,
+    "customerId": null,
+    "accountType": "savings",
+    "currency": "USD",
+    "balance": 0,
+    "status": "pending",
+    "createdAt": null,
+    "updatedAt": null
+  }
+}
