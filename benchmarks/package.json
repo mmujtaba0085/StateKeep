@@ -1,0 +1,21 @@
+{
+  "name": "statekeep-benchmarks",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Migration routing benchmark suite for StateKeep — compares 5 approaches to actor routing correctness and speed",
+  "scripts": {
+    "benchmark":      "node run-all.js",
+    "demo":           "node run-live.js",
+    "benchmark:100":  "ACTOR_COUNT=100 node run-all.js",
+    "benchmark:10k":  "ACTOR_COUNT=10000 node run-all.js",
+    "approach:apv":   "node run-all.js --only 1",
+    "approach:naive": "node run-all.js --only 2"
+  },
+  "dependencies": {
+    "better-sqlite3": "^9.4.5",
+    "xstate": "^5.14.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
