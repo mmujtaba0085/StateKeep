@@ -109,7 +109,7 @@ await fastify.register(FastifySwagger, {
 
 await fastify.register(FastifySwaggerUI, {
   routePrefix: '/docs',
-  uiConfig:    { docExpansion: 'list', deepLinking: true },
+  uiConfig:    { docExpansion: 'list', deepLinking: true, persistAuthorization: true },
   staticCSP:   true,
 });
 

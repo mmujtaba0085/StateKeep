@@ -1,4 +1,4 @@
-/* global React, Icons, Logo, Api, MOCK_ORG, MOCK_ORGS, MOCK_WORKERS */
+/* global React, Icons, Logo, Api, MOCK_ORGS */
 const { useState, useEffect, useRef, useContext, createContext, useMemo } = React;
 
 // ============ APP CONTEXT ============
@@ -145,11 +145,17 @@ function Sidebar() {
       )
     ),
     React.createElement("div", { className: "sb-bottom" },
-      React.createElement("div", { className: "sb-health" },
-        React.createElement("div", { className: "sb-health-dots" },
-          MOCK_WORKERS.map((w) => React.createElement("div", { key: w.name, className: "sb-health-dot" }))
-        ),
-        React.createElement("span", null, "7 workers online")
+      React.createElement("a", {
+        href: "/docs",
+        target: "_blank",
+        rel: "noopener noreferrer",
+        className: "sb-health",
+        style: { textDecoration: "none", cursor: "pointer" },
+        title: "Open Swagger API docs in a new tab"
+      },
+        React.createElement("span", { className: "dot dot-blue" }),
+        React.createElement("span", { style: { flex: 1 } }, "API Docs"),
+        Icons.ExternalLink({ size: 11, color: "#647080" })
       ),
       React.createElement("div", {
         className: "sb-apikey",

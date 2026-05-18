@@ -1,130 +1,23 @@
 /* global React, Icons, Pill, EmptyState, useApp, Api */
 const { useState: useStateX, useEffect: useEffectX, useMemo: useMemoX } = React;
 
-// ============ Scheduled mock data with full status set ============
-const MOCK_SCHEDULED_EVENTS = [
-  { id: "sch_01", evt: "EXPIRE",           actor: "a4f2b8c1d6e2", machine: "Loan Application v3",  fireAt: "Apr 27, 14:18 UTC", relTime: "in 2d 14h",  status: "pending" },
-  { id: "sch_02", evt: "AUTO_APPROVE",     actor: "a4f2b8c1d6e2", machine: "Loan Application v3",  fireAt: "Apr 25, 06:22 UTC", relTime: "in 6h 12m",  status: "pending" },
-  { id: "sch_03", evt: "EXPIRE",           actor: "c7d9e2f4a18b", machine: "Loan Application v3",  fireAt: "Apr 25, 00:11 UTC", relTime: "fired 4h ago", status: "fired" },
-  { id: "sch_04", evt: "REMINDER",         actor: "e8f2a4b6c910", machine: "Subscription Mgmt v4", fireAt: "Apr 25, 04:18 UTC", relTime: "in 4h 22m",  status: "pending" },
-  { id: "sch_05", evt: "TIMEOUT",          actor: "9c4d8e2a7f31", machine: "Subscription Mgmt v4", fireAt: "Apr 24, 22:08 UTC", relTime: "failed 1h ago", status: "failed" },
-  { id: "sch_06", evt: "RENEW",            actor: "d1c3b7a9f2e4", machine: "Subscription Mgmt v4", fireAt: "Apr 24, 21:42 UTC", relTime: "fired 2h ago", status: "fired" },
-  { id: "sch_07", evt: "EXPIRE",           actor: "f5e8d2c1b083", machine: "User Onboarding v2",   fireAt: "Apr 27, 23:00 UTC", relTime: "in 47h",     status: "pending" },
-  { id: "sch_08", evt: "TIMEOUT",          actor: "7e3a9b1f4c20", machine: "Order Processing v2",  fireAt: "Apr 25, 00:07 UTC", relTime: "in 11m",     status: "pending" },
-  { id: "sch_09", evt: "REMINDER",         actor: "5b2e9d7c10af", machine: "Insurance Claims v1",  fireAt: "Apr 24, 19:55 UTC", relTime: "failed 5h ago", status: "failed" },
-  { id: "sch_10", evt: "RENEW",            actor: "2a8f6e0b94d3", machine: "Subscription Mgmt v4", fireAt: "Apr 24, 18:30 UTC", relTime: "cancelled",  status: "cancelled" }
-];
-
-const STATUS_PILL = {
-  pending:   { kind: "amber", label: "pending" },
-  fired:     { kind: "green", label: "fired" },
-  failed:    { kind: "red",   label: "failed" },
-  cancelled: { kind: "muted", label: "cancelled" }
-};
-
-function StatusTab({ id, label, count, active, onClick }) {
-  return React.createElement("button", {
-    className: "tab" + (active ? " active" : ""),
-    onClick
-  },
-    label,
-    count != null && React.createElement("span", {
-      className: "mono",
-      style: { marginLeft: 6, color: "var(--muted)", fontSize: 10.5 }
-    }, count)
-  );
-}
-
 function PageScheduled() {
-  const { pushToast } = useApp();
-  const [tab, setTab] = useStateX("all");
-  const [cancelledIds, setCancelledIds] = useStateX(new Set());
-
-  const events = MOCK_SCHEDULED_EVENTS.map(e =>
-    cancelledIds.has(e.id) ? { ...e, status: "cancelled", relTime: "cancelled just now" } : e
-  );
-
-  const counts = useMemoX(() => {
-    const c = { all: events.length, pending: 0, fired: 0, failed: 0, cancelled: 0 };
-    events.forEach(e => { c[e.status] = (c[e.status] || 0) + 1; });
-    return c;
-  }, [events]);
-
-  const filtered = tab === "all" ? events : events.filter(e => e.status === tab);
-
-  const onCancel = (id) => {
-    setCancelledIds(prev => new Set(prev).add(id));
-    pushToast({ kind: "info", title: "Scheduled event cancelled", desc: "ID: " + id });
-  };
-
   return React.createElement(React.Fragment, null,
     React.createElement("div", { className: "page-header" },
       React.createElement("div", null,
         React.createElement("h1", { className: "page-title" }, "Scheduled Events"),
-        React.createElement("div", { className: "page-sub" }, "Events queued to fire at a future time. ", counts.pending, " pending across all machines.")
+        React.createElement("div", { className: "page-sub" }, "Events queued to fire at a future time")
       ),
-      React.createElement("div", { style: { display: "flex", gap: 8, alignItems: "center" } },
-        React.createElement("span", { className: "muted", style: { fontSize: 11 } },
-          "Filter ",
-          React.createElement("span", { className: "kbd" }, "/"),
-        ),
-        React.createElement("button", { className: "btn btn-primary" }, Icons.Plus({ size: 12 }), "Schedule event")
-      )
-    ),
-    React.createElement("div", { className: "toolbar" },
-      React.createElement("div", { className: "tab-bar", style: { margin: 0, border: "none" } },
-        React.createElement(StatusTab, { id: "all",       label: "All",       count: counts.all,       active: tab === "all",       onClick: () => setTab("all") }),
-        React.createElement(StatusTab, { id: "pending",   label: "Pending",   count: counts.pending,   active: tab === "pending",   onClick: () => setTab("pending") }),
-        React.createElement(StatusTab, { id: "fired",     label: "Fired",     count: counts.fired,     active: tab === "fired",     onClick: () => setTab("fired") }),
-        React.createElement(StatusTab, { id: "failed",    label: "Failed",    count: counts.failed,    active: tab === "failed",    onClick: () => setTab("failed") }),
-        React.createElement(StatusTab, { id: "cancelled", label: "Cancelled", count: counts.cancelled, active: tab === "cancelled", onClick: () => setTab("cancelled") })
-      ),
-      React.createElement("div", { className: "grow" }),
-      React.createElement("div", { className: "results-count" }, "Showing ", filtered.length, " of ", events.length)
+      React.createElement("button", { className: "btn btn-primary" }, Icons.Plus({ size: 12 }), "Schedule event")
     ),
     React.createElement("div", { style: { padding: "14px 28px 28px" } },
-      filtered.length === 0
-        ? React.createElement("div", { className: "card" },
-            React.createElement(EmptyState, {
-              title: "No scheduled events",
-              desc: "Nothing is queued in this view. Schedule one from an actor, or via the API.",
-              action: React.createElement("button", { className: "btn btn-primary", style: { marginTop: 8 } }, Icons.Plus({ size: 12 }), "Schedule event")
-            })
-          )
-        : React.createElement("div", { className: "card", style: { padding: 0 } },
-            React.createElement("table", { className: "tbl" },
-              React.createElement("thead", null,
-                React.createElement("tr", null,
-                  React.createElement("th", null, "Actor"),
-                  React.createElement("th", null, "Event"),
-                  React.createElement("th", null, "Machine"),
-                  React.createElement("th", null, "Fires at"),
-                  React.createElement("th", null, "Status"),
-                  React.createElement("th", { style: { width: 130, textAlign: "right" } }, "Actions")
-                )
-              ),
-              React.createElement("tbody", null,
-                filtered.map(s => {
-                  const pill = STATUS_PILL[s.status];
-                  return React.createElement("tr", { key: s.id, style: { cursor: "default" } },
-                    React.createElement("td", { className: "mono truncate", style: { maxWidth: 160 }, title: s.actor }, s.actor),
-                    React.createElement("td", null, React.createElement(Pill, { kind: "blue" }, s.evt)),
-                    React.createElement("td", { className: "muted" }, s.machine),
-                    React.createElement("td", null,
-                      React.createElement("div", { className: "mono", style: { fontSize: 11.5 } }, s.fireAt),
-                      React.createElement("div", { className: "mono muted", style: { fontSize: 10.5 } }, s.relTime)
-                    ),
-                    React.createElement("td", null, React.createElement(Pill, { kind: pill.kind }, pill.label)),
-                    React.createElement("td", { style: { textAlign: "right" } },
-                      s.status === "pending"
-                        ? React.createElement("button", { className: "btn btn-sm btn-ghost", onClick: () => onCancel(s.id) }, "Cancel")
-                        : React.createElement("span", { className: "muted", style: { fontSize: 11 } }, "—")
-                    )
-                  );
-                })
-              )
-            )
-          )
+      React.createElement("div", { className: "card" },
+        React.createElement(EmptyState, {
+          title: "No scheduled events",
+          desc: "Schedule an event from an actor's detail drawer, or via POST /v1/actors/:id/event with a delay parameter.",
+          action: React.createElement("button", { className: "btn btn-primary", style: { marginTop: 8 } }, Icons.Plus({ size: 12 }), "Schedule event")
+        })
+      )
     )
   );
 }

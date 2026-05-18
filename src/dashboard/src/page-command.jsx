@@ -1,205 +1,183 @@
-/* global React, Icons, Pill, Sparkline, StateDiagram, useApp,
-   MOCK_MACHINES, STATES_BY_FAMILY, MOCK_FEED_BASE, MOCK_WORKERS */
-const { useState: useState1, useEffect: useEffect1, useRef: useRef1, useMemo: useMemo1 } = React;
+/* global React, Icons, Pill, useApp, Api */
+const { useState: useState1, useEffect: useEffect1, useRef: useRef1 } = React;
 
-function MachineFamilyCard({ m, selected, onClick }) {
+function DefinitionCard({ d, selected, onClick }) {
   return React.createElement("div", {
     className: "mfc" + (selected ? " selected" : ""),
     onClick
   },
     React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "flex-start" } },
       React.createElement("div", null,
-        React.createElement("h3", { className: "mfc-name" }, m.name),
-        React.createElement("div", { className: "mfc-id" }, m.currentVersion)
+        React.createElement("h3", { className: "mfc-name" }, d.machineId || d.id),
+        React.createElement("div", { className: "mfc-id" }, d.id)
       ),
       React.createElement("div", { className: "mono muted", style: { fontSize: 10.5, textAlign: "right" } },
-        m.active.toLocaleString(),
-        React.createElement("div", { style: { fontSize: 9.5 } }, "active")
+        (d._actorCount || 0).toLocaleString(),
+        React.createElement("div", { style: { fontSize: 9.5 } }, "actors")
       )
     ),
     React.createElement("div", { className: "mfc-chips" },
-      React.createElement(Pill, { kind: "green", glow: m.active > 0 }, m.active.toLocaleString(), " active"),
-      m.migrating > 0 && React.createElement(Pill, { kind: "amber" }, m.migrating.toLocaleString(), " migrating"),
-      m.rescue > 0 && React.createElement(Pill, { kind: "red" }, m.rescue.toLocaleString(), " rescue")
-    ),
-    React.createElement("div", { className: "mfc-spark" },
-      React.createElement(Sparkline, { data: m.spark, h: 32 })
+      React.createElement(Pill, { kind: "green", glow: (d._actorCount || 0) > 0 }, (d._actorCount || 0).toLocaleString(), " active"),
+      d.status === "deprecated" && React.createElement(Pill, { kind: "muted" }, "deprecated"),
+      d.parentId && React.createElement(Pill, { kind: "purple" }, "has parent")
     )
   );
 }
 
-function CmdMachines() {
-  const { selectedMachine, setSelectedMachine, setModal, pushToast } = useApp();
-  return React.createElement("div", { style: { display: "flex", flexDirection: "column", height: "100%", minHeight: 0 } },
-    React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10, padding: "0 2px" } },
-      React.createElement("h2", { className: "display", style: { fontSize: 15, margin: 0, fontWeight: 600 } }, "Machines"),
-      React.createElement("button", {
-        className: "btn btn-sm",
-        style: { color: "var(--blue)", borderColor: "var(--blue-bd)", background: "var(--blue-bg)" },
-        onClick: () => setModal({
-          title: "New Machine Family",
-          body: React.createElement("div", null,
-            React.createElement("label", { className: "field-label" }, "Family name"),
-            React.createElement("input", { className: "input", placeholder: "e.g. Refund Processing" }),
-            React.createElement("div", { style: { height: 12 } }),
-            React.createElement("label", { className: "field-label" }, "Initial definition ID"),
-            React.createElement("input", { className: "input mono", placeholder: "refund-v1" })
-          ),
-          footer: React.createElement(React.Fragment, null,
-            React.createElement("button", { className: "btn btn-ghost", onClick: () => setModal(null) }, "Cancel"),
-            React.createElement("button", { className: "btn btn-primary", onClick: () => { setModal(null); pushToast({ kind: "success", title: "Family created" }); } }, "Create family")
-          )
-        })
-      }, Icons.Plus({ size: 12 }), "New")
-    ),
-    React.createElement("div", { className: "machines-list" },
-      MOCK_MACHINES.map(m => React.createElement(MachineFamilyCard, {
-        key: m.id, m,
-        selected: m.id === selectedMachine,
-        onClick: () => setSelectedMachine(m.id)
-      }))
-    )
-  );
-}
+function DefinitionDetail({ def }) {
+  if (!def) {
+    return React.createElement("div", { className: "diagram-wrap", style: { display: "flex", alignItems: "center", justifyContent: "center", color: "var(--muted)", fontSize: 13 } },
+      "Select a definition to inspect"
+    );
+  }
 
-function LiveDiagram() {
-  const { selectedMachine } = useApp();
-  const machine = MOCK_MACHINES.find(m => m.id === selectedMachine) || MOCK_MACHINES[0];
-  const states = STATES_BY_FAMILY[machine.family] || STATES_BY_FAMILY.loan;
-  const versions = machine.versions;
-  const currentIdx = versions.findIndex(v => v.current);
-  const total = machine.active + machine.migrating;
-  const v3pct = (machine.active / total) * 100;
-  const v2pct = 0; // for narrative
-  const migPct = (machine.migrating / total) * 100;
+  const states = def.definitionJson?.states ? Object.keys(def.definitionJson.states) : [];
+  const transitions = def.definitionJson?.transitions || def.definitionJson?.on || {};
+  const deployedAt = def.deployedAt ? new Date(def.deployedAt * 1000).toLocaleString() : "—";
 
   return React.createElement("div", { className: "diagram-wrap" },
     React.createElement("div", { className: "diagram-h" },
       React.createElement("div", null,
-        React.createElement("h3", { className: "diagram-title" },
-          machine.name,
-          React.createElement(Pill, { kind: "purple" }, "v" + (currentIdx + 1))
-        ),
-        React.createElement("div", { className: "muted", style: { fontSize: 11, marginTop: 3, fontFamily: "JetBrains Mono, monospace" } },
-          machine.currentVersion)
+        React.createElement("h3", { className: "diagram-title" }, def.machineId || def.id),
+        React.createElement("div", { className: "muted", style: { fontSize: 11, marginTop: 3, fontFamily: "JetBrains Mono, monospace" } }, def.id)
       ),
-      React.createElement("div", { className: "version-breadcrumb" },
-        versions.map((v, i) => React.createElement(React.Fragment, { key: v.id },
-          React.createElement("span", { className: "v" + (v.current ? " current" : "") }, "v" + (i + 1)),
-          i < versions.length - 1 && React.createElement(Icons.ArrowRight, { size: 11, color: "#3d4a5c" })
-        ))
-      )
+      React.createElement("div", { className: "mono muted", style: { fontSize: 10.5 } }, "deployed: ", deployedAt)
     ),
-    React.createElement("div", { className: "diagram-canvas" },
-      React.createElement(StateDiagram, { data: states })
-    ),
-    React.createElement("div", { className: "diagram-foot" },
-      React.createElement("div", { className: "mono muted", style: { fontSize: 11 } },
-        React.createElement("span", { style: { color: "var(--green)" } }, machine.active.toLocaleString()),
-        " actors on ", machine.currentVersion,
-        machine.migrating > 0 && React.createElement("span", null, " · ",
-          React.createElement("span", { style: { color: "var(--amber)" } }, machine.migrating.toLocaleString()),
-          " migrating now"
-        )
-      ),
-      React.createElement("div", { className: "migration-bar" },
-        React.createElement("div", { className: "migration-bar-seg v-current", style: { width: v3pct + "%" } }),
-        React.createElement("div", { className: "migration-bar-seg v-prev", style: { width: v2pct + "%" } }),
-        machine.migrating > 0 && React.createElement("div", { className: "migration-bar-seg v-mig", style: { width: migPct + "%" } })
+    React.createElement("div", { style: { padding: "16px 20px" } },
+      states.length > 0
+        ? React.createElement("div", null,
+            React.createElement("div", { className: "field-label", style: { marginBottom: 8 } }, "States (", states.length, ")"),
+            React.createElement("div", { style: { display: "flex", flexWrap: "wrap", gap: 6 } },
+              states.map(s => React.createElement("span", {
+                key: s,
+                className: "pill pill-blue mono",
+                style: { fontSize: 11 }
+              }, s))
+            )
+          )
+        : React.createElement("div", { className: "muted", style: { fontSize: 12 } }, "No state data available — deploy a definition to see states."),
+      def.parentId && React.createElement("div", { style: { marginTop: 14, fontSize: 11.5, color: "var(--muted)" } },
+        "Parent definition: ", React.createElement("span", { className: "mono" }, def.parentId)
       )
     )
   );
 }
 
-function ActivityFeed() {
-  const [paused, setPaused] = useState1(false);
-  const [feed, setFeed] = useState1(() =>
-    MOCK_FEED_BASE.slice(0, 10).map((e, i) => ({ ...e, key: i, ageMs: (i + 1) * 2000 }))
-  );
-  const pausedRef = useRef1(paused);
-  pausedRef.current = paused;
+function RecentActors({ apiKey }) {
+  const [actors, setActors] = useState1([]);
+  const [loading, setLoading] = useState1(false);
 
   useEffect1(() => {
-    let cursor = 10;
-    const id = setInterval(() => {
-      if (pausedRef.current) return;
-      setFeed(prev => {
-        const next = MOCK_FEED_BASE[cursor % MOCK_FEED_BASE.length];
-        cursor++;
-        const newItem = { ...next, key: Date.now() + Math.random(), ageMs: 0 };
-        const aged = prev.map(p => ({ ...p, ageMs: p.ageMs + 800 }));
-        return [newItem, ...aged].slice(0, 18);
-      });
-    }, 800);
-    return () => clearInterval(id);
-  }, []);
-
-  const formatAge = (ms) => {
-    const s = Math.floor(ms / 1000);
-    if (s < 60) return s + "s ago";
-    const m = Math.floor(s / 60);
-    return m + "m ago";
-  };
+    if (!apiKey) return;
+    setLoading(true);
+    Api.get("/v1/actors?limit=12")
+      .then(d => setActors((d.actors || []).map(a => Api.mapActor(a))))
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  }, [apiKey]);
 
   return React.createElement("div", { className: "feed-wrap" },
     React.createElement("div", { className: "feed-h" },
       React.createElement("div", { className: "feed-h-l" },
         React.createElement("span", { className: "dot dot-green dot-pulse" }),
-        React.createElement("h3", { className: "display", style: { fontSize: 14, margin: 0, fontWeight: 600 } }, "Live Events")
+        React.createElement("h3", { className: "display", style: { fontSize: 14, margin: 0, fontWeight: 600 } }, "Recent Actors")
       ),
-      React.createElement("div", { className: "mono muted", style: { fontSize: 10.5 } },
-        paused ? "paused" : "streaming")
+      React.createElement("div", { className: "mono muted", style: { fontSize: 10.5 } }, actors.length + " shown")
     ),
-    React.createElement("div", {
-      className: "feed-list",
-      onMouseEnter: () => setPaused(true),
-      onMouseLeave: () => setPaused(false)
-    },
-      feed.map(f => React.createElement("div", { className: "feed-item", key: f.key, title: f.actor },
-        React.createElement(Pill, { kind: f.color }, f.evt),
-        React.createElement("div", { className: "feed-item-target" },
-          React.createElement("span", { className: "muted" }, f.actor),
-          React.createElement("span", { className: "arrow" }, "→"),
-          f.target
-        ),
-        React.createElement("div", { className: "feed-item-time" }, formatAge(f.ageMs))
-      ))
+    React.createElement("div", { className: "feed-list" },
+      !apiKey
+        ? React.createElement("div", { style: { padding: "20px 0", color: "var(--muted)", fontSize: 12, textAlign: "center" } }, "Set API key to load")
+        : loading
+        ? React.createElement("div", { style: { padding: "20px 0", color: "var(--muted)", fontSize: 12, textAlign: "center" } }, "Loading…")
+        : actors.length === 0
+        ? React.createElement("div", { style: { padding: "20px 0", color: "var(--muted)", fontSize: 12, textAlign: "center" } }, "No actors yet — spawn one via the API")
+        : actors.map(a => React.createElement("div", { className: "feed-item", key: a.id },
+            React.createElement(Pill, { kind: a.status === "needs_rescue" ? "red" : a.status === "migrating" ? "amber" : "green" }, a.status),
+            React.createElement("div", { className: "feed-item-target" },
+              React.createElement("span", { className: "muted mono", style: { fontSize: 10.5 } }, a.id.slice(0, 10)),
+              React.createElement("span", { className: "arrow" }, "→"),
+              React.createElement("span", { className: "mono" }, a.state)
+            ),
+            React.createElement("div", { className: "feed-item-time" }, a.lastTime)
+          ))
     )
   );
 }
 
-function WorkerBar() {
-  const [staleIdx, setStaleIdx] = useState1(-1);
+function HealthBar({ apiKey }) {
+  const [health, setHealth] = useState1(null);
+
   useEffect1(() => {
-    const t1 = setTimeout(() => setStaleIdx(4), 5000); // snapshot-worker stale
-    const t2 = setTimeout(() => setStaleIdx(-1), 15000); // auto-restart
-    return () => { clearTimeout(t1); clearTimeout(t2); };
+    const check = () => Api.get("/v1/health").then(setHealth).catch(() => setHealth(null));
+    check();
+    const t = setInterval(check, 30000);
+    return () => clearInterval(t);
   }, []);
 
-  const anyStale = staleIdx >= 0;
-  const cls = "workers-bar" + (anyStale ? " amber" : "");
-  return React.createElement("div", { className: cls },
-    MOCK_WORKERS.map((w, i) => {
-      const stale = i === staleIdx;
-      const beat = stale ? 142 : w.lastBeat;
-      return React.createElement("div", { className: "worker-cell", key: w.name },
-        React.createElement("div", { className: "worker-cell-name" },
-          React.createElement("span", { className: "dot " + (stale ? "dot-amber" : "dot-green") + (!stale ? " dot-pulse" : "") }),
-          w.name
-        ),
-        React.createElement("div", { className: "worker-cell-beat" }, "beat: " + beat + "s ago"),
-        React.createElement("div", { className: "worker-cell-pid" }, "#" + w.pid)
-      );
-    })
+  if (!health) return null;
+  const ok = health.status === "ok";
+
+  return React.createElement("div", { className: "workers-bar" + (ok ? "" : " amber") },
+    React.createElement("div", { className: "worker-cell" },
+      React.createElement("div", { className: "worker-cell-name" },
+        React.createElement("span", { className: "dot dot-" + (ok ? "green" : "red") + (ok ? " dot-pulse" : "") }),
+        "API Server"
+      ),
+      React.createElement("div", { className: "worker-cell-beat" }, health.status)
+    ),
+    React.createElement("div", { className: "worker-cell" },
+      React.createElement("div", { className: "worker-cell-name" },
+        React.createElement("span", { className: "dot dot-" + (health.db === "ok" ? "green" : "red") }),
+        "Database"
+      ),
+      React.createElement("div", { className: "worker-cell-beat" }, health.db || "—")
+    ),
+    React.createElement("div", { className: "worker-cell" },
+      React.createElement("div", { className: "worker-cell-name" },
+        React.createElement("span", { className: "dot dot-" + (health.engine === "real" ? "green" : "amber") }),
+        "APV Engine"
+      ),
+      React.createElement("div", { className: "worker-cell-beat" }, health.engine || "—")
+    ),
+    React.createElement("div", { className: "worker-cell" },
+      React.createElement("div", { className: "worker-cell-name" },
+        React.createElement("span", { className: "dot dot-green" }),
+        "Uptime"
+      ),
+      React.createElement("div", { className: "worker-cell-beat" }, health.uptime ? Math.floor(health.uptime / 60) + "m" : "—")
+    )
   );
 }
 
 function PageCommand() {
+  const { apiKey } = useApp();
+  const [defs, setDefs] = useState1([]);
+  const [loading, setLoading] = useState1(false);
+  const [selectedDef, setSelectedDef] = useState1(null);
+
+  useEffect1(() => {
+    if (!apiKey) return;
+    setLoading(true);
+    Promise.all([
+      Api.get("/v1/definitions?limit=50"),
+      Api.get("/v1/actors?limit=1").catch(() => ({ count: 0 })),
+    ])
+      .then(([defData, actorData]) => {
+        const definitions = defData.definitions || [];
+        setDefs(definitions);
+        if (definitions.length > 0) setSelectedDef(definitions[0]);
+      })
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  }, [apiKey]);
+
+  const selected = selectedDef;
+
   return React.createElement(React.Fragment, null,
     React.createElement("div", { className: "page-header" },
       React.createElement("div", null,
         React.createElement("h1", { className: "page-title" }, "Command Centre"),
-        React.createElement("div", { className: "page-sub" }, "Live system state across all machine families")
+        React.createElement("div", { className: "page-sub" }, "Live system state across all machine definitions")
       ),
       React.createElement("div", { className: "mono muted", style: { fontSize: 11 } },
         React.createElement("span", { className: "dot dot-green dot-pulse", style: { marginRight: 6 } }),
@@ -207,11 +185,34 @@ function PageCommand() {
       )
     ),
     React.createElement("div", { className: "cmd-grid" },
-      React.createElement(CmdMachines, null),
-      React.createElement(LiveDiagram, null),
-      React.createElement(ActivityFeed, null)
+      // Left — definitions list
+      React.createElement("div", { style: { display: "flex", flexDirection: "column", height: "100%", minHeight: 0 } },
+        React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10, padding: "0 2px" } },
+          React.createElement("h2", { className: "display", style: { fontSize: 15, margin: 0, fontWeight: 600 } }, "Definitions"),
+          React.createElement("a", { href: "#deploy", className: "btn btn-sm", style: { color: "var(--blue)", borderColor: "var(--blue-bd)", background: "var(--blue-bg)" } },
+            Icons.Plus({ size: 12 }), "Deploy"
+          )
+        ),
+        React.createElement("div", { className: "machines-list" },
+          !apiKey
+            ? React.createElement("div", { style: { color: "var(--muted)", fontSize: 12, padding: "20px 0", textAlign: "center" } }, "Set API key to load definitions")
+            : loading
+            ? React.createElement("div", { style: { color: "var(--muted)", fontSize: 12, padding: "20px 0", textAlign: "center" } }, "Loading…")
+            : defs.length === 0
+            ? React.createElement("div", { style: { color: "var(--muted)", fontSize: 12, padding: "20px 0", textAlign: "center" } }, "No definitions deployed yet")
+            : defs.map(d => React.createElement(DefinitionCard, {
+                key: d.id, d,
+                selected: selected && selected.id === d.id,
+                onClick: () => setSelectedDef(d)
+              }))
+        )
+      ),
+      // Centre — definition detail
+      React.createElement(DefinitionDetail, { def: selected }),
+      // Right — recent actors
+      React.createElement(RecentActors, { apiKey })
     ),
-    React.createElement(WorkerBar, null)
+    React.createElement(HealthBar, { apiKey })
   );
 }
 
