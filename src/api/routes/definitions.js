@@ -49,11 +49,11 @@ import {
 } from '../../registry/actorRepo.js';
 import { enqueueJobs, findDecisionsByDeployment } from '../../registry/jobRepo.js';
 import { getEngine }                  from '../../ffi/engine.js';
-import { invalidateMigrationCacheForDefinition, evictFromHotRegistry } from '../../runtime/actorManager.js';
-import { computeHash, computeHistoryHash, fingerprintToBigInt } from '../../ffi/hashUtils.js';
+import { invalidateMigrationCacheForDefinition, evictFromHotRegistry, invalidateDefinitionCache } from '../../runtime/actorManager.js';
+import { computeHash, computeHistoryHash, fingerprintToBigInt, computeRegionHashes, regionFingerprintsToArray } from '../../ffi/hashUtils.js';
 import { analyseDefinition }          from '../lib/staticAnalysis.js';
 import { issueToken, consumeToken }   from '../../registry/confirmTokenStore.js';
-import { insertChangepoint }          from '../../registry/changepointRepo.js';
+import { insertChangepoint, insertParChangepoint } from '../../registry/changepointRepo.js';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -79,6 +79,12 @@ function evaluateMigrationCandidates(machineId, orgId, eng, currentTick) {
     try {
       const actorFp = fingerprintToBigInt(actor.historyFingerprint);
       targetDefId   = eng.computeAccessible(actorFp, BigInt(actor.logicalStartTick), currentTick);
+      if (!targetDefId && actor.regionFingerprints) {
+        const regionArr = regionFingerprintsToArray(actor.regionFingerprints);
+        if (regionArr && regionArr.length > 0) {
+          targetDefId = eng.computeAccessibleParallel(regionArr, BigInt(actor.logicalStartTick), currentTick);
+        }
+      }
     } catch {}
 
     if (targetDefId && targetDefId !== actor.definitionId) {
@@ -133,11 +139,18 @@ export async function definitionRoutes(fastify) {
                          'Keys are old state names, values are new state names.',
             additionalProperties: { type: 'string' },
           },
+          historyRegions: {
+            type:        'object',
+            description: 'Parallel region fingerprint selectors. Keys are region names, values are ' +
+                         'ordered event-type arrays. All regions must match (AND composition). ' +
+                         'Targets actors on parallel XState machines. Mutually exclusive with historyPath.',
+            additionalProperties: { type: 'array', items: { type: 'string' } },
+          },
         },
       },
     },
   }, async (request, reply) => {
-    const { id, parentId, definition, refinement = 1, confirmToken, historyPath, stateMapping } = request.body;
+    const { id, parentId, definition, refinement = 1, confirmToken, historyPath, stateMapping, historyRegions } = request.body;
     const isDryRun = request.query?.dryRun === 'true';
     const eng = getEngine();
 
@@ -335,16 +348,34 @@ export async function definitionRoutes(fastify) {
     }
 
     try {
-      eng.registerChangepoint(tStar, prefixHash, BigInt(refinement), id);
-      insertChangepoint({ orgId, tStar: Number(tStar), prefixHash: prefixHash.toString(), refinement, childDefId: id });
+      const hasRegions = historyRegions && typeof historyRegions === 'object' &&
+                         Object.keys(historyRegions).length > 0;
+      if (hasRegions) {
+        // Parallel changepoint: register per-region hashes with the engine.
+        // We do NOT insert into the scalar changepoints table — prefixHash would
+        // be 0n (wildcard), routing every actor to this definition on restart.
+        const regionHexMap   = computeRegionHashes(historyRegions);
+        const regionArr      = regionFingerprintsToArray(regionHexMap);
+        const regionHexArr   = Object.values(regionHexMap);
+        if (regionArr && regionArr.length > 0) {
+          eng.registerChangepointParallel(tStar, regionArr, BigInt(refinement), id);
+          insertParChangepoint({ orgId, tStar: Number(tStar), regionHashesHexArr: regionHexArr, refinement, childDefId: id });
+        }
+      } else {
+        eng.registerChangepoint(tStar, prefixHash, BigInt(refinement), id);
+        insertChangepoint({ orgId, tStar: Number(tStar), prefixHash: prefixHash.toString(), refinement, childDefId: id });
+      }
     } catch (e) {
       request.log.warn(`[definitions] registerChangepoint failed: ${e.message}`);
     }
 
-    // Invalidate inline migration cache for any actors still on the parent definition
+    // Invalidate inline migration + definition cache for the parent definition
     if (parentId) {
       try { invalidateMigrationCacheForDefinition(parentId); } catch {}
+      try { invalidateDefinitionCache(parentId); } catch {}
     }
+    // Invalidate cache for the newly deployed definition (fresh writes must be readable immediately)
+    try { invalidateDefinitionCache(id); } catch {}
 
     // ── Step 4: Tag stranded actors needs_rescue (only reached after confirm) ─
     let strandedTagged = 0;
@@ -377,21 +408,24 @@ export async function definitionRoutes(fastify) {
         for (const actor of actors) {
           let targetDefId = null;
           try {
-            const actorPrefixHash  = fingerprintToBigInt(actor.historyFingerprint);
-            const actorCurrentDef  = findDefinitionById(actor.definitionId);
+            const actorPrefixHash   = fingerprintToBigInt(actor.historyFingerprint);
+            const actorCurrentDef   = findDefinitionById(actor.definitionId);
             const currentDeployedAt = actorCurrentDef?.deployedAt ?? 0;
             const logicalStartTick  = actor.logicalStartTick ?? 0;
 
-            // For actors that have already migrated at least once, set logicalTime to
-            // one tick past their current definition's registration tick.  This makes
-            // computeAccessible search strictly after the changepoint the actor already
-            // occupies, enabling chained deployments (e.g. an actor on v2 can be
-            // routed to v4 when both v2 and v4 share the same historyPath prefix hash).
             const logicalTime = currentDeployedAt > logicalStartTick
               ? BigInt(currentDeployedAt) + 1n
               : BigInt(logicalStartTick);
 
             targetDefId = eng.computeAccessible(actorPrefixHash, logicalTime, currentTick);
+
+            // Parallel path: check per-region fingerprints when scalar found nothing
+            if (!targetDefId && actor.regionFingerprints) {
+              const regionArr = regionFingerprintsToArray(actor.regionFingerprints);
+              if (regionArr && regionArr.length > 0) {
+                targetDefId = eng.computeAccessibleParallel(regionArr, logicalTime, currentTick);
+              }
+            }
           } catch (e) {
             request.log.warn(`[definitions] computeAccessible failed for ${actor.id}: ${e.message}`);
           }

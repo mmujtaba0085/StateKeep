@@ -123,6 +123,17 @@ export class WorkerPool {
       try { slot.worker.terminate(); } catch {}
     }
   }
+
+  restartAll() {
+    for (let i = 0; i < this.workers.length; i++) {
+      const slot = this.workers[i];
+      this._rejectAll(slot, new Error('Worker restarting'));
+      try { slot.worker.terminate(); } catch {}
+    }
+    this.workers = [];
+    this._init();
+    console.log(`[workerPool] All ${this.workerCount} actor workers restarted`);
+  }
 }
 
 // ── Singleton ─────────────────────────────────────────────────────────────────

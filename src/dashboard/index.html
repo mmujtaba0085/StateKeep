@@ -1,84 +1,41 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>StateKeep Dashboard</title>
-  <link rel="stylesheet" href="/dashboard/assets/style.css">
-  <script src="/dashboard/assets/app.js"></script>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=1440, initial-scale=1" />
+<title>StateKeep — Mission Control</title>
+
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@500;600;700&family=DM+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+
+<link rel="stylesheet" href="styles.css" />
 </head>
 <body>
-  <header>
-    <div class="header-inner">
-      <h1 class="logo">⚙ StateKeep</h1>
-      <nav>
-        <a href="/dashboard/actors.html">Actors</a>
-        <a href="/dashboard/definitions.html">Definitions</a>
-        <a href="/dashboard/scheduled.html">Scheduled</a>
-        <a href="/dashboard/workers.html">Workers</a>
-        <a href="/dashboard/scenarios.html">Scenarios</a>
-        <a href="/dashboard/metrics.html">Metrics</a>
-      </nav>
-      <button onclick="logout()" class="btn-sm">Sign out</button>
-    </div>
-  </header>
+<div id="root"></div>
 
-  <main>
-    <section class="hero">
-      <h2>StateKeep Platform</h2>
-      <p>Hosted XState v5 state machines with zero-downtime version migration.</p>
+<!-- React + Babel (pinned) -->
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
 
-      <div class="stats-grid" id="stats-grid">
-        <div class="stat-card">
-          <div class="stat-value" id="stat-active">—</div>
-          <div class="stat-label">Active Actors</div>
-        </div>
-        <div class="stat-card">
-          <div class="stat-value" id="stat-migrating">—</div>
-          <div class="stat-label">Migrating</div>
-        </div>
-        <div class="stat-card">
-          <div class="stat-value" id="stat-definitions">—</div>
-          <div class="stat-label">Definitions</div>
-        </div>
-        <div class="stat-card">
-          <div class="stat-value" id="stat-engine">—</div>
-          <div class="stat-label">Engine Mode</div>
-        </div>
-      </div>
-    </section>
-  </main>
+<!-- Recharts UMD (with prop-types dependency) -->
+<script src="https://unpkg.com/prop-types@15.8.1/prop-types.min.js"></script>
+<script src="https://unpkg.com/recharts@2.12.7/umd/Recharts.js"></script>
 
-  <script>
-    function logout() {
-      sessionStorage.removeItem('sk_apikey');
-      window.location.href = '/dashboard/login.html';
-    }
-
-    async function loadStats() {
-      try {
-        const hres = await apiFetch('/v1/health');
-        if (!hres) return;
-        const h = await hres.json();
-        document.getElementById('stat-engine').textContent = h.engine;
-
-        const mres = await apiFetch('/v1/metrics');
-        if (!mres) return;
-        const rawText = await mres.text();
-        const m = {};
-        for (const line of rawText.split('\n')) {
-          if (line.startsWith('#') || !line.trim()) continue;
-          const parts = line.trim().split(/\s+/);
-          if (parts.length >= 2) m[parts[0]] = parseFloat(parts[1]);
-        }
-        document.getElementById('stat-active').textContent      = m['statekeep_actors_active']     ?? '—';
-        document.getElementById('stat-migrating').textContent   = m['statekeep_actors_migrating']  ?? '—';
-        document.getElementById('stat-definitions').textContent = m['statekeep_definitions_total'] ?? '—';
-      } catch {}
-    }
-
-    loadStats();
-    setInterval(loadStats, 30_000);
-  </script>
+<!-- App modules -->
+<script type="text/babel" src="src/icons.jsx"></script>
+<script type="text/babel" src="src/mock-data.jsx"></script>
+<script type="text/babel" src="src/components.jsx"></script>
+<script type="text/babel" src="src/page-command.jsx"></script>
+<script type="text/babel" src="src/page-actors.jsx"></script>
+<script type="text/babel" src="src/page-migration.jsx"></script>
+<script type="text/babel" src="src/page-machines.jsx"></script>
+<script type="text/babel" src="src/page-deploy.jsx"></script>
+<script type="text/babel" src="src/page-workers.jsx"></script>
+<script type="text/babel" src="src/page-metrics.jsx"></script>
+<script type="text/babel" src="src/page-settings.jsx"></script>
+<script type="text/babel" src="src/page-misc.jsx"></script>
+<script type="text/babel" src="src/app.jsx"></script>
 </body>
 </html>

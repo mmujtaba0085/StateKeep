@@ -101,6 +101,97 @@ export async function webhookRoutes(fastify) {
     });
   });
 
+  // ── GET /v1/webhooks/:id ──────────────────────────────────────────────────
+  fastify.get('/v1/webhooks/:id', {
+    schema: {
+      params: {
+        type: 'object',
+        properties: { id: { type: 'string' } },
+        required: ['id'],
+      },
+    },
+  }, async (request, reply) => {
+    const row = getDb().prepare(`
+      SELECT id, url, events, active, created_at, last_fired_at, failure_count
+      FROM webhooks WHERE id = ? AND org_id = ?
+    `).get(request.params.id, request.orgId);
+
+    if (!row) return reply.code(404).send({ error: `Webhook ${request.params.id} not found` });
+
+    return reply.send({
+      id:           row.id,
+      url:          row.url,
+      events:       JSON.parse(row.events),
+      active:       row.active === 1,
+      createdAt:    row.created_at,
+      lastFiredAt:  row.last_fired_at,
+      failureCount: row.failure_count,
+    });
+  });
+
+  // ── PATCH /v1/webhooks/:id ─────────────────────────────────────────────────
+  fastify.patch('/v1/webhooks/:id', {
+    schema: {
+      params: {
+        type: 'object',
+        properties: { id: { type: 'string' } },
+        required: ['id'],
+      },
+      body: {
+        type: 'object',
+        properties: {
+          url:    { type: 'string', minLength: 1 },
+          events: { type: 'array', items: { type: 'string' }, minItems: 1 },
+          active: { type: 'boolean' },
+        },
+      },
+    },
+  }, async (request, reply) => {
+    const { id } = request.params;
+    const db = getDb();
+
+    const existing = db.prepare(`SELECT id FROM webhooks WHERE id = ? AND org_id = ?`).get(id, request.orgId);
+    if (!existing) return reply.code(404).send({ error: `Webhook ${id} not found` });
+
+    const { url, events, active } = request.body ?? {};
+
+    if (url !== undefined && !url.startsWith('https://') && !isTestLocalhost(url)) {
+      return reply.code(400).send({ error: 'Webhook URL must use HTTPS' });
+    }
+    if (events !== undefined) {
+      const unknown = events.filter(e => !KNOWN_EVENT_TYPES.has(e));
+      if (unknown.length > 0) {
+        return reply.code(400).send({ error: `Unknown event types: ${unknown.join(', ')}`, validTypes: [...KNOWN_EVENT_TYPES] });
+      }
+    }
+
+    const fields = [];
+    const values = [];
+    if (url    !== undefined) { fields.push('url = ?');    values.push(url); }
+    if (events !== undefined) { fields.push('events = ?'); values.push(JSON.stringify(events)); }
+    if (active !== undefined) { fields.push('active = ?'); values.push(active ? 1 : 0); }
+
+    if (fields.length === 0) return reply.code(400).send({ error: 'No fields to update' });
+
+    values.push(id);
+    db.prepare(`UPDATE webhooks SET ${fields.join(', ')} WHERE id = ?`).run(...values);
+
+    const updated = db.prepare(`
+      SELECT id, url, events, active, created_at, last_fired_at, failure_count
+      FROM webhooks WHERE id = ?
+    `).get(id);
+
+    return reply.send({
+      id:           updated.id,
+      url:          updated.url,
+      events:       JSON.parse(updated.events),
+      active:       updated.active === 1,
+      createdAt:    updated.created_at,
+      lastFiredAt:  updated.last_fired_at,
+      failureCount: updated.failure_count,
+    });
+  });
+
   // ── DELETE /v1/webhooks/:id ────────────────────────────────────────────────
   fastify.delete('/v1/webhooks/:id', {
     schema: {

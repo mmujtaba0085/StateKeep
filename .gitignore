@@ -20,3 +20,8 @@ statekeep@1.0.0
 *.sh.bak
 playwright-report/
 .claude/
+src/temp/
+src/dashboard-backup/
+ui/screenshots/
+ui/screenshots-new/
+test/e2e/reports/

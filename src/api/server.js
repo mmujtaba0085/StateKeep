@@ -13,6 +13,8 @@ import Fastify from 'fastify';
 import FastifyWebSocket from '@fastify/websocket';
 import FastifyRateLimit from '@fastify/rate-limit';
 import FastifyStatic from '@fastify/static';
+import FastifySwagger from '@fastify/swagger';
+import FastifySwaggerUI from '@fastify/swagger-ui';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { mkdirSync } from 'fs';
@@ -34,6 +36,7 @@ import { scheduledRoutes }  from './routes/scheduled.js';
 import { scenarioRoutes } from './routes/scenarios.js';
 import { archiveRoutes } from './routes/archives.js';
 import { webhookRoutes } from './routes/webhooks.js';
+import { adminRoutes } from './routes/admin.js';
 import { websocketRoutes } from './websocket.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -66,6 +69,50 @@ const fastify = Fastify({
 });
 
 // ── Plugins ───────────────────────────────────────────────────────────────────
+
+await fastify.register(FastifySwagger, {
+  openapi: {
+    info: {
+      title:       'StateKeep API',
+      description: 'Actor lifecycle management with Anchor-Point Versioning (APV) for zero-downtime statechart migrations.',
+      version:     '1.0.0',
+      contact:     { name: 'StateKeep', url: 'https://statekeep.io' },
+      license:     { name: 'Proprietary' },
+    },
+    components: {
+      securitySchemes: {
+        apiKey: {
+          type: 'apiKey',
+          in:   'header',
+          name: 'x-api-key',
+          description: 'API key issued via POST /v1/keys',
+        },
+        adminKey: {
+          type: 'apiKey',
+          in:   'header',
+          name: 'x-admin-key',
+          description: 'Admin key from STATEKEEP_ADMIN_KEY env var',
+        },
+      },
+    },
+    security: [{ apiKey: [] }],
+    tags: [
+      { name: 'actors',      description: 'Actor lifecycle — spawn, events, state, terminate' },
+      { name: 'definitions', description: 'Machine definition deployment and migration' },
+      { name: 'webhooks',    description: 'Outbound webhook subscriptions' },
+      { name: 'keys',        description: 'API key management' },
+      { name: 'admin',       description: 'Admin-only operations (require X-Admin-Key)' },
+      { name: 'health',      description: 'Health and metrics' },
+    ],
+  },
+});
+
+await fastify.register(FastifySwaggerUI, {
+  routePrefix: '/docs',
+  uiConfig:    { docExpansion: 'list', deepLinking: true },
+  staticCSP:   true,
+});
+
 await fastify.register(FastifyWebSocket);
 
 await fastify.register(FastifyRateLimit, {
@@ -123,7 +170,13 @@ await fastify.register(scheduledRoutes);
 await fastify.register(scenarioRoutes);
 await fastify.register(archiveRoutes);
 await fastify.register(webhookRoutes);
+await fastify.register(adminRoutes);
 await fastify.register(websocketRoutes);
+
+// ── OpenAPI JSON alias (/openapi.json → /docs/json) ──────────────────────────
+fastify.get('/openapi.json', { schema: { hide: true } }, async (_req, reply) => {
+  return reply.send(fastify.swagger());
+});
 
 // ── Graceful shutdown ─────────────────────────────────────────────────────────
 async function shutdown(signal) {

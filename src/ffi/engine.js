@@ -62,6 +62,13 @@ async function tryLoad(libPath) {
     const _fnvUpdate = lib.func('apv_fnv1a_update', 'uint64', ['uint64', 'uint8 *', 'size_t']);
     const _fnvFinal  = lib.func('apv_fnv1a_final',  'uint64', ['uint64']);
 
+    const _registerParallel = lib.func('apv_register_changepoint_parallel', 'int', [
+      RegPtr, 'uint64', 'uint8 *', 'int', 'uint64', 'str',
+    ]);
+    const _computeParallel  = lib.func('apv_compute_accessible_parallel', 'int', [
+      RegPtr, 'uint8 *', 'int', 'uint64', 'uint64', 'uint8 *', 'size_t',
+    ]);
+
     // ── Create global registry ────────────────────────────────────────────
     const reg = _create();
     if (!reg) {
@@ -122,10 +129,38 @@ async function tryLoad(libPath) {
         return BigInt(_fnvFinal(BigInt(hash)));
       },
 
+      registerChangepointParallel(tStar, regionHashBigInts, refinement, childDefId) {
+        const buf = regionHashesToBuffer(regionHashBigInts);
+        return _registerParallel(
+          reg, BigInt(tStar), buf, regionHashBigInts.length, BigInt(refinement), childDefId
+        );
+      },
+
+      computeAccessibleParallel(regionHashBigInts, actorLogicalTime, currentTime) {
+        const inBuf  = regionHashesToBuffer(regionHashBigInts);
+        const outBuf = Buffer.alloc(OUTPUT_BUFFER_SIZE, 0);
+        const rc = _computeParallel(
+          reg, inBuf, regionHashBigInts.length,
+          BigInt(actorLogicalTime), BigInt(currentTime),
+          outBuf, OUTPUT_BUFFER_SIZE
+        );
+        if (rc !== 1) return null;
+        const targetId = outBuf.toString('utf8').replace(/\0/g, '').trim();
+        return targetId.length > 0 ? targetId : null;
+      },
+
       destroy() {
         try { _destroy(reg); } catch {}
       },
     };
+
+    function regionHashesToBuffer(regionHashBigInts) {
+      const buf = Buffer.alloc(regionHashBigInts.length * 8, 0);
+      for (let i = 0; i < regionHashBigInts.length; i++) {
+        buf.writeBigUInt64LE(BigInt(regionHashBigInts[i]), i * 8);
+      }
+      return buf;
+    }
   } catch (err) {
     console.error(`[ffi/engine] Failed to load ${libPath}: ${err.message}`);
     return null;

@@ -9,7 +9,9 @@
 
 import { test, expect } from '@playwright/test';
 
-const BASE = process.env.STATEKEEP_URL ?? `http://localhost:${process.env.PORT ?? '3001'}`;
+const BASE       = process.env.STATEKEEP_URL ?? `http://localhost:${process.env.PORT ?? '3001'}`;
+const ADMIN_KEY  = process.env.STATEKEEP_ADMIN_KEY ?? 'test-admin-key';
+const SENTINEL   = process.env.STATEKEEP_API_KEY   ?? '__test_key_do_not_use_in_production__';
 
 // ── 1: /v1/health/workers returns correct shape ───────────────────────────────
 
@@ -47,4 +49,67 @@ test('worker_heartbeats table exists and the endpoint does not 500', async () =>
   expect(res.status).not.toBe(500);
   expect(body).toHaveProperty('workers');
   expect(body).toHaveProperty('staleThresholdMs');
+});
+
+// ── OpenAPI ───────────────────────────────────────────────────────────────────
+
+test('GET /openapi.json returns a valid OpenAPI document', async () => {
+  const res = await fetch(`${BASE}/openapi.json`, {
+    headers: { 'x-api-key': SENTINEL },
+  });
+  expect(res.status).toBe(200);
+  const body = await res.json();
+  expect(body.openapi).toMatch(/^3\./);
+  expect(body.info).toBeDefined();
+  expect(body.paths).toBeDefined();
+});
+
+test('GET /docs serves the Swagger UI HTML', async () => {
+  const res = await fetch(`${BASE}/docs`, {
+    headers: { 'x-api-key': SENTINEL },
+  });
+  expect(res.status).toBe(200);
+  const text = await res.text();
+  expect(text).toContain('<!DOCTYPE html');
+});
+
+// ── Admin: worker restart ─────────────────────────────────────────────────────
+
+test('POST /v1/admin/workers/actor/restart requires admin key', async () => {
+  const res = await fetch(`${BASE}/v1/admin/workers/actor/restart`, {
+    method:  'POST',
+    headers: { 'x-api-key': SENTINEL },
+  });
+  expect(res.status).toBe(403);
+});
+
+test('POST /v1/admin/workers/actor/restart succeeds with admin key', async () => {
+  const res = await fetch(`${BASE}/v1/admin/workers/actor/restart`, {
+    method:  'POST',
+    headers: { 'x-api-key': SENTINEL, 'x-admin-key': ADMIN_KEY },
+  });
+  expect(res.status).toBe(200);
+  const body = await res.json();
+  expect(body.restarted).toBe(true);
+  expect(body.type).toBe('actor');
+  expect(typeof body.workers).toBe('number');
+});
+
+test('POST /v1/admin/workers/migrate/restart returns guidance (not a direct restart)', async () => {
+  const res = await fetch(`${BASE}/v1/admin/workers/migrate/restart`, {
+    method:  'POST',
+    headers: { 'x-api-key': SENTINEL, 'x-admin-key': ADMIN_KEY },
+  });
+  expect(res.status).toBe(200);
+  const body = await res.json();
+  expect(body.restarted).toBe(false);
+  expect(body.note).toMatch(/systemctl/);
+});
+
+test('POST /v1/admin/workers/:type/restart returns 400 for invalid type', async () => {
+  const res = await fetch(`${BASE}/v1/admin/workers/bogus/restart`, {
+    method:  'POST',
+    headers: { 'x-api-key': SENTINEL, 'x-admin-key': ADMIN_KEY },
+  });
+  expect(res.status).toBe(400);
 });

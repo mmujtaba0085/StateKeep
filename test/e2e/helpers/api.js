@@ -26,6 +26,7 @@ export const GET    = (path)        => api('GET',    path);
 export const POST   = (path, body)  => api('POST',   path, body);
 export const PUT    = (path, body)  => api('PUT',    path, body);
 export const DELETE = (path)        => api('DELETE', path);
+export const PATCH  = (path, body)  => api('PATCH',  path, body);
 
 // ── Common fixtures ──────────────────────────────────────────────────────────
 

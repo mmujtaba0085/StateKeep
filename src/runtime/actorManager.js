@@ -6,7 +6,7 @@
  */
 
 import { LRUCache } from './lruCache.js';
-import { FNV_OFFSET, fingerprintToBigInt } from '../ffi/hashUtils.js';
+import { FNV_OFFSET, fingerprintToBigInt, regionFingerprintsToArray } from '../ffi/hashUtils.js';
 import { getEngine } from '../ffi/engine.js';
 import { getWorkerPool } from './workerPool.js';
 import {
@@ -52,6 +52,23 @@ setInterval(() => {
     }
   }
 }, 60_000).unref();
+
+// ── Definition JSON cache (60s TTL) ───────────────────────────────────────────
+// Reduces DB reads for hot definitions hit on every spawnActor / ensureInWorker.
+const _defCache    = new Map();   // definitionId → { def, expiresAt }
+const DEF_CACHE_TTL_MS = 60_000;
+
+function cachedFindDefinition(definitionId) {
+  const cached = _defCache.get(definitionId);
+  if (cached && cached.expiresAt > Date.now()) return cached.def;
+  const def = findDefinitionById(definitionId);
+  if (def) _defCache.set(definitionId, { def, expiresAt: Date.now() + DEF_CACHE_TTL_MS });
+  return def;
+}
+
+export function invalidateDefinitionCache(definitionId) {
+  _defCache.delete(definitionId);
+}
 
 // ── Inline migration check cache ──────────────────────────────────────────────
 // key: `${actorId}:${definitionId}`
@@ -127,7 +144,7 @@ function touch(id, entry) {
 
 async function ensureInWorker(actorId, actor) {
   const pool = getWorkerPool();
-  const def  = findDefinitionById(actor.definitionId);
+  const def  = cachedFindDefinition(actor.definitionId);
   if (!def) throw new Error(`Definition ${actor.definitionId} not found`);
 
   await pool.send(actorId, {
@@ -146,7 +163,7 @@ async function ensureInWorker(actorId, actor) {
  * Spawn a new actor from a definition.
  */
 export async function spawnActor({ definitionId, orgId, initialContext, logicalStartTick }) {
-  const def = findDefinitionById(definitionId);
+  const def = cachedFindDefinition(definitionId);
   if (!def) throw new Error(`Definition not found: ${definitionId}`);
   if (!orgId) throw new Error('orgId is required to spawn an actor');
   if (def.orgId && def.orgId !== orgId) throw Object.assign(
@@ -246,8 +263,9 @@ export async function sendEvent(actorId, event, tick) {
       stateValue:         actor.stateValue,
       context:            actor.context,
       historyFingerprint: actor.historyFingerprint,
+      regionFingerprints: actor.regionFingerprints ?? null,
       lastEventTick:      actor.lastEventTick,
-      logicalStartTick:   actor.logicalStartTick,   // always carry this through
+      logicalStartTick:   actor.logicalStartTick,
       lastAccess:         Date.now(),
     };
   }
@@ -266,11 +284,24 @@ export async function sendEvent(actorId, event, tick) {
       targetDefId = cachedResult;
     } else {
       try {
+        // Scalar path (flat / wildcard fingerprint)
         targetDefId = eng.computeAccessible(
           fingerprintToBigInt(fp),
           BigInt(entry.logicalStartTick ?? 0),
           currentTick
         );
+        // Parallel path: if the actor has per-region fingerprints and the scalar
+        // check found nothing, try the parallel changepoint table
+        if (!targetDefId && entry.regionFingerprints) {
+          const regionArr = regionFingerprintsToArray(entry.regionFingerprints);
+          if (regionArr && regionArr.length > 0) {
+            targetDefId = eng.computeAccessibleParallel(
+              regionArr,
+              BigInt(entry.logicalStartTick ?? 0),
+              currentTick
+            );
+          }
+        }
       } catch {
         targetDefId = null;
       }
@@ -329,7 +360,10 @@ export async function sendEvent(actorId, event, tick) {
     actorId,
     event,
     historyFingerprint: entry.historyFingerprint,
+    regionFingerprints: entry.regionFingerprints ?? null,
   });
+
+  const newRegionFingerprints = result.regionFingerprints ?? entry.regionFingerprints ?? null;
 
   // Update hot registry
   const newEntry = {
@@ -338,6 +372,7 @@ export async function sendEvent(actorId, event, tick) {
     stateValue:         result.stateValue,
     context:            result.context,
     historyFingerprint: result.historyFingerprint,
+    regionFingerprints: newRegionFingerprints,
     lastEventTick:      tick ?? Date.now(),
     logicalStartTick:   entry.logicalStartTick,
     lastAccess:         Date.now(),
@@ -348,6 +383,7 @@ export async function sendEvent(actorId, event, tick) {
     stateValue:         result.stateValue,
     context:            result.context,
     historyFingerprint: result.historyFingerprint,
+    regionFingerprints: newRegionFingerprints,
     lastEventTick:      tick ?? Date.now(),
     status:             result.done ? 'terminated' : 'active',
   });
@@ -469,7 +505,7 @@ export async function migrateActor(actorId, targetDefinitionId) {
   const actor  = findActorById(actorId);
   if (!actor) throw new Error(`Actor not found: ${actorId}`);
 
-  const targetDef = findDefinitionById(targetDefinitionId);
+  const targetDef = cachedFindDefinition(targetDefinitionId);
   if (!targetDef) throw new Error(`Target definition not found: ${targetDefinitionId}`);
 
   const stateMapping = targetDef.definitionJson._stateMapping ?? {};

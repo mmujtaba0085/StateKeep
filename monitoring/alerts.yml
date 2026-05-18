@@ -1,0 +1,136 @@
+groups:
+  - name: statekeep.critical
+    interval: 30s
+    rules:
+
+      # ── APV Engine in fallback mode ───────────────────────────────────────────
+      # When the .so fails to load, all migration routing silently stops.
+      # This is the single most important alert — without the engine, no actor
+      # ever migrates regardless of what definitions are deployed.
+      - alert: APVEngineFallback
+        expr: statekeep_engine_mode{mode="fallback"} == 1
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "StateKeep APV engine is in fallback mode"
+          description: >
+            libapv-engine.so failed to load on instance {{ $labels.instance }}.
+            All migration routing is disabled. Check STATEKEEP_ENGINE_PATH and
+            ensure the .so file is present and executable.
+
+      # ── Migration failures ────────────────────────────────────────────────────
+      - alert: ActorMigrationFailed
+        expr: increase(statekeep_migration_failed_total[5m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Actor migration failures detected"
+          description: >
+            {{ $value }} actor migrations failed in the last 5 minutes on
+            {{ $labels.instance }}. Actors in 'needs_rescue' state require
+            manual intervention via the dashboard or PUT /v1/definitions with
+            stateMapping to remap stranded states.
+
+  - name: statekeep.high
+    interval: 60s
+    rules:
+
+      # ── API latency P99 ───────────────────────────────────────────────────────
+      - alert: APILatencyHigh
+        expr: statekeep_api_latency_p99_ms > 500
+        for: 5m
+        labels:
+          severity: high
+        annotations:
+          summary: "StateKeep API P99 latency exceeds 500ms"
+          description: >
+            API P99 latency is {{ $value }}ms on {{ $labels.instance }}.
+            Common causes: SQLite WAL contention (increase cache_size), hot
+            actor registry miss (increase HOT_REGISTRY_SIZE), or under-provisioned
+            worker pool (ACTORS_PER_WORKER too high).
+
+      # ── Worker error rate ─────────────────────────────────────────────────────
+      - alert: WorkerPoolErrorRate
+        expr: rate(statekeep_worker_errors_total[5m]) > 0.01
+        for: 2m
+        labels:
+          severity: high
+        annotations:
+          summary: "StateKeep actor worker error rate elevated"
+          description: >
+            Worker error rate is {{ $value | humanizePercentage }} on
+            {{ $labels.instance }}. Workers may be crashing and respawning.
+            Check application logs for worker exit codes.
+
+      # ── Needs-rescue actors accumulating ─────────────────────────────────────
+      - alert: NeedsRescueActorsAccumulating
+        expr: statekeep_actors_needs_rescue > 100
+        for: 10m
+        labels:
+          severity: high
+        annotations:
+          summary: "Large number of actors in needs_rescue state"
+          description: >
+            {{ $value }} actors are stuck in 'needs_rescue' on {{ $labels.instance }}.
+            This typically means a migration was deployed without stateMapping for
+            all reachable states. Use GET /v1/actors?status=needs_rescue to audit,
+            then redeploy with stateMapping.
+
+      # ── Pending migration jobs stalling ──────────────────────────────────────
+      - alert: PendingMigrationJobsStalling
+        expr: statekeep_migration_jobs_pending > 1000
+        for: 15m
+        labels:
+          severity: high
+        annotations:
+          summary: "Migration job backlog growing — migrate-worker may be stalled"
+          description: >
+            {{ $value }} migration jobs are pending on {{ $labels.instance }}.
+            Verify the migrate-worker process is running:
+            systemctl status statekeep-migrate-worker
+
+  - name: statekeep.medium
+    interval: 120s
+    rules:
+
+      # ── DB query latency ──────────────────────────────────────────────────────
+      - alert: DBQueryLatencyHigh
+        expr: statekeep_ffi_latency_p99_ms > 500
+        for: 10m
+        labels:
+          severity: medium
+        annotations:
+          summary: "StateKeep DB/FFI P99 latency exceeds 500ms"
+          description: >
+            FFI/DB P99 latency is {{ $value }}ms on {{ $labels.instance }}.
+            Consider running PRAGMA wal_checkpoint(TRUNCATE) if WAL has grown large,
+            or migrating to an external Postgres adapter if write throughput
+            exceeds the SQLite WAL ceiling (~5k writes/s).
+
+      # ── WAL file size ─────────────────────────────────────────────────────────
+      - alert: WALSizeGrowing
+        expr: statekeep_wal_size_bytes > 104857600   # 100 MB
+        for: 30m
+        labels:
+          severity: medium
+        annotations:
+          summary: "StateKeep SQLite WAL file exceeds 100 MB"
+          description: >
+            WAL file is {{ $value | humanizeBytes }} on {{ $labels.instance }}.
+            Checkpoint has not run recently. Consider PRAGMA wal_autocheckpoint
+            or manual PRAGMA wal_checkpoint(TRUNCATE).
+
+      # ── Dead-letter scheduled events ──────────────────────────────────────────
+      - alert: DeadLetterEventsAccumulating
+        expr: statekeep_scheduled_dead_letter_total > 50
+        for: 30m
+        labels:
+          severity: medium
+        annotations:
+          summary: "Dead-letter scheduled events accumulating"
+          description: >
+            {{ $value }} scheduled events have exhausted all retries on
+            {{ $labels.instance }}. Review GET /v1/scheduled/dead-letter
+            (admin) to identify affected actors and event types.

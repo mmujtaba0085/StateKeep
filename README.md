@@ -394,3 +394,39 @@ Full instructions in `INSTALL.md`. The minimal checklist:
 ```bash
 sudo bash scripts/install.sh
 ```
+
+---
+
+## Scaling
+
+StateKeep uses **SQLite in WAL mode** as its sole datastore. This is an intentional design choice: SQLite provides ACID guarantees, zero operational overhead, and excellent single-node read throughput.
+
+### Practical limits (single node, NVMe SSD)
+
+| Metric                        | Practical ceiling      |
+|-------------------------------|------------------------|
+| Write throughput (WAL mode)   | ~5,000 writes/second   |
+| Active actors in hot registry | 10,000–100,000 (RAM)   |
+| Total actors (cold, on disk)  | Millions               |
+| Migration jobs per second     | ~500 (migrate-worker)  |
+| API request throughput        | ~2,000 req/s           |
+
+WAL mode allows one writer and many concurrent readers. The single-writer constraint means sustained write bursts above ~5k/s will queue and add latency. Tune `HOT_REGISTRY_SIZE` to keep the hottest actors in RAM and reduce write frequency.
+
+### When to move beyond SQLite
+
+Consider a Postgres adapter (not yet available — see roadmap) when:
+
+- Sustained write throughput exceeds 3,000/s for more than a few minutes
+- You need multi-process or multi-host replication (e.g., active-active across regions)
+- WAL file grows beyond ~500 MB despite regular checkpointing
+
+### Mitigation strategies (before needing Postgres)
+
+1. **Increase `HOT_REGISTRY_SIZE`** — more actors cached in RAM means fewer SQLite writes per request.
+2. **Increase `IDLE_TIMEOUT_SECONDS`** — evict actors to DB less aggressively.
+3. **Tune `ACTORS_PER_WORKER`** — more actors per thread reduces IPC overhead.
+4. **Schedule `PRAGMA wal_checkpoint(TRUNCATE)`** during off-peak hours to prevent WAL growth.
+5. **Deploy on NVMe SSD** — WAL write latency is I/O-bound; HDD is unsuitable for production.
+
+The SQLite WAL ceiling is a known, documented constraint of this deployment model — it is not a bug and will not be silently worked around. When you hit it, the right move is a purpose-built distributed actor store.

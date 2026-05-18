@@ -21,20 +21,21 @@ import * as A3  from './approaches/3-json-field-routing.js';
 import * as A4  from './approaches/4-event-history-query.js';
 import * as A5  from './approaches/5-xstate-resolvestate.js';
 import * as A6  from './approaches/6-apv-chained.js';
-import * as A7  from './approaches/7-context-mutation.js';
-import * as A8  from './approaches/8-event-pollution.js';
-import * as A9  from './approaches/9-missing-context.js';
+import * as A7  from './approaches/7-ANTIPATTERN-context-mutation.js';
+import * as A8  from './approaches/8-ANTIPATTERN-event-pollution.js';
+import * as A9  from './approaches/9-ANTIPATTERN-missing-context.js';
 import * as A10 from './approaches/10-chain-deep.js';
 import * as A11 from './approaches/11-stress.js';
 import * as A12 from './approaches/12-parallel-states.js';
+import * as A13 from './approaches/13-hierarchical-states.js';
 
-const ALL_APPROACHES = [A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12];
+const ALL_APPROACHES = [A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13];
 
 function parseOnlyFlag() {
   const idx = process.argv.indexOf('--only');
   if (idx < 0) return null;
   const val = process.argv[idx + 1] ?? '';
-  return val.split(',').map(n => parseInt(n.trim(), 10)).filter(n => n >= 1 && n <= 12);
+  return val.split(',').map(n => parseInt(n.trim(), 10)).filter(n => n >= 1 && n <= 13);
 }
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }

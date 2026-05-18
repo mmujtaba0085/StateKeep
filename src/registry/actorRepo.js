@@ -24,6 +24,10 @@ function rowToActor(row) {
       context = JSON.parse(decrypt(buf).toString('utf8'));
     } catch { context = null; }
   }
+  let regionFingerprints = null;
+  if (row.region_fingerprints) {
+    try { regionFingerprints = JSON.parse(row.region_fingerprints); } catch {}
+  }
   return {
     id:                  row.id,
     definitionId:        row.definition_id,
@@ -32,6 +36,7 @@ function rowToActor(row) {
     context,
     logicalStartTick:    row.logical_start_tick,
     historyFingerprint:  row.history_fingerprint ?? '0',
+    regionFingerprints,
     lastEventTick:       row.last_event_tick,
     status:              row.status,
     createdAt:           row.created_at,
@@ -62,12 +67,13 @@ function getStmts() {
     `),
     updateState: db.prepare(`
       UPDATE actors
-      SET state_value        = @state_value,
-          context_json       = @context_json,
-          history_fingerprint = @history_fingerprint,
-          last_event_tick    = @last_event_tick,
-          status             = @status,
-          updated_at         = @updated_at
+      SET state_value          = @state_value,
+          context_json         = @context_json,
+          history_fingerprint  = @history_fingerprint,
+          region_fingerprints  = @region_fingerprints,
+          last_event_tick      = @last_event_tick,
+          status               = @status,
+          updated_at           = @updated_at
       WHERE id = @id
     `),
     updateStatus: db.prepare(`
@@ -169,6 +175,7 @@ export function updateActorState(id, {
   stateValue,
   context,
   historyFingerprint,
+  regionFingerprints,
   lastEventTick,
   status = 'active',
 }) {
@@ -178,12 +185,13 @@ export function updateActorState(id, {
     : null;
   s.updateState.run({
     id,
-    state_value:         stateValue != null ? JSON.stringify(stateValue) : null,
-    context_json:        encContext,
-    history_fingerprint: String(historyFingerprint),
-    last_event_tick:     lastEventTick ?? null,
+    state_value:          stateValue != null ? JSON.stringify(stateValue) : null,
+    context_json:         encContext,
+    history_fingerprint:  String(historyFingerprint),
+    region_fingerprints:  regionFingerprints ? JSON.stringify(regionFingerprints) : null,
+    last_event_tick:      lastEventTick ?? null,
     status,
-    updated_at:          now(),
+    updated_at:           now(),
   });
 }
 

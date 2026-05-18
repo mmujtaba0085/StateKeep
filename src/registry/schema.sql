@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS actors (
     context_json         BLOB,
     logical_start_tick   INTEGER NOT NULL DEFAULT 0,
     history_fingerprint  TEXT NOT NULL DEFAULT '0',
+    region_fingerprints  TEXT,
     last_event_tick      INTEGER,
     status               TEXT NOT NULL DEFAULT 'active'
                          CHECK(status IN ('active','migrating','terminated','archived','needs_rescue')),
@@ -248,6 +249,22 @@ CREATE TABLE IF NOT EXISTS changepoints (
 
 CREATE INDEX IF NOT EXISTS idx_changepoints_org ON changepoints(org_id);
 
+-- ── Parallel changepoints (APV per-region prefix class persistence) ───────────
+CREATE TABLE IF NOT EXISTS par_changepoints (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    org_id       TEXT NOT NULL,
+    t_star       INTEGER NOT NULL,
+    region_hashes TEXT NOT NULL,   -- JSON array of 16-char hex strings, sorted canonical order
+    refinement   INTEGER NOT NULL DEFAULT 0,
+    child_def_id TEXT NOT NULL,
+    created_at   INTEGER NOT NULL DEFAULT (unixepoch())
+);
+
+CREATE INDEX IF NOT EXISTS idx_par_cp_org ON par_changepoints(org_id, t_star);
+
+-- Compound index for migration queries on actors by definition + org
+CREATE INDEX IF NOT EXISTS idx_actors_def ON actors(definition_id, org_id);
+
 INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (2, unixepoch());
 INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (3, unixepoch());
 INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (4, unixepoch());
@@ -255,3 +272,5 @@ INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (5, unixepoc
 INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (6, unixepoch());
 INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (8, unixepoch());
 INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (9, unixepoch());
+INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (13, unixepoch());
+INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (14, unixepoch());

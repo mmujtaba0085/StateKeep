@@ -21,7 +21,7 @@ import { fingerprintToBigInt } from '../ffi/hashUtils.js';
 import { incrementMigrated, incrementFailed, updateDeploymentStatus, findDeploymentById } from '../registry/deploymentRepo.js';
 import { migrateActor } from '../runtime/actorManager.js';
 import { getEngine, engineReady } from '../ffi/engine.js';
-import { loadChangepointsAfter } from '../registry/changepointRepo.js';
+import { loadChangepointsAfter, loadParChangepointsAfter } from '../registry/changepointRepo.js';
 
 const BATCH_SIZE    = 100;
 const POLL_INTERVAL = 500;   // ms
@@ -32,13 +32,14 @@ await engineReady;
 getDb();  // bootstrap DB
 startHeartbeat('migrate');
 
-// Cursor tracks the highest changepoints.id we have already registered.
-// Initialized to 0 so the first syncRegistry() loads everything.
-let _lastChangepointId = 0;
+// Cursors track the highest id already registered for each changepoint type.
+let _lastChangepointId    = 0;
+let _lastParChangepointId = 0;
 
 function syncRegistry() {
   const eng = getEngine();
   if (!eng.available) return;
+
   const rows = loadChangepointsAfter(_lastChangepointId);
   for (const row of rows) {
     try {
@@ -54,7 +55,28 @@ function syncRegistry() {
     }
   }
   if (rows.length > 0) {
-    console.log(`[migrate-worker] Registry synced: +${rows.length} changepoints (cursor=${_lastChangepointId})`);
+    console.log(`[migrate-worker] Registry synced: +${rows.length} scalar changepoints (cursor=${_lastChangepointId})`);
+  }
+
+  // Seed parallel changepoints (per-region FNV prefix classes)
+  const parRows = loadParChangepointsAfter(_lastParChangepointId);
+  for (const row of parRows) {
+    try {
+      const regionHexArr = JSON.parse(row.region_hashes);
+      const regionArr    = regionHexArr.map(h => BigInt(`0x${h.padStart(16, '0')}`));
+      eng.registerChangepointParallel(
+        BigInt(row.t_star),
+        regionArr,
+        BigInt(row.refinement),
+        row.child_def_id
+      );
+      _lastParChangepointId = row.id;
+    } catch (e) {
+      console.warn(`[migrate-worker] syncRegistry skip parallel ${row.child_def_id}: ${e.message}`);
+    }
+  }
+  if (parRows.length > 0) {
+    console.log(`[migrate-worker] Registry synced: +${parRows.length} parallel changepoints (cursor=${_lastParChangepointId})`);
   }
 }
 

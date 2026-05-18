@@ -38,6 +38,14 @@ export const engine = {
   actorStopped(_tStar, _prefixHash) {},
   vacatePrefix(_tStar, _prefixHash) {},
 
+  registerChangepointParallel(_tStar, _regionHashes, _refinement, _childDefId) {
+    return 0;
+  },
+
+  computeAccessibleParallel(_regionHashes, _actorLogicalTime, _currentTime) {
+    return null;
+  },
+
   /** FNV-1a init — returns the standard offset basis as BigInt */
   fnv1aInit() {
     return 0xcbf29ce484222325n;

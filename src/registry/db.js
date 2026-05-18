@@ -409,6 +409,42 @@ export function getDb() {
     console.log('[db] Migration v12 applied: changepoints table added');
   }
 
+  // v13 — Add region_fingerprints column to actors (parallel state per-region tracking)
+  if (!appliedVersions.has(13)) {
+    const hasCol = _db.prepare(
+      `SELECT COUNT(*) as cnt FROM pragma_table_info('actors') WHERE name = 'region_fingerprints'`
+    ).get().cnt > 0;
+    if (!hasCol) {
+      _db.exec(`ALTER TABLE actors ADD COLUMN region_fingerprints TEXT;`);
+    }
+    _db.exec(`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (13, unixepoch());`);
+    console.log('[db] Migration v13 applied: region_fingerprints column added to actors');
+  }
+
+  // v14 — par_changepoints table for parallel APV changepoint persistence + actors def index
+  if (!appliedVersions.has(14)) {
+    _db.exec(`
+      BEGIN;
+
+      CREATE TABLE IF NOT EXISTS par_changepoints (
+          id           INTEGER PRIMARY KEY AUTOINCREMENT,
+          org_id       TEXT NOT NULL,
+          t_star       INTEGER NOT NULL,
+          region_hashes TEXT NOT NULL,
+          refinement   INTEGER NOT NULL DEFAULT 0,
+          child_def_id TEXT NOT NULL,
+          created_at   INTEGER NOT NULL DEFAULT (unixepoch())
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_par_cp_org ON par_changepoints(org_id, t_star);
+      CREATE INDEX IF NOT EXISTS idx_actors_def ON actors(definition_id, org_id);
+
+      INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (14, unixepoch());
+      COMMIT;
+    `);
+    console.log('[db] Migration v14 applied: par_changepoints table + idx_actors_def index added');
+  }
+
   // Graceful shutdown
   process.on('exit',    () => { try { _db.close(); } catch {} });
   process.on('SIGINT',  () => { process.exit(0); });

@@ -116,35 +116,76 @@ function handleSpawn({ actorId, definitionJson, stateSnapshot, initialContext })
   return serializeSnapshot(actor.getSnapshot(), actorId);
 }
 
-function handleEvent({ actorId, event, historyFingerprint }) {
+function handleEvent({ actorId, event, historyFingerprint, regionFingerprints }) {
   const entry = actors.get(actorId);
   if (!entry) throw new Error(`Actor ${actorId} not in worker`);
 
   const { actor } = entry;
+
+  // Capture pre-event state for per-region diff (parallel machines only)
+  const preSV = actor.getSnapshot().value;
+
   actor.send(event);
 
-  const snapshot      = actor.getSnapshot();
+  const snapshot       = actor.getSnapshot();
   const newFingerprint = updateFingerprint(historyFingerprint, event.type);
+
+  // Update per-region fingerprints when actor is on a parallel machine
+  let newRegionFingerprints = regionFingerprints ?? null;
+  if (preSV && typeof preSV === 'object' && !Array.isArray(preSV)) {
+    const postSV = snapshot.value;
+    const rfp    = regionFingerprints ? { ...regionFingerprints } : {};
+    for (const region of Object.keys(preSV)) {
+      if (JSON.stringify(preSV[region]) !== JSON.stringify(postSV?.[region])) {
+        rfp[region] = updateFingerprint(rfp[region] ?? '0', event.type);
+      }
+    }
+    newRegionFingerprints = rfp;
+  }
 
   return {
     ...serializeSnapshot(snapshot, actorId),
     historyFingerprint: newFingerprint,
+    regionFingerprints: newRegionFingerprints,
   };
 }
 
 /**
  * Resolve where an actor should land in the new machine.
- * Returns the landing state name, or null if it cannot be resolved (needs_rescue).
+ *
+ * For flat machines: returns the landing state name (string).
+ * For compound/parallel machines: returns the full compound state value object
+ *   when the top-level key exists in newMachineStates, so XState can restore
+ *   the full sub-state via resolveState({ value: landingState }).
+ *
+ * stateMapping keys are always top-level state names (strings).
+ * Returns null if no mapping is possible (actor needs_rescue).
+ *
  * Exported so it can be unit-tested without a running server.
  */
 export function resolveLandingState(currentStateValue, newMachineStates, stateMapping = {}) {
-  const topLevel = typeof currentStateValue === 'string'
-    ? currentStateValue
-    : Object.keys(currentStateValue ?? {})[0];
-  if (!topLevel) return null;
-  if (newMachineStates[topLevel]) return topLevel;
-  const mapped = stateMapping[topLevel];
-  if (mapped && newMachineStates[mapped]) return mapped;
+  if (typeof currentStateValue === 'string') {
+    if (newMachineStates[currentStateValue]) return currentStateValue;
+    const mapped = stateMapping[currentStateValue];
+    if (mapped && newMachineStates[mapped]) return mapped;
+    return null;
+  }
+
+  // Compound or parallel state value object
+  if (currentStateValue && typeof currentStateValue === 'object') {
+    const topLevel = Object.keys(currentStateValue)[0];
+    if (!topLevel) return null;
+    const mappedKey = stateMapping[topLevel];
+    if (mappedKey) {
+      // Explicit override: land at mapped state (flat string)
+      return newMachineStates[mappedKey] ? mappedKey : null;
+    }
+    // Top-level key exists in new machine: return full compound value so
+    // XState restores the complete sub-state hierarchy via resolveState
+    if (newMachineStates[topLevel]) return currentStateValue;
+    return null;
+  }
+
   return null;
 }
 
@@ -236,7 +277,9 @@ function getSnapshot(actorId) {
 
 // ── Message dispatch ──────────────────────────────────────────────────────────
 
-parentPort.on('message', (msg) => {
+/* Guard: parentPort is null when the file is imported outside a worker context
+ * (e.g. in unit tests importing resolveLandingState directly). */
+if (parentPort) parentPort.on('message', (msg) => {
   const { id, type } = msg;
 
   let result = null;
@@ -259,5 +302,5 @@ parentPort.on('message', (msg) => {
   parentPort.postMessage({ id, ok: !error, result, error });
 });
 
-// Signal readiness
-parentPort.postMessage({ id: '__ready__', ok: true });
+// Signal readiness (only when running as a real worker)
+if (parentPort) parentPort.postMessage({ id: '__ready__', ok: true });

@@ -135,3 +135,29 @@ export function hexToBigInt(hex) {
 export function fingerprintToBigInt(hex) {
   return hexToBigInt(hex);
 }
+
+// ── Parallel (per-region) hash helpers ───────────────────────────────────────
+
+/**
+ * Compute per-region history hashes from a map of { regionName: [eventType, ...] }.
+ * Returns { regionName: hexFingerprint } using the same chain as computeHistoryHash.
+ */
+export function computeRegionHashes(eventsByRegion) {
+  const result = {};
+  for (const [region, events] of Object.entries(eventsByRegion)) {
+    result[region] = computeHistoryHash(events);
+  }
+  return result;
+}
+
+/**
+ * Convert a regionFingerprints map ({ regionName: hexFp }) to an array of BigInts
+ * suitable for passing to eng.registerChangepointParallel / eng.computeAccessibleParallel.
+ * Returns null if the map is empty or null.
+ */
+export function regionFingerprintsToArray(regionFingerprintsHex) {
+  if (!regionFingerprintsHex) return null;
+  const entries = Object.values(regionFingerprintsHex);
+  if (entries.length === 0) return null;
+  return entries.map(hex => hexToBigInt(hex));
+}

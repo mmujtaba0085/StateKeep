@@ -14,7 +14,7 @@ import { createHmac }          from 'crypto';
 import { spawn }               from 'child_process';
 import { resolve, dirname }    from 'path';
 import { fileURLToPath }       from 'url';
-import { GET, POST, PUT, DELETE, uniqueId } from './helpers/api.js';
+import { GET, POST, PUT, DELETE, PATCH, uniqueId } from './helpers/api.js';
 
 const __dirname  = dirname(fileURLToPath(import.meta.url));
 const WORKER_PATH = resolve(__dirname, '../../src/workers/webhook-worker.js');
@@ -164,6 +164,67 @@ test('DELETE /v1/webhooks/:id deactivates webhook', async () => {
   const found   = listRes.body.webhooks.find(w => w.id === id);
   // Either not present, or present with active=false
   if (found) expect(found.active).toBe(false);
+});
+
+// ── 3b: GET /v1/webhooks/:id ──────────────────────────────────────────────────
+
+test('GET /v1/webhooks/:id returns single webhook without secret', async () => {
+  const url = `http://127.0.0.1:${testServerPort}`;
+  const reg = await POST('/v1/webhooks', { url, secret: TEST_SECRET, events: ['state.changed'] });
+  expect(reg.status).toBe(201);
+  const id = reg.body.id;
+
+  const res = await GET(`/v1/webhooks/${id}`);
+  expect(res.status).toBe(200);
+  expect(res.body.id).toBe(id);
+  expect(res.body.url).toBe(url);
+  expect(res.body.events).toEqual(['state.changed']);
+  expect(res.body.active).toBe(true);
+  expect(JSON.stringify(res.body)).not.toContain(TEST_SECRET);
+  expect(Object.keys(res.body)).not.toContain('secret');
+});
+
+test('GET /v1/webhooks/:id returns 404 for unknown id', async () => {
+  const res = await GET('/v1/webhooks/no-such-webhook-id-xyz');
+  expect(res.status).toBe(404);
+});
+
+// ── 3c: PATCH /v1/webhooks/:id ───────────────────────────────────────────────
+
+test('PATCH /v1/webhooks/:id updates url, events, and active', async () => {
+  const url = `http://127.0.0.1:${testServerPort}`;
+  const reg = await POST('/v1/webhooks', { url, secret: TEST_SECRET, events: ['state.changed'] });
+  expect(reg.status).toBe(201);
+  const id = reg.body.id;
+
+  // Disable it
+  const p1 = await PATCH(`/v1/webhooks/${id}`, { active: false });
+  expect(p1.status).toBe(200);
+  expect(p1.body.active).toBe(false);
+
+  // Change events list
+  const p2 = await PATCH(`/v1/webhooks/${id}`, { events: ['actor.terminated', 'actor.migrated'] });
+  expect(p2.status).toBe(200);
+  expect(p2.body.events).toEqual(['actor.terminated', 'actor.migrated']);
+
+  // Re-enable
+  const p3 = await PATCH(`/v1/webhooks/${id}`, { active: true });
+  expect(p3.status).toBe(200);
+  expect(p3.body.active).toBe(true);
+});
+
+test('PATCH /v1/webhooks/:id returns 400 when body is empty', async () => {
+  const url = `http://127.0.0.1:${testServerPort}`;
+  const reg = await POST('/v1/webhooks', { url, secret: TEST_SECRET, events: ['state.changed'] });
+  const id  = reg.body.id;
+
+  const res = await PATCH(`/v1/webhooks/${id}`, {});
+  expect(res.status).toBe(400);
+});
+
+test('PATCH /v1/webhooks/:id returns 404 for unknown id', async () => {
+  const res = await PATCH('/v1/webhooks/no-such-webhook-patch', { active: false });
+  expect(res.status).toBe(404);
 });
 
 // ── 4: Ping delivery ─────────────────────────────────────────────────────────

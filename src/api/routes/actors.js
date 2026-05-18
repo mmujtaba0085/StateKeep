@@ -180,15 +180,15 @@ export async function actorRoutes(fastify) {
     }
   });
 
-  // ── GET /v1/actors/:id/events — paginated event history ───────────────────
+  // ── GET /v1/actors/:id/events — cursor-paginated event history ───────────────
   fastify.get('/v1/actors/:id/events', {
     schema: {
       params: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
       querystring: {
         type: 'object',
         properties: {
-          limit:  { type: 'integer', default: 50, minimum: 1, maximum: 200 },
-          offset: { type: 'integer', default: 0 },
+          limit:   { type: 'integer', default: 50, minimum: 1, maximum: 200 },
+          afterId: { type: 'integer', default: 0, minimum: 0 },
         },
       },
     },
@@ -199,18 +199,16 @@ export async function actorRoutes(fastify) {
       return reply.code(404).send({ error: `Actor ${id} not found` });
     }
 
-    const { limit, offset } = request.query;
+    const { limit, afterId } = request.query;
     const db = getDb();
 
     const rows = db.prepare(`
       SELECT id, event_type, event_payload, tick, processed_at
       FROM events
-      WHERE actor_id = ?
+      WHERE actor_id = ? AND id > ?
       ORDER BY id ASC
-      LIMIT ? OFFSET ?
-    `).all(id, limit, offset);
-
-    const total = db.prepare(`SELECT COUNT(*) as cnt FROM events WHERE actor_id = ?`).get(id)?.cnt ?? 0;
+      LIMIT ?
+    `).all(id, afterId, limit);
 
     const events = rows.map(row => {
       let payload = null;
@@ -229,7 +227,8 @@ export async function actorRoutes(fastify) {
       };
     });
 
-    return reply.send({ actorId: id, events, total, limit, offset });
+    const nextCursor = rows.length === limit ? rows[rows.length - 1].id : null;
+    return reply.send({ actorId: id, events, total: events.length, limit, afterId, nextCursor });
   });
 
   // ── DELETE /v1/actors/:id ──────────────────────────────────────────────────
@@ -357,6 +356,70 @@ export async function actorRoutes(fastify) {
 
     const updated = findActorById(id);
     return reply.code(200).send(updated);
+  });
+
+  // ── POST /v1/actors/bulk — spawn up to 500 actors in one request ────────────
+  fastify.post('/v1/actors/bulk', {
+    schema: {
+      body: {
+        type: 'object',
+        required: ['actors'],
+        properties: {
+          actors: {
+            type: 'array',
+            items: {
+              type: 'object',
+              required: ['definitionId'],
+              properties: {
+                definitionId:   { type: 'string' },
+                initialContext: { type: 'object' },
+              },
+            },
+            minItems: 1,
+            maxItems: 500,
+          },
+        },
+      },
+    },
+  }, async (request, reply) => {
+    const { actors: requests } = request.body;
+    const eng  = getEngine();
+    const tick = Number(eng.clockTick());
+    const db   = getDb();
+
+    const created = [];
+    const failed  = [];
+
+    // Process in batches of 50 concurrent spawns
+    const CONCURRENCY = 50;
+    for (let i = 0; i < requests.length; i += CONCURRENCY) {
+      const slice = requests.slice(i, i + CONCURRENCY);
+      const results = await Promise.allSettled(
+        slice.map(req => spawnActor({
+          definitionId:     req.definitionId,
+          orgId:            request.orgId,
+          initialContext:   req.initialContext ?? {},
+          logicalStartTick: tick,
+        }))
+      );
+      for (let j = 0; j < results.length; j++) {
+        const r = results[j];
+        if (r.status === 'fulfilled') {
+          const v = r.value;
+          try {
+            db.prepare(`
+              INSERT INTO events (actor_id, org_id, event_type, event_payload, tick, processed_at)
+              VALUES (?, ?, 'SPAWN', NULL, ?, ?)
+            `).run(v.id, request.orgId, tick, Date.now());
+          } catch {}
+          created.push({ id: v.id, definitionId: slice[j].definitionId, stateValue: v.stateValue });
+        } else {
+          failed.push({ index: i + j, definitionId: slice[j].definitionId, error: r.reason?.message ?? 'spawn failed' });
+        }
+      }
+    }
+
+    return reply.code(207).send({ created, failed, total: requests.length });
   });
 
   // ── GET /v1/actors ─────────────────────────────────────────────────────────

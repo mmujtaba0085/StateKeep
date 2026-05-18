@@ -4,7 +4,7 @@
  */
 
 import { test, expect } from '@playwright/test';
-import { GET, POST, PUT, DELETE, SIMPLE_MACHINE, SIMPLE_MACHINE_V2, uniqueId } from './helpers/api.js';
+import { GET, POST, PUT, DELETE, PATCH, SIMPLE_MACHINE, SIMPLE_MACHINE_V2, uniqueId } from './helpers/api.js';
 
 let defId;
 
@@ -102,4 +102,81 @@ test('GET /v1/actors returns actor list', async () => {
   const res = await GET('/v1/actors');
   expect(res.status).toBe(200);
   expect(Array.isArray(res.body.actors)).toBe(true);
+});
+
+// ── Bulk spawn ────────────────────────────────────────────────────────────────
+
+test('POST /v1/actors/bulk spawns multiple actors and returns 207', async () => {
+  const res = await POST('/v1/actors/bulk', {
+    actors: [
+      { definitionId: defId },
+      { definitionId: defId, initialContext: { tag: 'b' } },
+      { definitionId: defId },
+    ],
+  });
+  expect(res.status).toBe(207);
+  expect(Array.isArray(res.body.created)).toBe(true);
+  expect(res.body.created).toHaveLength(3);
+  expect(Array.isArray(res.body.failed)).toBe(true);
+  expect(res.body.failed).toHaveLength(0);
+  expect(res.body.total).toBe(3);
+  for (const actor of res.body.created) {
+    expect(actor.id).toBeTruthy();
+    expect(actor.stateValue).toBe('idle');
+  }
+});
+
+test('POST /v1/actors/bulk returns partial success when one definitionId is invalid', async () => {
+  const res = await POST('/v1/actors/bulk', {
+    actors: [
+      { definitionId: defId },
+      { definitionId: 'nonexistent-def-bulk-test-' + Date.now() },
+    ],
+  });
+  expect(res.status).toBe(207);
+  expect(res.body.created).toHaveLength(1);
+  expect(res.body.failed).toHaveLength(1);
+  expect(res.body.failed[0].index).toBe(1);
+  expect(res.body.failed[0].error).toBeTruthy();
+});
+
+// ── needs_rescue → active reset ───────────────────────────────────────────────
+
+test('PATCH /v1/actors/:id resets needs_rescue status to active', async () => {
+  // Deploy a v1, spawn an actor, advance it, then deploy v2 that removes the state
+  const v1Id = uniqueId('patch-rescue-v1');
+  const v2Id = uniqueId('patch-rescue-v2');
+
+  const V1 = {
+    initial: 'idle',
+    states: {
+      idle:    { on: { GO: 'working' } },
+      working: { on: { DONE: 'finished' } },
+      finished: { type: 'final' },
+    },
+  };
+  await PUT('/v1/definitions', { id: v1Id, definition: V1 });
+
+  const spawn = await POST('/v1/actors', { definitionId: v1Id });
+  const actorId = spawn.body.id;
+  await POST(`/v1/actors/${actorId}/event`, { type: 'GO' });
+
+  // v2 removes 'working', stranding the actor
+  const V2 = { initial: 'idle', states: { idle: { on: { DONE: 'finished' } }, finished: { type: 'final' } } };
+  const d1 = await PUT('/v1/definitions', { id: v2Id, parentId: v1Id, definition: V2 });
+  if (d1.status === 200 && d1.body.status === 'requires_confirmation') {
+    await PUT('/v1/definitions', { id: v2Id, parentId: v1Id, definition: V2, confirmToken: d1.body.confirmToken });
+  }
+
+  const stranded = await GET(`/v1/actors/${actorId}/state`);
+  expect(stranded.body.status).toBe('needs_rescue');
+
+  // PATCH resets to active
+  const patch = await PATCH(`/v1/actors/${actorId}`, { status: 'active' });
+  expect(patch.status).toBe(200);
+  expect(patch.body.status).toBe('active');
+
+  // Invalid transitions rejected
+  const badPatch = await PATCH(`/v1/actors/${actorId}`, { status: 'terminated' });
+  expect(badPatch.status).toBe(400);
 });

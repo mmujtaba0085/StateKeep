@@ -184,6 +184,13 @@ test.describe('gap6 — state position on migration', () => {
   // ── Test 6: historyPath filtering + changepoint persistence ─────────────────
 
   test('historyPath deployment only targets fingerprint-matching actors (affected_actors is filtered count)', async () => {
+    // Requires APV engine for fingerprint-based filtering; skip in fallback mode
+    const health = await GET('/v1/health');
+    if (health.body?.engine !== 'real') {
+      test.skip();
+      return;
+    }
+
     const v1Id = uniqueId('g6-fp-filter-v1');
     const v2Id = uniqueId('g6-fp-filter-v2');
 
