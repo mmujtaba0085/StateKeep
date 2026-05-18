@@ -1,5 +1,5 @@
-/* global React, Icons, Pill, EmptyState, useApp, MOCK_WEBHOOKS */
-const { useState: useStateX, useMemo: useMemoX } = React;
+/* global React, Icons, Pill, EmptyState, useApp, Api */
+const { useState: useStateX, useEffect: useEffectX, useMemo: useMemoX } = React;
 
 // ============ Scheduled mock data with full status set ============
 const MOCK_SCHEDULED_EVENTS = [
@@ -194,15 +194,27 @@ function RegisterWebhookForm({ onCancel, onSubmit }) {
 }
 
 function PageWebhooks() {
-  const { setModal, pushToast } = useApp();
+  const { setModal, pushToast, apiKey } = useApp();
+  const [webhooks, setWebhooks] = useStateX([]);
+  const [loadingWh, setLoadingWh] = useStateX(false);
   const [extra, setExtra] = useStateX([]);
   const [pinging, setPinging] = useStateX(null);
   const [deactivated, setDeactivated] = useStateX(new Set());
 
-  const rows = [...MOCK_WEBHOOKS, ...extra].map((w, i) => ({
+  useEffectX(() => {
+    if (!apiKey) return;
+    setLoadingWh(true);
+    Api.get("/v1/webhooks")
+      .then(data => setWebhooks((data.webhooks || []).map(w => Api.mapWebhook(w))))
+      .catch(() => {})
+      .finally(() => setLoadingWh(false));
+  }, [apiKey]);
+
+  const baseRows = webhooks.length > 0 ? webhooks : [];
+  const rows = [...baseRows, ...extra].map((w, i) => ({
     ...w,
-    _id: w._id || ("wh_" + i),
-    active: deactivated.has(w._id || ("wh_" + i)) ? false : w.active
+    _id: w.id || w._id || ("wh_" + i),
+    active: deactivated.has(w.id || w._id || ("wh_" + i)) ? false : w.active
   }));
 
   const active = rows.filter(r => r.active).length;
@@ -304,7 +316,11 @@ function PageWebhooks() {
                 )
               ),
               React.createElement("tbody", null,
-                rows.map(w => React.createElement("tr", { key: w._id, style: { cursor: "default" } },
+                !apiKey
+                  ? React.createElement("tr", null, React.createElement("td", { colSpan: 6, style: { textAlign: "center", padding: "40px 0", color: "var(--muted)" } }, "Set your API key in the sidebar to load webhooks"))
+                  : loadingWh
+                  ? React.createElement("tr", null, React.createElement("td", { colSpan: 6, style: { textAlign: "center", padding: "40px 0", color: "var(--muted)" } }, "Loading…"))
+                  : rows.map(w => React.createElement("tr", { key: w._id, style: { cursor: "default" } },
                   React.createElement("td", null,
                     React.createElement("div", { className: "mono truncate", title: w.url, style: { maxWidth: 320 } }, w.url)
                   ),

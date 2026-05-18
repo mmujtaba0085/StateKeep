@@ -1,5 +1,5 @@
-/* global React, Icons, Pill, StateDiagram, JsonTree, useApp,
-   MOCK_ACTORS, MOCK_ACTOR_HISTORY, MOCK_SCHEDULED, STATES_BY_FAMILY */
+/* global React, Icons, Pill, StateDiagram, JsonTree, useApp, Api,
+   MOCK_ACTOR_HISTORY, MOCK_SCHEDULED, STATES_BY_FAMILY */
 const { useState: useState2, useEffect: useEffect2, useMemo: useMemo2 } = React;
 
 const STATUS_KIND = {
@@ -153,18 +153,35 @@ function ActorDrawer({ actor, open, onClose }) {
 }
 
 function PageActors() {
-  const { selectedActorId, setSelectedActorId } = useApp();
+  const { selectedActorId, setSelectedActorId, apiKey, pushToast } = useApp();
   const [search, setSearch] = useState2("");
   const [statusF, setStatusF] = useState2("all");
   const [machineF, setMachineF] = useState2("all");
+  const [actors, setActors] = useState2([]);
+  const [loading, setLoading] = useState2(false);
+  const [error, setError] = useState2(null);
 
-  const filtered = MOCK_ACTORS.filter(a => {
-    if (statusF !== "all" && a.status !== statusF) return false;
+  useEffect2(() => {
+    if (!apiKey) return;
+    setLoading(true);
+    setError(null);
+    const params = new URLSearchParams({ limit: 50 });
+    if (statusF !== "all") params.set("status", statusF);
+    Api.get("/v1/actors?" + params)
+      .then(data => setActors((data.actors || []).map(a => Api.mapActor(a))))
+      .catch(err => {
+        setError(err.message);
+        if (err.status === 401) pushToast({ kind: "error", title: "Invalid API key", desc: "Update it in the sidebar." });
+      })
+      .finally(() => setLoading(false));
+  }, [apiKey, statusF]);
+
+  const filtered = actors.filter(a => {
     if (machineF !== "all" && !a.machine.toLowerCase().includes(machineF)) return false;
-    if (search && !a.id.includes(search) && !a.state.includes(search)) return false;
+    if (search && !a.id.includes(search) && !a.state.includes(search) && !a.machine.includes(search)) return false;
     return true;
   });
-  const selectedActor = MOCK_ACTORS.find(a => a.id === selectedActorId);
+  const selectedActor = actors.find(a => a.id === selectedActorId);
 
   // Keep drawer mounted during close transition so it can slide out.
   const [drawerActor, setDrawerActor] = useState2(null);
@@ -219,7 +236,9 @@ function PageActors() {
         React.createElement("option", null, "All states")
       ),
       React.createElement("div", { className: "grow" }),
-      React.createElement("div", { className: "results-count" }, "Showing ", filtered.length, " of 18,441 actors"),
+      React.createElement("div", { className: "results-count" },
+        loading ? "Loading…" : (error ? "Error loading" : ("Showing " + filtered.length + " of " + actors.length + " actors"))
+      ),
       React.createElement("div", { className: "toolbar-spacer" }),
       React.createElement("button", { className: "btn btn-ghost" }, Icons.Download({ size: 12 }), "Export"),
       React.createElement("button", { className: "btn btn-primary" }, Icons.Plus({ size: 12 }), "Spawn Actor")
@@ -239,11 +258,19 @@ function PageActors() {
             )
           ),
           React.createElement("tbody", null,
-            filtered.map(a => React.createElement(ActorRow, {
-              key: a.id, a,
-              selected: a.id === selectedActorId,
-              onClick: () => setSelectedActorId(a.id === selectedActorId ? null : a.id)
-            }))
+            !apiKey
+              ? React.createElement("tr", null, React.createElement("td", { colSpan: 7, style: { textAlign: "center", padding: "40px 0", color: "var(--muted)" } }, "Set your API key in the sidebar to load actors"))
+              : loading
+              ? React.createElement("tr", null, React.createElement("td", { colSpan: 7, style: { textAlign: "center", padding: "40px 0", color: "var(--muted)" } }, "Loading…"))
+              : error
+              ? React.createElement("tr", null, React.createElement("td", { colSpan: 7, style: { textAlign: "center", padding: "40px 0", color: "var(--red)" } }, error))
+              : filtered.length === 0
+              ? React.createElement("tr", null, React.createElement("td", { colSpan: 7, style: { textAlign: "center", padding: "40px 0", color: "var(--muted)" } }, "No actors found"))
+              : filtered.map(a => React.createElement(ActorRow, {
+                  key: a.id, a,
+                  selected: a.id === selectedActorId,
+                  onClick: () => setSelectedActorId(a.id === selectedActorId ? null : a.id)
+                }))
           )
         )
       ),

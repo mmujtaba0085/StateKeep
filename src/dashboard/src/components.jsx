@@ -1,4 +1,4 @@
-/* global React, Icons, Logo, MOCK_ORG, MOCK_ORGS, MOCK_WORKERS */
+/* global React, Icons, Logo, Api, MOCK_ORG, MOCK_ORGS, MOCK_WORKERS */
 const { useState, useEffect, useRef, useContext, createContext, useMemo } = React;
 
 // ============ APP CONTEXT ============
@@ -12,6 +12,7 @@ function AppProvider({ children }) {
   const [selectedActorId, setSelectedActorId] = useState(null);
   const [toasts, setToasts] = useState([]);
   const [modal, setModal] = useState(null);
+  const [apiKey, setApiKeyState] = useState(() => Api.key);
 
   useEffect(() => {
     const onHash = () => setRoute(window.location.hash.replace(/^#/, "") || "command");
@@ -19,7 +20,11 @@ function AppProvider({ children }) {
     return () => window.removeEventListener("hashchange", onHash);
   }, []);
 
+  useEffect(() => Api.onChange(k => setApiKeyState(k)), []);
+
   const navigate = (r) => { window.location.hash = "#" + r; };
+
+  const setApiKey = (k) => { Api.setKey(k); setApiKeyState(k); };
 
   const pushToast = (toast) => {
     const id = Math.random().toString(36).slice(2, 9);
@@ -34,7 +39,8 @@ function AppProvider({ children }) {
     selectedMachine, setSelectedMachine,
     selectedActorId, setSelectedActorId,
     toasts, pushToast, dismissToast,
-    modal, setModal
+    modal, setModal,
+    apiKey, setApiKey,
   };
   return React.createElement(AppCtx.Provider, { value }, children);
 }
@@ -60,17 +66,45 @@ const NAV = [
 ];
 
 function Sidebar() {
-  const { route, navigate, org, setOrg, pushToast } = useApp();
+  const { route, navigate, org, setOrg, pushToast, apiKey, setApiKey, setModal } = useApp();
   const [orgOpen, setOrgOpen] = useState(false);
   const [copied, setCopied] = useState(false);
-  const apikey = MOCK_ORG.apiKey;
-  const last8 = "..." + apikey.slice(-8);
+  const last8 = apiKey ? ("..." + apiKey.slice(-8)) : "not set";
 
   const onCopyKey = () => {
-    navigator.clipboard?.writeText(apikey).catch(() => {});
+    if (!apiKey) return openKeyModal();
+    navigator.clipboard?.writeText(apiKey).catch(() => {});
     setCopied(true);
-    pushToast({ kind: "success", title: "API key copied", desc: "Last 8 characters: " + apikey.slice(-8) });
+    pushToast({ kind: "success", title: "API key copied", desc: "Last 8: " + apiKey.slice(-8) });
     setTimeout(() => setCopied(false), 1200);
+  };
+
+  const openKeyModal = () => {
+    let draft = apiKey || "";
+    setModal({
+      title: "Set API Key",
+      body: React.createElement("div", null,
+        React.createElement("label", { className: "field-label" }, "API Key"),
+        React.createElement("input", {
+          className: "input mono",
+          placeholder: "sk_live_...",
+          defaultValue: apiKey,
+          autoFocus: true,
+          onChange: (e) => { draft = e.target.value; }
+        }),
+        React.createElement("div", { className: "muted", style: { fontSize: 11, marginTop: 8 } },
+          "Stored in your browser's localStorage. Used for all API requests.")
+      ),
+      footer: React.createElement(React.Fragment, null,
+        apiKey && React.createElement("button", { className: "btn btn-ghost", onClick: () => { setApiKey(""); setModal(null); pushToast({ kind: "info", title: "API key cleared" }); } }, "Clear"),
+        React.createElement("button", { className: "btn btn-ghost", onClick: () => setModal(null) }, "Cancel"),
+        React.createElement("button", { className: "btn btn-primary", onClick: () => {
+          setApiKey(draft.trim());
+          setModal(null);
+          pushToast({ kind: "success", title: "API key saved" });
+        }}, "Save")
+      )
+    });
   };
 
   return React.createElement("aside", { className: "sidebar" },
@@ -117,9 +151,16 @@ function Sidebar() {
         ),
         React.createElement("span", null, "7 workers online")
       ),
-      React.createElement("div", { className: "sb-apikey", onClick: onCopyKey, title: "Copy API key" },
+      React.createElement("div", {
+        className: "sb-apikey",
+        onClick: apiKey ? onCopyKey : openKeyModal,
+        title: apiKey ? "Copy API key" : "Set API key",
+        style: !apiKey ? { color: "var(--amber)", borderColor: "rgba(245,158,11,0.3)" } : undefined
+      },
         React.createElement("span", null, last8),
-        copied ? Icons.Check({ size: 12, color: "#3ecf8e" }) : Icons.Copy({ size: 12 })
+        apiKey
+          ? (copied ? Icons.Check({ size: 12, color: "#3ecf8e" }) : Icons.Copy({ size: 12 }))
+          : Icons.AlertTriangle({ size: 12, color: "var(--amber)" })
       )
     )
   );
