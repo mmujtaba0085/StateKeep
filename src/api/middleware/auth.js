@@ -19,6 +19,8 @@ const PUBLIC_PATHS = new Set([
   '/v1/auth/verify',
   '/v1/auth/login',
   '/api-explorer',
+  '/openapi.json',
+  '/docs',
 ]);
 
 export async function authMiddleware(request, reply) {
