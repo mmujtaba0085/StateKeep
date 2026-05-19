@@ -345,7 +345,7 @@ export async function definitionRoutes(fastify) {
     }
 
     // ── Step 3: Store definition ─────────────────────────────────────────────
-    const tStar = eng.clockTick();
+    let tStar = eng.clockTick();
 
     // prefix_hash answers: "which actors are eligible for this deployment?"
     //
