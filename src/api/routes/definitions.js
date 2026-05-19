@@ -32,6 +32,7 @@ import { getDb }        from '../../registry/db.js';
 import {
   findDefinitionById,
   createDefinition,
+  updateDefinitionJson,
   listDefinitions,
   findDefinitionsByMachine,
   deprecateDefinition,
@@ -373,20 +374,28 @@ export async function definitionRoutes(fastify) {
       _historyPath: hasHistoryPath ? historyPath : null,
     };
 
-    try {
-      createDefinition({
-        id,
-        parentId:       parentId ?? null,
-        orgId,
-        definitionJson: definitionToStore,
-        deployedAt:     Number(tStar),
-        warnings,       // store warnings alongside definition for future reference
-      });
-    } catch (err) {
-      if (err.message?.includes('UNIQUE')) {
-        return reply.code(200).send({ id, idempotent: true });
+    // Refinement path: definition already exists but stateMapping changed.
+    // Re-use the original t_star (deployedAt) so the changepoint location stays the same;
+    // the engine updates r_max on the existing entry when we re-register below.
+    const isRefinement = existing != null;
+    if (isRefinement) {
+      tStar = BigInt(existing.deployedAt);
+      updateDefinitionJson(id, definitionToStore);
+    } else {
+      try {
+        createDefinition({
+          id,
+          parentId:       parentId ?? null,
+          orgId,
+          definitionJson: definitionToStore,
+          deployedAt:     Number(tStar),
+        });
+      } catch (err) {
+        if (err.message?.includes('UNIQUE')) {
+          return reply.code(200).send({ id, idempotent: true });
+        }
+        throw err;
       }
-      throw err;
     }
 
     try {

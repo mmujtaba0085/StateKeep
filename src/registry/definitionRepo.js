@@ -24,6 +24,7 @@ function getStmts() {
     prune:         db.prepare(`UPDATE definitions SET status = 'pruned' WHERE id = ?`),
     listByOrg:     db.prepare(`SELECT * FROM definitions WHERE org_id = ? ORDER BY deployed_at DESC LIMIT ? OFFSET ?`),
     count:         db.prepare(`SELECT COUNT(*) as cnt FROM definitions`),
+    updateJson:    db.prepare(`UPDATE definitions SET definition_json = @definition_json WHERE id = @id`),
   };
   return stmts;
 }
@@ -69,6 +70,10 @@ export function findDefinitionsByMachine(machineId, orgId) {
 
 export function findDefinitionById(id) {
   return rowToDefinition(getStmts().findById.get(id));
+}
+
+export function updateDefinitionJson(id, definitionJson) {
+  getStmts().updateJson.run({ id, definition_json: JSON.stringify(definitionJson) });
 }
 
 export function deprecateDefinition(id) {
