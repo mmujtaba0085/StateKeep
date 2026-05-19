@@ -1,5 +1,4 @@
-/* global React, Icons, Pill, StateDiagram, JsonTree, useApp, Api,
-   MOCK_ACTOR_HISTORY, MOCK_SCHEDULED, STATES_BY_FAMILY */
+/* global React, Icons, Pill, JsonTree, useApp, Api */
 const { useState: useState2, useEffect: useEffect2, useMemo: useMemo2 } = React;
 
 const STATUS_KIND = {
@@ -47,19 +46,32 @@ function ActorRow({ a, selected, onClick }) {
 }
 
 function ActorDrawer({ actor, open, onClose }) {
+  const [history, setHistory] = useState2([]);
+  const [histLoading, setHistLoading] = useState2(false);
+
+  useEffect2(() => {
+    if (!actor) return;
+    setHistLoading(true);
+    Api.get("/v1/actors/" + actor.id + "/events?limit=20")
+      .then(d => setHistory(d.events || []))
+      .catch(() => setHistory([]))
+      .finally(() => setHistLoading(false));
+  }, [actor && actor.id]);
+
   if (!actor) return null;
-  const familyKey = actor.machine.toLowerCase().includes("loan") ? "loan"
-    : actor.machine.toLowerCase().includes("order") ? "order"
-    : actor.machine.toLowerCase().includes("onboard") ? "onboarding"
-    : actor.machine.toLowerCase().includes("subscription") ? "subscription"
-    : "claims";
-  const states = STATES_BY_FAMILY[familyKey] || STATES_BY_FAMILY.loan;
-  const history = MOCK_ACTOR_HISTORY[actor.id] || [
-    { type: "system", evt: "SPAWN", time: actor.age + " ago", payload: '{}' },
-    { type: "user", evt: actor.lastEvt, time: actor.lastTime, payload: '{}' }
-  ];
-  const context = { applicantId: "u_" + actor.id.slice(0, 4), amount: 240000, term: "30y", region: "NA" };
+
   const isRescue = actor.status === "needs_rescue";
+  const context = actor.context || { id: actor.id, state: actor.state };
+
+  const fmtTime = (ts) => {
+    if (!ts) return "";
+    const d = new Date(typeof ts === "number" ? ts * 1000 : ts);
+    const diff = Date.now() - d.getTime();
+    if (diff < 60000) return "just now";
+    if (diff < 3600000) return Math.floor(diff / 60000) + "m ago";
+    if (diff < 86400000) return Math.floor(diff / 3600000) + "h ago";
+    return Math.floor(diff / 86400000) + "d ago";
+  };
 
   return React.createElement("div", { className: "drawer" + (open ? " open" : "") },
     React.createElement("div", { className: "drawer-h" },
@@ -78,10 +90,7 @@ function ActorDrawer({ actor, open, onClose }) {
         React.createElement("h4", null, "Current state"),
         React.createElement("div", { className: "muted", style: { fontSize: 11.5, marginBottom: 6 } }, actor.machine, " · ", actor.version),
         React.createElement("div", { className: "display", style: { fontSize: 22, fontWeight: 600, marginBottom: 12, color: isRescue ? "var(--red)" : "var(--text)" } }, actor.state),
-        React.createElement("div", { className: "mini-diagram" },
-          React.createElement(StateDiagram, { data: states, highlightState: actor.state, compact: true, showCounts: false })
-        ),
-        React.createElement("div", { style: { marginTop: 12 } },
+        React.createElement("div", { style: { marginTop: 4 } },
           React.createElement("div", { className: "field-label" }, "Context"),
           React.createElement("div", { className: "json-tree" }, React.createElement(JsonTree, { obj: context }))
         )
@@ -89,31 +98,31 @@ function ActorDrawer({ actor, open, onClose }) {
       // Section 2 — history
       React.createElement("div", { className: "drawer-section" },
         React.createElement("h4", null, "Event history"),
-        React.createElement("div", { className: "timeline" },
-          history.map((h, i) => {
-            const dotCls = h.type === "system" ? "purple" : h.type === "error" ? "red" : "green";
-            return React.createElement("div", { className: "tl-item", key: i },
-              React.createElement("span", { className: "dot dot-" + dotCls + " tl-dot" }),
-              React.createElement("div", null,
-                React.createElement("span", { className: "tl-evt", style: { color: h.type === "system" ? "var(--purple)" : "var(--text)" } }, h.evt),
-                React.createElement("span", { className: "tl-time" }, h.time)
-              ),
-              React.createElement("div", { className: "tl-payload" }, h.payload)
-            );
-          })
-        ),
-        React.createElement("a", { href: "#", style: { fontSize: 11, marginTop: 6, display: "inline-block" } }, "View all ", history.length + 4, " events →")
+        histLoading
+          ? React.createElement("div", { className: "muted", style: { fontSize: 11.5 } }, "Loading…")
+          : history.length === 0
+          ? React.createElement("div", { className: "muted", style: { fontSize: 11.5 } }, "No events found")
+          : React.createElement("div", { className: "timeline" },
+              history.map((e, i) => {
+                const isSystem = e.eventType === "SPAWN" || e.eventType === "MIGRATE" || e.eventType === "RESCUE";
+                const dotCls = isSystem ? "purple" : "green";
+                return React.createElement("div", { className: "tl-item", key: i },
+                  React.createElement("span", { className: "dot dot-" + dotCls + " tl-dot" }),
+                  React.createElement("div", null,
+                    React.createElement("span", { className: "tl-evt", style: { color: isSystem ? "var(--purple)" : "var(--text)" } }, e.eventType),
+                    React.createElement("span", { className: "tl-time" }, fmtTime(e.createdAt))
+                  ),
+                  e.payload && React.createElement("div", { className: "tl-payload" },
+                    typeof e.payload === "object" ? JSON.stringify(e.payload) : String(e.payload)
+                  )
+                );
+              })
+            )
       ),
       // Section 3 — scheduled
       React.createElement("div", { className: "drawer-section" },
         React.createElement("h4", null, "Scheduled events"),
-        actor.id.startsWith("a4f2") ? MOCK_SCHEDULED.map((s, i) => React.createElement("div", { key: i, style: { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0", borderBottom: "1px solid var(--border)" } },
-          React.createElement("div", null,
-            React.createElement("div", { className: "mono", style: { fontSize: 11.5 } }, s.evt),
-            React.createElement("div", { className: "muted", style: { fontSize: 10.5 } }, "fires ", s.fires)
-          ),
-          React.createElement("button", { className: "btn btn-sm btn-ghost" }, "Cancel")
-        )) : React.createElement("div", { className: "muted", style: { fontSize: 11.5 } }, "No scheduled events")
+        React.createElement("div", { className: "muted", style: { fontSize: 11.5 } }, "No scheduled events")
       ),
       // Section 4 — actions
       React.createElement("div", { className: "drawer-section" },

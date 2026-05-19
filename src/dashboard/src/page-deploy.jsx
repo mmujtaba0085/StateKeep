@@ -1,5 +1,4 @@
-/* global React, Icons, Pill, StateDiagram, useApp,
-   MOCK_MACHINES, STATES_BY_FAMILY */
+/* global React, Icons, Pill, Api, useApp */
 const { useState: useState5, useEffect: useEffect5, useMemo: useMemo5 } = React;
 
 function syntaxHighlight(code) {
@@ -61,7 +60,7 @@ const SAMPLE_JSON = `{
 function PageDeploy() {
   const [step, setStep] = useState5(1);
   const [definitionId, setDefinitionId] = useState5("loan-v3");
-  const [parent, setParent] = useState5("loan-v2");
+  const [parent, setParent] = useState5("");
   const [code, setCode] = useState5(SAMPLE_JSON);
   const [historyPath, setHistoryPath] = useState5(["START_APPLICATION", "SUBMIT", "PAY_FEE"]);
   const [newEvent, setNewEvent] = useState5("");
@@ -69,6 +68,19 @@ function PageDeploy() {
   const [mappings, setMappings] = useState5([{ old: "awaiting_documents", new: "awaiting_docs" }]);
   const [token, setToken] = useState5(292);
   const [confirmed, setConfirmed] = useState5(false);
+  const [definitions, setDefinitions] = useState5([]);
+  const [defsLoading, setDefsLoading] = useState5(true);
+
+  useEffect5(() => {
+    Api.get("/v1/definitions?limit=50")
+      .then(d => {
+        const defs = d.definitions || [];
+        setDefinitions(defs);
+        if (defs.length > 0) setParent(defs[0].id);
+      })
+      .catch(() => {})
+      .finally(() => setDefsLoading(false));
+  }, []);
 
   useEffect5(() => {
     if (step !== 3) return;
@@ -76,10 +88,7 @@ function PageDeploy() {
     return () => clearInterval(id);
   }, [step]);
 
-  const parentMachine = MOCK_MACHINES.find(m => m.versions.some(v => v.id === parent));
-  const parentStates = parentMachine ? (STATES_BY_FAMILY[parentMachine.family] || STATES_BY_FAMILY.loan) : STATES_BY_FAMILY.loan;
-  const newStates = STATES_BY_FAMILY.loan;
-
+  const parentDef = definitions.find(d => d.id === parent);
   const fmtMin = (s) => `${Math.floor(s/60)}:${String(s%60).padStart(2,"0")}`;
 
   const addEvent = () => {
@@ -118,13 +127,27 @@ function PageDeploy() {
 
           React.createElement("div", { style: { height: 14 } }),
           React.createElement("label", { className: "field-label" }, "Parent Definition"),
-          React.createElement("select", { className: "input mono", value: parent, onChange: (e) => setParent(e.target.value) },
-            MOCK_MACHINES.flatMap(m => m.versions.map(v => React.createElement("option", { key: v.id, value: v.id },
-              v.id + " · " + v.active.toLocaleString() + " active")))
+          React.createElement("select", {
+            className: "input mono",
+            value: parent,
+            onChange: (e) => setParent(e.target.value),
+            disabled: defsLoading
+          },
+            defsLoading
+              ? React.createElement("option", null, "Loading…")
+              : definitions.length === 0
+                ? React.createElement("option", { value: "" }, "No definitions found")
+                : definitions.map(d => React.createElement("option", { key: d.id, value: d.id },
+                    d.id + ((d._actorCount || 0) > 0 ? " · " + (d._actorCount || 0).toLocaleString() + " active" : "")
+                  ))
           ),
           React.createElement("div", { className: "mono", style: { fontSize: 11, marginTop: 6, color: "var(--blue)" } },
-            "Inheriting from ", parent, " (",
-            (parentMachine?.versions.find(v => v.id === parent)?.active || 0).toLocaleString(), " active actors)"
+            parentDef
+              ? React.createElement(React.Fragment, null,
+                  "Inheriting from ", parent, " (",
+                  (parentDef._actorCount || 0).toLocaleString(), " active actors)"
+                )
+              : React.createElement("span", { style: { color: "var(--muted)" } }, "Select a parent definition above")
           ),
 
           React.createElement("div", { style: { height: 14 } }),
@@ -189,43 +212,23 @@ function PageDeploy() {
         ),
 
         step === 2 && React.createElement("div", null,
-          React.createElement("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 12 } },
-            React.createElement("div", { className: "stat-tile green" },
-              React.createElement("div", { className: "stat-tile-label" }, "Will migrate"),
-              React.createElement("div", { className: "stat-tile-val" }, "2,891")
-            ),
-            React.createElement("div", { className: "stat-tile amber" },
-              React.createElement("div", { className: "stat-tile-label" }, "Will stay"),
-              React.createElement("div", { className: "stat-tile-val" }, "1,312")
-            )
-          ),
-          React.createElement("div", { style: { padding: 14, background: "var(--amber-bg)", border: "1px solid var(--amber-bd)", borderRadius: 8, marginBottom: 14 } },
-            React.createElement("div", { style: { display: "flex", gap: 8, alignItems: "flex-start" } },
-              Icons.AlertTriangle({ size: 14, color: "#f59e0b" }),
-              React.createElement("div", { style: { flex: 1 } },
-                React.createElement("div", { style: { fontWeight: 600, color: "var(--amber)", fontSize: 12.5 } }, "70 actors are stranded"),
-                React.createElement("div", { style: { color: "var(--muted)", fontSize: 11.5, marginTop: 4, lineHeight: 1.55 } },
-                  "These will be tagged needs_rescue. They are in states that do not exist in the new definition."),
-                React.createElement("div", { style: { marginTop: 10, display: "flex", gap: 6 } },
-                  React.createElement(Pill, { kind: "red" }, "cancelled · 70"))
-              )
-            )
-          ),
-          React.createElement("div", { style: { padding: 14, background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 8, marginBottom: 14 } },
-            React.createElement("div", { className: "muted", style: { fontSize: 11, marginBottom: 8 } }, "MINI SANKEY — destinations"),
-            React.createElement("div", { className: "mono", style: { fontSize: 11.5, lineHeight: 1.8 } },
+          React.createElement("div", { style: { padding: 16, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, marginBottom: 14 } },
+            React.createElement("div", { style: { display: "flex", gap: 10, alignItems: "flex-start" } },
+              Icons.Box({ size: 16, color: "var(--muted)" }),
               React.createElement("div", null,
-                React.createElement("span", { style: { color: "var(--green)" } }, "● 2,891 → loan-v3"),
-                React.createElement("div", { style: { background: "var(--green)", height: 8, width: (2891/4273*100)+"%", borderRadius: 2, marginTop: 4 } })
-              ),
-              React.createElement("div", { style: { marginTop: 6 } },
-                React.createElement("span", { style: { color: "var(--amber)" } }, "● 1,312 → loan-v2 (stayed)"),
-                React.createElement("div", { style: { background: "var(--amber)", height: 8, width: (1312/4273*100)+"%", borderRadius: 2, marginTop: 4 } })
-              ),
-              React.createElement("div", { style: { marginTop: 6 } },
-                React.createElement("span", { style: { color: "var(--red)" } }, "● 70 → needs_rescue"),
-                React.createElement("div", { style: { background: "var(--red)", height: 8, width: (70/4273*100)+"%", borderRadius: 2, marginTop: 4 } })
+                React.createElement("div", { style: { fontWeight: 600, fontSize: 12.5 } }, "Impact preview not available"),
+                React.createElement("div", { style: { color: "var(--muted)", fontSize: 11.5, marginTop: 4, lineHeight: 1.6 } },
+                  "Migration counts (migrate / stay / rescue) are computed by the APV engine at deploy time. Once confirmed, live results will appear in the Migration Monitor."
+                )
               )
+            )
+          ),
+          parentDef && React.createElement("div", { style: { padding: 12, background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 8, marginBottom: 14 } },
+            React.createElement("div", { className: "muted", style: { fontSize: 11, marginBottom: 6 } }, "PARENT DEFINITION"),
+            React.createElement("div", { className: "mono", style: { fontSize: 12 } },
+              React.createElement("div", null, React.createElement("span", { style: { color: "var(--muted)" } }, "id  "), parentDef.id),
+              React.createElement("div", { style: { marginTop: 4 } }, React.createElement("span", { style: { color: "var(--muted)" } }, "actors  "), (parentDef._actorCount || 0).toLocaleString(), " active"),
+              parentDef.machineId && React.createElement("div", { style: { marginTop: 4 } }, React.createElement("span", { style: { color: "var(--muted)" } }, "machine  "), parentDef.machineId)
             )
           ),
           React.createElement("button", { className: "btn btn-primary", style: { width: "100%" }, onClick: () => setStep(3) }, "Confirm Deploy"),
@@ -242,9 +245,9 @@ function PageDeploy() {
           React.createElement("label", { style: { display: "flex", gap: 10, alignItems: "flex-start", padding: 14, border: "1px solid var(--border)", borderRadius: 8, cursor: "pointer" } },
             React.createElement("input", { type: "checkbox", checked: confirmed, onChange: (e) => setConfirmed(e.target.checked), style: { marginTop: 3 } }),
             React.createElement("div", { style: { fontSize: 12.5, lineHeight: 1.5 } },
-              "I understand that ",
-              React.createElement("span", { style: { color: "var(--red)" } }, "70 actors will be tagged needs_rescue"),
-              ". These actors will remain frozen until I deploy a rescue version or reset them."
+              "I understand that actors whose current state does not exist in the new definition will be tagged ",
+              React.createElement("span", { style: { color: "var(--red)" } }, "needs_rescue"),
+              ". These actors will remain frozen until a rescue version is deployed or they are manually reset."
             )
           ),
           React.createElement("button", {
@@ -260,17 +263,25 @@ function PageDeploy() {
         React.createElement("div", { className: "card", style: { padding: 0, height: 540, display: "flex", flexDirection: "column" } },
           React.createElement("div", { style: { padding: "12px 16px", borderBottom: "1px solid var(--border)", display: "flex", justifyContent: "space-between", alignItems: "center" } },
             React.createElement("div", null,
-              React.createElement("div", { className: "display", style: { fontSize: 13, fontWeight: 600 } }, "Live preview"),
-              React.createElement("div", { className: "mono muted", style: { fontSize: 10.5, marginTop: 2 } }, parent, " → ", definitionId)
-            ),
-            React.createElement("div", { style: { display: "flex", gap: 6, fontSize: 10.5, fontFamily: "JetBrains Mono, monospace" } },
-              React.createElement("span", { style: { color: "var(--green)" } }, "+ added"),
-              React.createElement("span", { style: { color: "var(--red)" } }, "− removed"),
-              React.createElement("span", { style: { color: "var(--amber)" } }, "~ changed")
+              React.createElement("div", { className: "display", style: { fontSize: 13, fontWeight: 600 } }, "Definition preview"),
+              React.createElement("div", { className: "mono muted", style: { fontSize: 10.5, marginTop: 2 } }, parent || "—", " → ", definitionId)
             )
           ),
-          React.createElement("div", { style: { flex: 1, minHeight: 0 } },
-            React.createElement(StateDiagram, { data: newStates, showCounts: false })
+          React.createElement("div", { style: { flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 10, color: "var(--muted)", padding: 24 } },
+            Icons.Box({ size: 32, color: "var(--border)" }),
+            parentDef
+              ? React.createElement(React.Fragment, null,
+                  React.createElement("div", { style: { fontSize: 13, fontWeight: 500, color: "var(--text)" } }, parentDef.id),
+                  React.createElement("div", { style: { fontSize: 11, textAlign: "center", lineHeight: 1.6 } },
+                    (parentDef._actorCount || 0).toLocaleString(), " active actors",
+                    parentDef.machineId ? " · " + parentDef.machineId : ""
+                  ),
+                  parentDef.definitionJson?.states && React.createElement("div", { style: { marginTop: 6, fontSize: 11, color: "var(--blue)", fontFamily: "JetBrains Mono, monospace" } },
+                    Object.keys(parentDef.definitionJson.states).length, " states"
+                  )
+                )
+              : React.createElement("div", { style: { fontSize: 12 } }, "Select a parent definition"),
+            React.createElement("div", { style: { fontSize: 11, marginTop: 4, opacity: 0.6 } }, "State diagram preview not available")
           ),
           React.createElement("div", { style: { padding: "10px 16px", borderTop: "1px solid var(--border)", fontSize: 11 } },
             React.createElement("div", { className: "diff-add" }, "+ income_verify (new state, between underwriting and awaiting_docs)"),

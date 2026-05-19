@@ -1,4 +1,4 @@
-/* global React, Icons, Logo, Api, MOCK_ORGS */
+/* global React, Icons, Logo, Api */
 const { useState, useEffect, useRef, useContext, createContext, useMemo } = React;
 
 // ============ APP CONTEXT ============
@@ -7,7 +7,7 @@ const useApp = () => useContext(AppCtx);
 
 function AppProvider({ children }) {
   const [route, setRoute] = useState(() => (window.location.hash.replace(/^#/, "") || "command"));
-  const [org, setOrg] = useState(MOCK_ORGS[0]);
+  const [org] = useState({ name: "StateKeep", tier: "Pro" });
   const [selectedMachine, setSelectedMachine] = useState("loan");
   const [selectedActorId, setSelectedActorId] = useState(null);
   const [toasts, setToasts] = useState([]);
@@ -35,7 +35,7 @@ function AppProvider({ children }) {
 
   const value = {
     route, navigate,
-    org, setOrg,
+    org,
     selectedMachine, setSelectedMachine,
     selectedActorId, setSelectedActorId,
     toasts, pushToast, dismissToast,
@@ -66,8 +66,7 @@ const NAV = [
 ];
 
 function Sidebar() {
-  const { route, navigate, org, setOrg, pushToast, apiKey, setApiKey, setModal } = useApp();
-  const [orgOpen, setOrgOpen] = useState(false);
+  const { route, navigate, org, pushToast, apiKey, setApiKey, setModal } = useApp();
   const [copied, setCopied] = useState(false);
   const last8 = apiKey ? ("..." + apiKey.slice(-8)) : "not set";
 
@@ -112,19 +111,9 @@ function Sidebar() {
       React.createElement(Logo, null),
       React.createElement("div", { className: "sb-brand-name" }, "StateKeep")
     ),
-    React.createElement("div", { className: "sb-org", onClick: () => setOrgOpen((o) => !o) },
+    React.createElement("div", { className: "sb-org" },
       React.createElement("div", { className: "sb-org-name" }, org.name,
-        React.createElement("span", { className: "sb-org-tier" }, org.tier)),
-      React.createElement(Icons.ChevronDown, { size: 14, color: "#647080" }),
-      orgOpen && React.createElement("div", { className: "sb-org-menu", onClick: (e) => e.stopPropagation() },
-        MOCK_ORGS.map(o => React.createElement("div", {
-          key: o.id, className: "sb-org-item" + (o.id === org.id ? " active" : ""),
-          onClick: () => { setOrg(o); setOrgOpen(false); }
-        },
-          React.createElement("span", null, o.name),
-          React.createElement("span", { className: "sb-org-item-tier" }, o.tier)
-        ))
-      )
+        React.createElement("span", { className: "sb-org-tier" }, org.tier))
     ),
     React.createElement("nav", { className: "sb-nav" },
       NAV.map(group =>
@@ -146,15 +135,15 @@ function Sidebar() {
     ),
     React.createElement("div", { className: "sb-bottom" },
       React.createElement("a", {
-        href: "/docs",
+        href: "/api-explorer",
         target: "_blank",
         rel: "noopener noreferrer",
         className: "sb-health",
         style: { textDecoration: "none", cursor: "pointer" },
-        title: "Open Swagger API docs in a new tab"
+        title: "Open API Explorer in a new tab"
       },
         React.createElement("span", { className: "dot dot-blue" }),
-        React.createElement("span", { style: { flex: 1 } }, "API Docs"),
+        React.createElement("span", { style: { flex: 1 } }, "API Explorer"),
         Icons.ExternalLink({ size: 11, color: "#647080" })
       ),
       React.createElement("div", {
@@ -167,7 +156,12 @@ function Sidebar() {
         apiKey
           ? (copied ? Icons.Check({ size: 12, color: "#3ecf8e" }) : Icons.Copy({ size: 12 }))
           : Icons.AlertTriangle({ size: 12, color: "var(--amber)" })
-      )
+      ),
+      React.createElement("button", {
+        className: "btn btn-ghost",
+        style: { width: "100%", marginTop: 6, fontSize: 11, color: "var(--muted)" },
+        onClick: () => { Api.setKey(""); }
+      }, "Sign out")
     )
   );
 }

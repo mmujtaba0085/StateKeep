@@ -1,6 +1,6 @@
-/* global React, ReactDOM,
+/* global React, ReactDOM, Api,
    AppProvider, useApp, Sidebar, Toasts, Modal,
-   PageCommand, PageActors, PageMigration, PageMachines, PageDeploy,
+   PageLogin, PageCommand, PageActors, PageMigration, PageMachines, PageDeploy,
    PageWorkers, PageMetrics, PageSettings, PageScheduled, PageWebhooks */
 
 function Router() {
@@ -21,6 +21,16 @@ function Router() {
 }
 
 function App() {
+  const [authed, setAuthed] = React.useState(() => !!Api.key);
+
+  React.useEffect(() => {
+    return Api.onChange(k => setAuthed(!!k));
+  }, []);
+
+  if (!authed) {
+    return React.createElement(PageLogin, null);
+  }
+
   return React.createElement(AppProvider, null,
     React.createElement("div", { className: "app" },
       React.createElement(Sidebar, null),

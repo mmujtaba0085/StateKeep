@@ -178,6 +178,46 @@ fastify.get('/openapi.json', { schema: { hide: true } }, async (_req, reply) => 
   return reply.send(fastify.swagger());
 });
 
+// ── API Explorer — Swagger UI with auto-auth from dashboard localStorage ──────
+fastify.get('/api-explorer', { schema: { hide: true } }, async (_req, reply) => {
+  const html = `<!DOCTYPE html>
+<html lang="en"><head>
+  <title>StateKeep API Explorer</title>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css">
+  <style>
+    body { margin: 0; background: #080a0f; }
+    .topbar { display: none !important; }
+    #swagger-ui { max-width: 1400px; margin: 0 auto; padding: 16px; }
+  </style>
+</head><body>
+<div id="swagger-ui"></div>
+<script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+<script>
+  let ui;
+  ui = SwaggerUIBundle({
+    url: '/openapi.json',
+    dom_id: '#swagger-ui',
+    presets: [SwaggerUIBundle.presets.apis, SwaggerUIBundle.SwaggerUIStandalonePreset],
+    layout: 'BaseLayout',
+    deepLinking: true,
+    persistAuthorization: true,
+    requestInterceptor: (req) => {
+      const k = localStorage.getItem('sk_api_key');
+      if (k) req.headers['x-api-key'] = k;
+      return req;
+    },
+    onComplete: () => {
+      const k = localStorage.getItem('sk_api_key');
+      if (k) ui.preauthorizeApiKey('apiKey', k);
+    }
+  });
+</script>
+</body></html>`;
+  return reply.type('text/html').send(html);
+});
+
 // ── Graceful shutdown ─────────────────────────────────────────────────────────
 async function shutdown(signal) {
   fastify.log.info(`Received ${signal} — shutting down gracefully`);

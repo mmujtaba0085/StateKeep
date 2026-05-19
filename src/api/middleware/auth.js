@@ -17,6 +17,8 @@ const PUBLIC_PATHS = new Set([
   '/v1/health/workers',
   '/v1/metrics',
   '/v1/auth/verify',
+  '/v1/auth/login',
+  '/api-explorer',
 ]);
 
 export async function authMiddleware(request, reply) {
