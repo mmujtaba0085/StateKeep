@@ -173,15 +173,20 @@ export async function definitionRoutes(fastify) {
     const hasHistoryPath = Array.isArray(historyPath) && historyPath.length > 0;
 
     // ── Idempotency ──────────────────────────────────────────────────────────
-    // A re-deploy of the same ID is idempotent only if historyPath matches too.
-    // Deploying the same definition body with a different historyPath is a user
-    // error (the changepoint would be silently ignored) — return 409 instead.
+    // A re-deploy of the same ID is idempotent only when historyPath AND
+    // stateMapping both match. Changing either is a meaningful update (new
+    // refinement) — not an error — so we fall through to create a new deployment.
+    // Changing historyPath alone is still a 409 (user error: ambiguous changepoint).
     const existing = findDefinitionById(id);
     if (existing) {
-      const normaliseHP    = (hp) => (Array.isArray(hp) && hp.length > 0) ? hp : null;
-      const incomingHP     = normaliseHP(historyPath);
-      const storedHP       = normaliseHP(existing.definitionJson._historyPath);
-      const historyChanged = JSON.stringify(incomingHP) !== JSON.stringify(storedHP);
+      const normaliseHP  = (hp) => (Array.isArray(hp) && hp.length > 0) ? hp : null;
+      const normaliseSM  = (sm) => (sm && Object.keys(sm).length > 0) ? sm : null;
+      const incomingHP   = normaliseHP(historyPath);
+      const storedHP     = normaliseHP(existing.definitionJson._historyPath);
+      const incomingSM   = normaliseSM(stateMapping);
+      const storedSM     = normaliseSM(existing.definitionJson._stateMapping);
+      const historyChanged  = JSON.stringify(incomingHP) !== JSON.stringify(storedHP);
+      const mappingChanged  = JSON.stringify(incomingSM) !== JSON.stringify(storedSM);
 
       if (historyChanged) {
         return reply.code(409).send({
@@ -191,15 +196,18 @@ export async function definitionRoutes(fastify) {
         });
       }
 
-      return reply.code(200).send({
-        id,
-        parentId:        existing.parentId,
-        deployedAt:      existing.deployedAt,
-        deploymentId:    null,
-        affectedActors:  0,
-        engineAvailable: eng.available,
-        idempotent:      true,
-      });
+      // stateMapping changed → treat as a new refinement (fall through to deploy)
+      if (!mappingChanged) {
+        return reply.code(200).send({
+          id,
+          parentId:        existing.parentId,
+          deployedAt:      existing.deployedAt,
+          deploymentId:    null,
+          affectedActors:  0,
+          engineAvailable: eng.available,
+          idempotent:      true,
+        });
+      }
     }
 
     // ── Step 1: Validate definition before storing ──────────────────────────
