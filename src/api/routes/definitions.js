@@ -189,6 +189,10 @@ export async function definitionRoutes(fastify) {
       const historyChanged  = JSON.stringify(incomingHP) !== JSON.stringify(storedHP);
       const mappingChanged  = JSON.stringify(incomingSM) !== JSON.stringify(storedSM);
 
+      // Strip internal _ fields from stored JSON before comparing definition content
+      const storedDefClean  = Object.fromEntries(Object.entries(existing.definitionJson).filter(([k]) => !k.startsWith('_')));
+      const definitionChanged = JSON.stringify(definition) !== JSON.stringify(storedDefClean);
+
       if (historyChanged) {
         return reply.code(409).send({
           error:               `Definition ${id} already exists with a different historyPath. Deploy under a new version ID.`,
@@ -197,8 +201,8 @@ export async function definitionRoutes(fastify) {
         });
       }
 
-      // stateMapping changed → treat as a new refinement (fall through to deploy)
-      if (!mappingChanged) {
+      // stateMapping or definition content changed → treat as a new refinement (fall through to deploy)
+      if (!mappingChanged && !definitionChanged) {
         return reply.code(200).send({
           id,
           parentId:        existing.parentId,
