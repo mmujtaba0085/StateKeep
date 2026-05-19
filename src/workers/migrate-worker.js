@@ -19,7 +19,7 @@ import { findActorById, updateActorStatus } from '../registry/actorRepo.js';
 import { findDefinitionById } from '../registry/definitionRepo.js';
 import { fingerprintToBigInt } from '../ffi/hashUtils.js';
 import { incrementMigrated, incrementFailed, updateDeploymentStatus, findDeploymentById } from '../registry/deploymentRepo.js';
-import { migrateActor } from '../runtime/actorManager.js';
+import { migrateActor, invalidateDefinitionCache } from '../runtime/actorManager.js';
 import { getEngine, engineReady } from '../ffi/engine.js';
 import { loadChangepointsAfter, loadParChangepointsAfter } from '../registry/changepointRepo.js';
 
@@ -156,6 +156,7 @@ async function processJob(job) {
   updateActorStatus(actor_id, 'migrating');
 
   try {
+    invalidateDefinitionCache(target_def_id);
     const result = await migrateActor(actor_id, target_def_id);
 
     // Gap 5 fix: notify engine that the actor has started on the new definition.
