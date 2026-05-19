@@ -160,7 +160,7 @@ async function main() {
   console.log('\n--- Actor IDs by state (for dashboard reference) ---\n');
   const byState = {};
   for (const a of actors) {
-    const res = await api('GET', `/v1/actors/${a.id}`);
+    const res = await api('GET', `/v1/actors/${a.id}/state`);
     const s   = res.stateValue;
     if (!byState[s]) byState[s] = [];
     byState[s].push(a.id);

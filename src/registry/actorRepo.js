@@ -341,6 +341,27 @@ export function deleteActor(id) {
 }
 
 /**
+ * Cheap single-column lookup used by the stale-cache check in actorManager.sendEvent.
+ * Returns { id, definitionId } or null.
+ */
+export function getActorDefinitionId(id) {
+  const row = getDb().prepare(
+    `SELECT id, definition_id as definitionId FROM actors WHERE id = ?`
+  ).get(id);
+  return row ?? null;
+}
+
+/**
+ * Update logical_start_tick after an actor migrates to a new definition.
+ * This prevents the APV engine from routing the actor backward to an older definition.
+ */
+export function updateActorLogicalStartTick(id, tick) {
+  getDb().prepare(
+    `UPDATE actors SET logical_start_tick = ?, updated_at = ? WHERE id = ?`
+  ).run(tick, Date.now(), id);
+}
+
+/**
  * Count actors grouped by status for a specific org.
  */
 export function getActorCountsByStatus(orgId) {

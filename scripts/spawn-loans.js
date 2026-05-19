@@ -216,7 +216,7 @@ async function main() {
   console.log('\n--- Actual final states ---\n');
   const byState = {};
   for (const a of actors) {
-    const res = await api('GET', `/v1/actors/${a.id}`);
+    const res = await api('GET', `/v1/actors/${a.id}/state`);
     const s   = res.stateValue;
     if (!byState[s]) byState[s] = [];
     byState[s].push({ id: a.id, name: APPLICANTS[actors.indexOf(a)].name });

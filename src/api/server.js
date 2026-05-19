@@ -20,8 +20,9 @@ import { fileURLToPath } from 'url';
 import { mkdirSync } from 'fs';
 import { randomUUID } from 'crypto';
 
-import { engineReady } from '../ffi/engine.js';
+import { engineReady, getEngine } from '../ffi/engine.js';
 import { getDb } from '../registry/db.js';
+import { getMaxTStar } from '../registry/changepointRepo.js';
 import './adminKey.js';                                  // fails fast if STATEKEEP_ADMIN_KEY unset
 import { authMiddleware } from './middleware/auth.js';
 import { healthRoutes } from './routes/health.js';
@@ -37,6 +38,7 @@ import { scenarioRoutes } from './routes/scenarios.js';
 import { archiveRoutes } from './routes/archives.js';
 import { webhookRoutes } from './routes/webhooks.js';
 import { adminRoutes } from './routes/admin.js';
+import { internalRoutes } from './routes/internal.js';
 import { websocketRoutes } from './websocket.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -171,6 +173,7 @@ await fastify.register(scenarioRoutes);
 await fastify.register(archiveRoutes);
 await fastify.register(webhookRoutes);
 await fastify.register(adminRoutes);
+await fastify.register(internalRoutes);
 await fastify.register(websocketRoutes);
 
 // ── OpenAPI JSON alias (/openapi.json → /docs/json) ──────────────────────────
@@ -234,6 +237,29 @@ process.on('SIGINT',  () => shutdown('SIGINT'));
 // ── Startup ───────────────────────────────────────────────────────────────────
 await engineReady;
 getDb();
+
+// Seed APV clock from DB so new deployments get t_star values strictly greater
+// than all historical changepoints.  Without this, a server restart resets the
+// in-memory counter to 1, causing new definitions to get deployedAt=1 which
+// pre-dates all existing actors and breaks the engine's ordering logic.
+try {
+  const maxTStar = getMaxTStar();
+  if (maxTStar > 0) {
+    const eng = getEngine();
+    if (!eng.available) {
+      eng.seedTick(maxTStar);
+      console.log(`[server] Fallback tick seeded to ${maxTStar + 1} (max known t_star: ${maxTStar})`);
+    } else {
+      // Real engine: advance by burning ticks. Safe because t_star only increments
+      // once per definition deployment (typically < 10 000 total).
+      let current = eng.clockTick();
+      while (Number(current) <= maxTStar) current = eng.clockTick();
+      console.log(`[server] APV engine clock advanced to ${current} (max known t_star: ${maxTStar})`);
+    }
+  }
+} catch (e) {
+  console.warn(`[server] Tick seeding failed (non-fatal): ${e.message}`);
+}
 
 try {
   await fastify.listen({ port: PORT, host: '0.0.0.0' });

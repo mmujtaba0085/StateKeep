@@ -68,11 +68,28 @@ function hashDefinition(definition) {
  * Evaluate migration candidates across the FULL machine family (all versions).
  * machineId is the root definition's id — the same value stored as machine_id
  * on every definition in the family tree.
+ *
+ * When hasHistoryPath = false (wildcard deploy), all active actors are returned
+ * as wouldMigrate without calling the engine (engine uses exact prefix match,
+ * not wildcard, for prefix_hash=0).
  */
-function evaluateMigrationCandidates(machineId, orgId, eng, currentTick) {
+function evaluateMigrationCandidates(machineId, orgId, eng, currentTick, hasHistoryPath = true) {
   const actors     = findActorsByMachine(machineId, orgId);
   const wouldMigrate = [];
   const wouldStay    = [];
+
+  if (!hasHistoryPath) {
+    // Wildcard: every active actor on the machine is eligible
+    for (const actor of actors) {
+      wouldMigrate.push({
+        actorId:            actor.id,
+        currentState:       actor.stateValue,
+        definitionId:       actor.definitionId,
+        targetDefinitionId: null,  // not yet known — definition hasn't been stored
+      });
+    }
+    return { eligible: actors.length, wouldMigrate, wouldStay, engineAvailable: eng.available };
+  }
 
   for (const actor of actors) {
     let targetDefId = null;
@@ -151,12 +168,29 @@ export async function definitionRoutes(fastify) {
     },
   }, async (request, reply) => {
     const { id, parentId, definition, refinement = 1, confirmToken, historyPath, stateMapping, historyRegions } = request.body;
-    const isDryRun = request.query?.dryRun === 'true';
-    const eng = getEngine();
+    const isDryRun       = request.query?.dryRun === 'true';
+    const eng            = getEngine();
+    const hasHistoryPath = Array.isArray(historyPath) && historyPath.length > 0;
 
     // ── Idempotency ──────────────────────────────────────────────────────────
+    // A re-deploy of the same ID is idempotent only if historyPath matches too.
+    // Deploying the same definition body with a different historyPath is a user
+    // error (the changepoint would be silently ignored) — return 409 instead.
     const existing = findDefinitionById(id);
     if (existing) {
+      const normaliseHP    = (hp) => (Array.isArray(hp) && hp.length > 0) ? hp : null;
+      const incomingHP     = normaliseHP(historyPath);
+      const storedHP       = normaliseHP(existing.definitionJson._historyPath);
+      const historyChanged = JSON.stringify(incomingHP) !== JSON.stringify(storedHP);
+
+      if (historyChanged) {
+        return reply.code(409).send({
+          error:               `Definition ${id} already exists with a different historyPath. Deploy under a new version ID.`,
+          existingHistoryPath: storedHP,
+          incomingHistoryPath: incomingHP,
+        });
+      }
+
       return reply.code(200).send({
         id,
         parentId:        existing.parentId,
@@ -204,7 +238,7 @@ export async function definitionRoutes(fastify) {
       let migration = { eligible: 0, wouldMigrate: [], wouldStay: [], engineAvailable: eng.available };
 
       if (parentId && eng.available) {
-        const candidates = evaluateMigrationCandidates(machineId, orgId, eng, dryRunTick);
+        const candidates = evaluateMigrationCandidates(machineId, orgId, eng, dryRunTick, hasHistoryPath);
         migration = { ...candidates, engineAvailable: true };
       } else if (parentId) {
         const dryActors = findActorsByMachine(machineId, orgId);
@@ -304,8 +338,6 @@ export async function definitionRoutes(fastify) {
     // ── Step 3: Store definition ─────────────────────────────────────────────
     const tStar = eng.clockTick();
 
-    // Gap 1 fix: compute the correct prefix_hash for apv_register_changepoint.
-    //
     // prefix_hash answers: "which actors are eligible for this deployment?"
     //
     //   No historyPath (absent or empty array):
@@ -321,15 +353,17 @@ export async function definitionRoutes(fastify) {
     // it mirrors exactly what actorWorker.updateFingerprint produces —
     // starting from FNV_OFFSET, chaining fnv1aUpdate per event, no per-step
     // fnv1aFinal.
-    const hasHistoryPath = Array.isArray(historyPath) && historyPath.length > 0;
     const prefixHash = hasHistoryPath
       ? fingerprintToBigInt(computeHistoryHash(historyPath))
       : 0n;
 
-    // Embed _stateMapping in the stored JSON so migrate-worker can read it later
-    const definitionToStore = stateMapping && Object.keys(stateMapping).length > 0
-      ? { ...definition, _stateMapping: stateMapping }
-      : definition;
+    // Embed _stateMapping and _historyPath in the stored JSON so they survive
+    // across restarts and can be compared in the idempotency check on re-deploy.
+    const definitionToStore = {
+      ...definition,
+      ...(stateMapping && Object.keys(stateMapping).length > 0 ? { _stateMapping: stateMapping } : {}),
+      _historyPath: hasHistoryPath ? historyPath : null,
+    };
 
     try {
       createDefinition({
@@ -400,37 +434,47 @@ export async function definitionRoutes(fastify) {
       const actors = findActorsByMachine(machineId, orgId);
 
       if (actors.length > 0) {
-        // Build the job list first so affected_actors reflects only actors that
-        // will actually receive a migration job (those matching the historyPath
-        // fingerprint). Setting it to actors.length inflates the count and
-        // prevents checkDeploymentComplete from ever marking the deployment done.
+        // Build the job list: only actors whose fingerprint matches the historyPath prefix
+        // (or ALL actors for wildcard deployments where hasHistoryPath = false).
+        // Limiting the count prevents checkDeploymentComplete from getting stuck when
+        // actors don't match and are never migrated.
         const pendingJobs = [];
-        for (const actor of actors) {
-          let targetDefId = null;
-          try {
-            const actorPrefixHash   = fingerprintToBigInt(actor.historyFingerprint);
-            const actorCurrentDef   = findDefinitionById(actor.definitionId);
-            const currentDeployedAt = actorCurrentDef?.deployedAt ?? 0;
-            const logicalStartTick  = actor.logicalStartTick ?? 0;
 
-            const logicalTime = currentDeployedAt > logicalStartTick
-              ? BigInt(currentDeployedAt) + 1n
-              : BigInt(logicalStartTick);
-
-            targetDefId = eng.computeAccessible(actorPrefixHash, logicalTime, currentTick);
-
-            // Parallel path: check per-region fingerprints when scalar found nothing
-            if (!targetDefId && actor.regionFingerprints) {
-              const regionArr = regionFingerprintsToArray(actor.regionFingerprints);
-              if (regionArr && regionArr.length > 0) {
-                targetDefId = eng.computeAccessibleParallel(regionArr, logicalTime, currentTick);
-              }
-            }
-          } catch (e) {
-            request.log.warn(`[definitions] computeAccessible failed for ${actor.id}: ${e.message}`);
+        if (!hasHistoryPath) {
+          // Wildcard deploy: C engine treats prefix_hash=0 as exact match against empty
+          // fingerprint, not as "match all".  Bypass the engine and enqueue every active
+          // actor on the machine directly.
+          for (const actor of actors) {
+            pendingJobs.push({ actor_id: actor.id, org_id: orgId, target_def_id: id });
           }
-          if (targetDefId && targetDefId !== actor.definitionId) {
-            pendingJobs.push({ actor_id: actor.id, org_id: orgId, target_def_id: targetDefId });
+        } else {
+          for (const actor of actors) {
+            let targetDefId = null;
+            try {
+              const actorPrefixHash   = fingerprintToBigInt(actor.historyFingerprint);
+              const actorCurrentDef   = findDefinitionById(actor.definitionId);
+              const currentDeployedAt = actorCurrentDef?.deployedAt ?? 0;
+              const logicalStartTick  = actor.logicalStartTick ?? 0;
+
+              const logicalTime = currentDeployedAt > logicalStartTick
+                ? BigInt(currentDeployedAt) + 1n
+                : BigInt(logicalStartTick);
+
+              targetDefId = eng.computeAccessible(actorPrefixHash, logicalTime, currentTick);
+
+              // Parallel path: check per-region fingerprints when scalar found nothing
+              if (!targetDefId && actor.regionFingerprints) {
+                const regionArr = regionFingerprintsToArray(actor.regionFingerprints);
+                if (regionArr && regionArr.length > 0) {
+                  targetDefId = eng.computeAccessibleParallel(regionArr, logicalTime, currentTick);
+                }
+              }
+            } catch (e) {
+              request.log.warn(`[definitions] computeAccessible failed for ${actor.id}: ${e.message}`);
+            }
+            if (targetDefId && targetDefId !== actor.definitionId) {
+              pendingJobs.push({ actor_id: actor.id, org_id: orgId, target_def_id: targetDefId });
+            }
           }
         }
 

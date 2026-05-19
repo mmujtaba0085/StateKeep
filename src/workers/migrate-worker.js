@@ -26,6 +26,21 @@ import { loadChangepointsAfter, loadParChangepointsAfter } from '../registry/cha
 const BATCH_SIZE    = 100;
 const POLL_INTERVAL = 500;   // ms
 
+const API_PORT  = process.env.PORT ?? 3001;
+const ADMIN_KEY = process.env.STATEKEEP_ADMIN_KEY ?? '';
+
+async function evictFromApiCache(actorId) {
+  try {
+    await fetch(`http://localhost:${API_PORT}/v1/internal/cache/evict`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json', 'x-admin-key': ADMIN_KEY },
+      body:    JSON.stringify({ actorId }),
+    });
+  } catch {
+    // Non-fatal: the stale-cache staleness check in actorManager.sendEvent is the safety net.
+  }
+}
+
 console.log('[migrate-worker] Starting...');
 
 await engineReady;
@@ -178,6 +193,9 @@ async function processJob(job) {
 
     markDone(id);
     incrementMigrated(deployment_id);
+    // Evict the hot registry entry on the API server so the next event is dispatched
+    // against the new definition, not the stale cached one.
+    evictFromApiCache(actor_id);
   } catch (err) {
     if (err.code === 'STATE_NOT_MAPPABLE') {
       // Actor cannot be placed in new definition — tag needs_rescue, do NOT call actorStarted

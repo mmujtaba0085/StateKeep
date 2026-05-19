@@ -19,6 +19,16 @@ export const engine = {
   },
 
   /**
+   * Advance the fallback tick counter to at least `from + 1`.
+   * Called at server startup so that new deployments get t_star values
+   * strictly greater than all historical changepoints stored in the DB.
+   */
+  seedTick(from) {
+    const target = BigInt(from) + 1n;
+    if (target > _tick) _tick = target;
+  },
+
+  /**
    * Register a changepoint. No-op in fallback mode.
    * @returns {number} 0 (success)
    */

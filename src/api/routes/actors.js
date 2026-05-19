@@ -151,6 +151,33 @@ export async function actorRoutes(fastify) {
     }
   });
 
+  // ── GET /v1/actors/:id — convenience alias for /state ────────────────────
+  // Scripts (spawn-tickets.js, spawn-loans.js) and external clients call the
+  // bare /:id path. Fastify's radix tree gives static suffixes priority, so
+  // registering this before /state is safe.
+  fastify.get('/v1/actors/:id', {
+    schema: {
+      params: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
+    },
+  }, async (request, reply) => {
+    const { id } = request.params;
+    const actor = findActorById(id);
+    if (!actor || actor.orgId !== request.orgId) {
+      return reply.code(404).send({ error: `Actor ${id} not found` });
+    }
+    try {
+      const state = await getActorState(id);
+      return reply.send({
+        ...state,
+        done: state.status === 'terminated' ||
+              (state.stateValue != null && typeof state.stateValue === 'string' && state.stateValue === 'done'),
+      });
+    } catch (err) {
+      const code = err.message.includes('not found') ? 404 : 500;
+      return reply.code(code).send({ error: err.message });
+    }
+  });
+
   // ── GET /v1/actors/:id/state ───────────────────────────────────────────────
   fastify.get('/v1/actors/:id/state', {
     schema: {

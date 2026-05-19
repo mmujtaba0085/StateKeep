@@ -16,10 +16,13 @@ import {
   updateActorStatus,
   migrateActorDefinition,
   findIdleActors,
+  getActorDefinitionId,
+  updateActorLogicalStartTick,
 } from '../registry/actorRepo.js';
 import { findDefinitionById } from '../registry/definitionRepo.js';
 import { getDb } from '../registry/db.js';
 import { emitWebhookEvent } from '../api/lib/webhookEmitter.js';
+import { getWildcardChildDef } from '../registry/changepointRepo.js';
 
 const HOT_REGISTRY_SIZE  = parseInt(process.env.HOT_REGISTRY_SIZE    ?? '10000',  10);
 const IDLE_TIMEOUT_MS    = parseInt(process.env.IDLE_TIMEOUT_SECONDS  ?? '300',    10) * 1000;
@@ -71,24 +74,27 @@ export function invalidateDefinitionCache(definitionId) {
 }
 
 // ── Inline migration check cache ──────────────────────────────────────────────
-// key: `${actorId}:${definitionId}`
-// value: { result: targetDefId | null, evaluatedAt: BigInt (engine tick) }
+// key: `${actorId}:${definitionId}:${fingerprint}`
+// Including fingerprint ensures the cache is bypassed whenever the actor's history
+// changes — so actors that just processed INCOME_VERIFIED get a fresh engine
+// evaluation without waiting for the TTL to expire.
 
 const migrationCheckCache = new Map();
 const MIGRATION_CACHE_TTL_TICKS = 100n;
 
-function getCachedDecision(actorId, definitionId, currentTick) {
-  const cached = migrationCheckCache.get(`${actorId}:${definitionId}`);
+function getCachedDecision(actorId, definitionId, fingerprint, currentTick) {
+  const key    = `${actorId}:${definitionId}:${fingerprint}`;
+  const cached = migrationCheckCache.get(key);
   if (!cached) return undefined;
   if (BigInt(currentTick) - cached.evaluatedAt > MIGRATION_CACHE_TTL_TICKS) {
-    migrationCheckCache.delete(`${actorId}:${definitionId}`);
+    migrationCheckCache.delete(key);
     return undefined;
   }
   return cached.result;
 }
 
-function setCachedDecision(actorId, definitionId, currentTick, result) {
-  migrationCheckCache.set(`${actorId}:${definitionId}`, {
+function setCachedDecision(actorId, definitionId, fingerprint, currentTick, result) {
+  migrationCheckCache.set(`${actorId}:${definitionId}:${fingerprint}`, {
     result,
     evaluatedAt: BigInt(currentTick),
   });
@@ -105,9 +111,10 @@ export function evictFromHotRegistry(...actorIds) {
 }
 
 export function invalidateMigrationCacheForDefinition(definitionId) {
-  const suffix = `:${definitionId}`;
+  // Keys are `actorId:definitionId:fingerprint` — match on the middle segment
+  const segment = `:${definitionId}:`;
   for (const key of migrationCheckCache.keys()) {
-    if (key.endsWith(suffix)) migrationCheckCache.delete(key);
+    if (key.includes(segment)) migrationCheckCache.delete(key);
   }
 }
 
@@ -235,8 +242,17 @@ export async function spawnActor({ definitionId, orgId, initialContext, logicalS
 export async function sendEvent(actorId, event, tick) {
   const pool = getWorkerPool();
 
-  // Load from hot registry or SQLite
+  // Load from hot registry or SQLite.
+  // Stale-cache check: if the migrate-worker updated this actor in the DB while it was
+  // in the hot registry, evict and reload so the event is dispatched to the correct definition.
   let entry = hotRegistry.get(actorId);
+  if (entry) {
+    const dbRow = getActorDefinitionId(actorId);
+    if (dbRow && dbRow.definitionId !== entry.definitionId) {
+      hotRegistry.delete(actorId);   // delete, not evict, to avoid overwriting DB status
+      entry = null;
+    }
+  }
   if (!entry) {
     const actor = findActorById(actorId);
     if (!actor) throw new Error(`Actor not found: ${actorId}`);
@@ -277,35 +293,70 @@ export async function sendEvent(actorId, event, tick) {
   if (eng.available) {
     const currentTick = BigInt(tick ?? eng.clockTick());
     const fp          = entry.historyFingerprint;
-    const cachedResult = getCachedDecision(actorId, entry.definitionId, currentTick);
+    const cachedResult = getCachedDecision(actorId, entry.definitionId, fp, currentTick);
 
     let targetDefId;
     if (cachedResult !== undefined) {
       targetDefId = cachedResult;
     } else {
       try {
-        // Scalar path (flat / wildcard fingerprint)
+        // Use the same logicalTime correction as definitions.js step-5:
+        // if the actor has already migrated once, search strictly after the current
+        // definition's t_star to avoid routing backward to an older version.
+        const currentDef        = cachedFindDefinition(entry.definitionId);
+        const currentDeployedAt = currentDef?.deployedAt ?? 0;
+        const logicalTime = currentDeployedAt > (entry.logicalStartTick ?? 0)
+          ? BigInt(currentDeployedAt) + 1n
+          : BigInt(entry.logicalStartTick ?? 0);
+
+        // Scalar path
         targetDefId = eng.computeAccessible(
           fingerprintToBigInt(fp),
-          BigInt(entry.logicalStartTick ?? 0),
+          logicalTime,
           currentTick
         );
-        // Parallel path: if the actor has per-region fingerprints and the scalar
-        // check found nothing, try the parallel changepoint table
+
+        // Wildcard fallback: C engine performs exact prefix matching, so prefix_hash=0
+        // never matches an actor whose fingerprint is non-zero. If the engine found
+        // nothing, check the DB for a wildcard (prefix_hash='0') changepoint.
+        if (!targetDefId) {
+          targetDefId = getWildcardChildDef(
+            entry.definitionId,
+            entry.logicalStartTick ?? 0
+          );
+        }
+
+        // Parallel path: per-region fingerprints
         if (!targetDefId && entry.regionFingerprints) {
           const regionArr = regionFingerprintsToArray(entry.regionFingerprints);
           if (regionArr && regionArr.length > 0) {
             targetDefId = eng.computeAccessibleParallel(
               regionArr,
-              BigInt(entry.logicalStartTick ?? 0),
+              logicalTime,
               currentTick
             );
+          }
+        }
+
+        // Backward-migration guard: never route an actor to a definition deployed
+        // before the actor's current definition (engine can return stale routes when
+        // logicalStartTick pre-dates multiple changepoints).
+        if (targetDefId && targetDefId !== entry.definitionId) {
+          const targetDef = cachedFindDefinition(targetDefId);
+          if (targetDef && currentDef && Number(targetDef.deployedAt) <= Number(currentDef.deployedAt)) {
+            logDecision({
+              actorId, orgId: entry.orgId, trigger: 'inline_event', evaluatedAt: currentTick,
+              decision: 'stayed', reason: 'backward_migration_blocked',
+              fromDefinitionId: entry.definitionId, toDefinitionId: targetDefId,
+              actorFingerprint: fp,
+            });
+            targetDefId = null;
           }
         }
       } catch {
         targetDefId = null;
       }
-      setCachedDecision(actorId, entry.definitionId, currentTick, targetDefId);
+      setCachedDecision(actorId, entry.definitionId, fp, currentTick, targetDefId);
     }
 
     if (targetDefId && targetDefId !== entry.definitionId) {
@@ -313,7 +364,11 @@ export async function sendEvent(actorId, event, tick) {
       const fromDefId = entry.definitionId;
       try {
         await migrateActor(actorId, targetDefId);
-        migrationCheckCache.delete(`${actorId}:${fromDefId}`);
+        // Evict ALL cached decisions for this actor/fromDef (key now includes fingerprint)
+        const _prefix = `${actorId}:${fromDefId}:`;
+        for (const key of migrationCheckCache.keys()) {
+          if (key.startsWith(_prefix)) migrationCheckCache.delete(key);
+        }
         // Reload entry — migrateActor updated hot registry
         entry = hotRegistry.get(actorId) ?? entry;
         migratedTo = targetDefId;
@@ -532,6 +587,13 @@ export async function migrateActor(actorId, targetDefinitionId) {
     context:      result.context,
   });
 
+  // Set logicalStartTick to deployedAt + 1 so lower_bound on the next event starts
+  // strictly AFTER the changepoint that just fired. Without +1, the same changepoint
+  // (t_star == deployedAt) is found again on the very next event, causing an immediate
+  // false re-migration back to the same target.
+  const newLogicalStartTick = Number(targetDef.deployedAt) + 1;
+  updateActorLogicalStartTick(actorId, newLogicalStartTick);
+
   if (hotRegistry.has(actorId)) {
     const existing = hotRegistry.get(actorId);
     touch(actorId, {
@@ -541,7 +603,7 @@ export async function migrateActor(actorId, targetDefinitionId) {
       context:            result.context,
       historyFingerprint: actor.historyFingerprint,
       lastEventTick:      actor.lastEventTick,
-      logicalStartTick:   existing?.logicalStartTick ?? actor.logicalStartTick,
+      logicalStartTick:   newLogicalStartTick,
       lastAccess:         Date.now(),
     });
   }
