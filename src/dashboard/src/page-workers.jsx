@@ -1,5 +1,57 @@
-/* global React, Icons, Api */
+/* global React, Icons, Pill, Api */
 const { useState: useState6, useEffect: useEffect6 } = React;
+
+function WorkerFleetTable() {
+  const [workers, setWorkers] = useState6([]);
+  const [loading, setLoading] = useState6(true);
+
+  const load = () => {
+    Api.get("/v1/health/workers")
+      .then(d => setWorkers(d.workers || []))
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  };
+
+  useEffect6(() => {
+    load();
+    const t = setInterval(load, 30000);
+    return () => clearInterval(t);
+  }, []);
+
+  if (loading) return React.createElement("div", { style: { padding: "40px 0", textAlign: "center", color: "var(--muted)", fontSize: 12 } }, "Loading…");
+  if (workers.length === 0) return React.createElement("div", { style: { padding: "40px 0", textAlign: "center", color: "var(--muted)", fontSize: 12 } }, "No active workers found");
+
+  return React.createElement("table", { className: "tbl" },
+    React.createElement("thead", null,
+      React.createElement("tr", null,
+        React.createElement("th", null, "Worker"),
+        React.createElement("th", null, "PID"),
+        React.createElement("th", null, "Last Heartbeat"),
+        React.createElement("th", null, "Uptime"),
+        React.createElement("th", null, "Status")
+      )
+    ),
+    React.createElement("tbody", null,
+      workers.map(w => {
+        const lastBeat = w.lastBeat ? new Date(w.lastBeat).toLocaleTimeString() : "—";
+        const uptimeSec = w.startedAt ? Math.floor((Date.now() - w.startedAt) / 1000) : null;
+        const uptime = uptimeSec == null ? "—"
+          : uptimeSec < 60 ? uptimeSec + "s"
+          : uptimeSec < 3600 ? Math.floor(uptimeSec / 60) + "m"
+          : Math.floor(uptimeSec / 3600) + "h " + Math.floor((uptimeSec % 3600) / 60) + "m";
+        return React.createElement("tr", { key: w.workerId },
+          React.createElement("td", { className: "mono" }, w.workerType),
+          React.createElement("td", { className: "mono muted", style: { fontSize: 11 } }, w.pid || "—"),
+          React.createElement("td", { className: "mono muted", style: { fontSize: 11 } }, lastBeat,
+            w.staleSecs > 0 ? React.createElement("span", { style: { color: "var(--amber)", marginLeft: 6 } }, w.staleSecs + "s ago") : null
+          ),
+          React.createElement("td", { className: "mono muted", style: { fontSize: 11 } }, uptime),
+          React.createElement("td", null, React.createElement(Pill, { kind: w.healthy ? "green" : "red" }, w.healthy ? "healthy" : "stale"))
+        );
+      })
+    )
+  );
+}
 
 function PageWorkers() {
   const [health, setHealth] = useState6(null);
@@ -53,16 +105,12 @@ function PageWorkers() {
       )
     ),
     React.createElement("div", { style: { padding: "18px 28px 28px" } },
-      React.createElement("div", { className: "card" },
-        React.createElement("div", { className: "card-h" },
-          React.createElement("h3", { className: "card-h-title" }, "Worker fleet monitoring"),
-          React.createElement("div", { className: "muted mono", style: { fontSize: 11 } }, "coming soon")
+      React.createElement("div", { className: "card", style: { padding: 0 } },
+        React.createElement("div", { style: { padding: "14px 16px", display: "flex", justifyContent: "space-between", alignItems: "center", borderBottom: "1px solid var(--border)" } },
+          React.createElement("h3", { className: "card-h-title", style: { margin: 0 } }, "Worker Fleet"),
+          React.createElement("div", { className: "mono muted", style: { fontSize: 11 } }, "auto-refreshes every 30s")
         ),
-        React.createElement("div", { style: { padding: "50px 0", textAlign: "center", color: "var(--muted)", fontSize: 12 } },
-          "Per-worker heartbeat cadence, PID tracking, and auto-restart history",
-          React.createElement("br", null),
-          "will appear here once the worker monitoring API is available."
-        )
+        React.createElement(WorkerFleetTable, null)
       )
     )
   );

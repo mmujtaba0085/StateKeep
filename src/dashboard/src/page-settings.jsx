@@ -73,42 +73,79 @@ function OrgSection() {
 }
 
 function KeysSection({ pushToast, setModal, apiKey }) {
-  const openCreate = () => setModal({
-    title: "Create API Key",
-    body: React.createElement("div", null,
-      React.createElement("label", { className: "field-label" }, "Label"),
-      React.createElement("input", { className: "input", placeholder: "e.g. CI / Deploy" }),
-      React.createElement("div", { style: { height: 12 } }),
-      React.createElement("label", { className: "field-label" }, "Tier"),
-      React.createElement("select", { className: "input" },
-        React.createElement("option", null, "Live"),
-        React.createElement("option", null, "Test")
+  const openCreate = () => {
+    let draftLabel = "";
+    let draftTier = "free";
+    setModal({
+      title: "Create API Key",
+      body: React.createElement("div", null,
+        React.createElement("label", { className: "field-label" }, "Label"),
+        React.createElement("input", {
+          className: "input",
+          placeholder: "e.g. CI / Deploy / Production",
+          autoFocus: true,
+          onChange: (e) => { draftLabel = e.target.value; }
+        }),
+        React.createElement("div", { style: { height: 12 } }),
+        React.createElement("label", { className: "field-label" }, "Tier"),
+        React.createElement("select", {
+          className: "input",
+          onChange: (e) => { draftTier = e.target.value; }
+        },
+          React.createElement("option", { value: "free" }, "Free"),
+          React.createElement("option", { value: "enterprise" }, "Enterprise")
+        ),
+        React.createElement("div", { style: { marginTop: 14, padding: 12, background: "var(--amber-bg)", border: "1px solid var(--amber-bd)", borderRadius: 6 } },
+          React.createElement("div", { style: { color: "var(--amber)", fontWeight: 600, fontSize: 12 } }, "Save this key now"),
+          React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)", marginTop: 4 } }, "The raw key is shown exactly once and never stored.")
+        )
       ),
-      React.createElement("div", { style: { marginTop: 14, padding: 12, background: "var(--amber-bg)", border: "1px solid var(--amber-bd)", borderRadius: 6 } },
-        React.createElement("div", { style: { color: "var(--amber)", fontWeight: 600, fontSize: 12 } }, "Save this key now"),
-        React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)", marginTop: 4 } }, "You won't be able to see it again after closing this dialog.")
+      footer: React.createElement(React.Fragment, null,
+        React.createElement("button", { className: "btn btn-ghost", onClick: () => setModal(null) }, "Cancel"),
+        React.createElement("button", {
+          className: "btn btn-primary",
+          onClick: async () => {
+            if (!draftLabel.trim()) { pushToast({ kind: "error", title: "Label required" }); return; }
+            setModal(null);
+            try {
+              const res = await Api.post("/v1/keys", { label: draftLabel.trim(), tier: draftTier });
+              setModal({
+                title: "API Key Created — Copy Now",
+                body: React.createElement("div", null,
+                  React.createElement("div", { style: { marginBottom: 10, fontSize: 12, color: "var(--muted)" } }, "This key will not be shown again."),
+                  React.createElement("div", { className: "input mono", style: { padding: "10px 12px", fontSize: 12, wordBreak: "break-all", background: "var(--bg)", userSelect: "all" } }, res.rawKey),
+                  React.createElement("div", { style: { marginTop: 8, fontSize: 11, color: "var(--muted)" } }, "Label: ", res.label, " · Tier: ", res.tier, " · ID: ", res.keyId)
+                ),
+                footer: React.createElement("button", {
+                  className: "btn btn-primary",
+                  onClick: () => {
+                    navigator.clipboard?.writeText(res.rawKey).catch(() => {});
+                    pushToast({ kind: "success", title: "Key copied to clipboard" });
+                    setModal(null);
+                  }
+                }, "Copy & Close")
+              });
+            } catch (e) {
+              pushToast({ kind: "error", title: "Failed to create key", desc: e.message });
+            }
+          }
+        }, "Create key")
       )
-    ),
-    footer: React.createElement(React.Fragment, null,
-      React.createElement("button", { className: "btn btn-ghost", onClick: () => setModal(null) }, "Cancel"),
-      React.createElement("button", { className: "btn btn-primary", onClick: () => { setModal(null); pushToast({ kind: "success", title: "Key created", desc: "Copy the secret now — it won't be shown again." }); } }, "Create key")
-    )
-  });
+    });
+  };
 
   return React.createElement("div", null,
     React.createElement("div", { className: "settings-section" },
       React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 } },
         React.createElement("h3", { style: { margin: 0 } }, "API Keys"),
-        React.createElement("button", { className: "btn btn-primary", onClick: openCreate }, Icons.Plus({ size: 12 }), "Create new key")
+        apiKey && React.createElement("button", { className: "btn btn-primary", onClick: openCreate }, Icons.Plus({ size: 12 }), " Create new key")
       ),
       !apiKey
         ? React.createElement("div", { className: "card", style: { padding: "20px", color: "var(--muted)", fontSize: 12 } },
             "Set your API key in the sidebar to manage keys."
           )
         : React.createElement("div", { className: "card", style: { padding: "20px", color: "var(--muted)", fontSize: 12 } },
-            "API key management via the dashboard is coming soon. Use ",
-            React.createElement("span", { className: "mono" }, "POST /v1/keys"),
-            " to create additional keys."
+            "Click \"Create new key\" above to generate an additional API key via ", React.createElement("span", { className: "mono" }, "POST /v1/keys"), "."
           )
     )
   );

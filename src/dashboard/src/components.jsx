@@ -146,16 +146,23 @@ function Sidebar() {
         React.createElement("span", { style: { flex: 1 } }, "API Explorer"),
         Icons.ExternalLink({ size: 11, color: "#647080" })
       ),
-      React.createElement("div", {
-        className: "sb-apikey",
-        onClick: apiKey ? onCopyKey : openKeyModal,
-        title: apiKey ? "Copy API key" : "Set API key",
-        style: !apiKey ? { color: "var(--amber)", borderColor: "rgba(245,158,11,0.3)" } : undefined
-      },
-        React.createElement("span", null, last8),
-        apiKey
-          ? (copied ? Icons.Check({ size: 12, color: "#3ecf8e" }) : Icons.Copy({ size: 12 }))
-          : Icons.AlertTriangle({ size: 12, color: "var(--amber)" })
+      React.createElement("div", { style: { display: "flex", gap: 4, alignItems: "center" } },
+        React.createElement("div", {
+          className: "sb-apikey",
+          onClick: apiKey ? onCopyKey : openKeyModal,
+          title: apiKey ? "Copy API key" : "Set API key",
+          style: Object.assign({ flex: 1 }, !apiKey ? { color: "var(--amber)", borderColor: "rgba(245,158,11,0.3)" } : {})
+        },
+          React.createElement("span", null, last8),
+          apiKey
+            ? (copied ? Icons.Check({ size: 12, color: "#3ecf8e" }) : Icons.Copy({ size: 12 }))
+            : Icons.AlertTriangle({ size: 12, color: "var(--amber)" })
+        ),
+        apiKey && React.createElement("button", {
+          onClick: (e) => { e.stopPropagation(); openKeyModal(); },
+          title: "Change API key",
+          style: { padding: "4px 6px", background: "none", border: "none", cursor: "pointer", color: "var(--muted)", borderRadius: 4, lineHeight: 1 }
+        }, Icons.Edit({ size: 11 }))
       ),
       React.createElement("button", {
         className: "btn btn-ghost",
