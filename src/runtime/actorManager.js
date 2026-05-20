@@ -246,11 +246,16 @@ export async function sendEvent(actorId, event, tick) {
   // Stale-cache check: if the migrate-worker updated this actor in the DB while it was
   // in the hot registry, evict and reload so the event is dispatched to the correct definition.
   let entry = hotRegistry.get(actorId);
+  let workerNeedsReset = false;
   if (entry) {
     const dbRow = getActorDefinitionId(actorId);
     if (dbRow && dbRow.definitionId !== entry.definitionId) {
       hotRegistry.delete(actorId);   // delete, not evict, to avoid overwriting DB status
       entry = null;
+      // Worker still has the old machine — terminate it so ensureInWorker re-spawns with
+      // the new definition. Without this, SPAWN no-ops (actor already in worker.actors map)
+      // and the actor keeps processing events against the stale machine.
+      workerNeedsReset = true;
     }
   }
   if (!entry) {
@@ -271,6 +276,12 @@ export async function sendEvent(actorId, event, tick) {
         ),
         { code: 'ACTOR_NEEDS_RESCUE', actorId, status: 'needs_rescue' }
       );
+    }
+    if (workerNeedsReset) {
+      // Evict the stale machine from the worker thread so SPAWN re-initialises with the
+      // new definition. This happens when the migrate-worker (separate process) migrated
+      // this actor while it was resident in our worker pool.
+      await pool.send(actorId, { type: 'TERMINATE', actorId }).catch(() => {});
     }
     await ensureInWorker(actorId, actor);
     entry = {
