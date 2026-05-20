@@ -43,6 +43,30 @@ test('sending event to final state sets done=true', async () => {
   expect(res.body.done).toBe(true);
 });
 
+test('GET /v1/actors/:id returns actor with stateValue and done flag', async () => {
+  const spawn = await POST('/v1/actors', { definitionId: defId });
+  const id    = spawn.body.id;
+
+  await POST(`/v1/actors/${id}/event`, { type: 'START' });
+  const res = await GET(`/v1/actors/${id}`);
+  expect(res.status).toBe(200);
+  expect(res.body.id).toBe(id);
+  expect(res.body.stateValue).toBe('running');
+  expect(res.body.done).toBe(false);
+});
+
+test('GET /v1/actors/:id sets done=true when actor reaches final state', async () => {
+  const spawn = await POST('/v1/actors', { definitionId: defId });
+  const id    = spawn.body.id;
+
+  await POST(`/v1/actors/${id}/event`, { type: 'START' });
+  await POST(`/v1/actors/${id}/event`, { type: 'STOP' });
+  const res = await GET(`/v1/actors/${id}`);
+  expect(res.status).toBe(200);
+  expect(res.body.stateValue).toBe('done');
+  expect(res.body.done).toBe(true);
+});
+
 test('GET /v1/actors/:id/state returns current state', async () => {
   const spawn = await POST('/v1/actors', { definitionId: defId });
   const id    = spawn.body.id;

@@ -169,6 +169,7 @@ export async function actorRoutes(fastify) {
       const state = await getActorState(id);
       return reply.send({
         ...state,
+        id,
         done: state.status === 'terminated' ||
               (state.stateValue != null && typeof state.stateValue === 'string' && state.stateValue === 'done'),
       });
