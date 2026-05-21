@@ -164,11 +164,18 @@ export async function definitionRoutes(fastify) {
                          'Targets actors on parallel XState machines. Mutually exclusive with historyPath.',
             additionalProperties: { type: 'array', items: { type: 'string' } },
           },
+          contextTransform: {
+            type:        'object',
+            description: 'Maps new context field paths to old field paths using dot-notation. ' +
+                         'New fields are added; old fields are preserved (additive). ' +
+                         'Example: { "payment.verified": "feePaid" }',
+            additionalProperties: { type: 'string' },
+          },
         },
       },
     },
   }, async (request, reply) => {
-    const { id, parentId, definition, refinement = 1, confirmToken, historyPath, stateMapping, historyRegions } = request.body;
+    const { id, parentId, definition, refinement = 1, confirmToken, historyPath, stateMapping, historyRegions, contextTransform } = request.body;
     const isDryRun       = request.query?.dryRun === 'true';
     const eng            = getEngine();
     const hasHistoryPath = Array.isArray(historyPath) && historyPath.length > 0;
@@ -372,10 +379,13 @@ export async function definitionRoutes(fastify) {
 
     // Embed _stateMapping and _historyPath in the stored JSON so they survive
     // across restarts and can be compared in the idempotency check on re-deploy.
+    const hasContextTransform = contextTransform && typeof contextTransform === 'object' &&
+                               Object.keys(contextTransform).length > 0;
     const definitionToStore = {
       ...definition,
       ...(stateMapping && Object.keys(stateMapping).length > 0 ? { _stateMapping: stateMapping } : {}),
       _historyPath: hasHistoryPath ? historyPath : null,
+      ...(hasContextTransform ? { _contextTransform: contextTransform } : {}),
     };
 
     // Refinement path: definition already exists but stateMapping changed.
@@ -467,6 +477,14 @@ export async function definitionRoutes(fastify) {
           // actor on the machine directly.
           for (const actor of actors) {
             pendingJobs.push({ actor_id: actor.id, org_id: orgId, target_def_id: id });
+          }
+          const wildcardThreshold = parseInt(process.env.STATEKEEP_WILDCARD_WARN_THRESHOLD ?? '10000', 10);
+          if (pendingJobs.length > wildcardThreshold) {
+            warnings.push({
+              code:    'LARGE_WILDCARD_DEPLOY',
+              message: `Wildcard deployment will migrate ${pendingJobs.length} actors (threshold: ${wildcardThreshold}). ` +
+                       `This may take several minutes. Use historyPath to target a subset of actors.`,
+            });
           }
         } else {
           for (const actor of actors) {

@@ -238,8 +238,14 @@ export async function spawnActor({ definitionId, orgId, initialContext, logicalS
  * Send an event to an actor. Loads from SQLite if not in hot registry.
  * Performs an inline migration check before dispatching the event —
  * if the engine returns a new target definition the actor is swapped first.
+ *
+ * opts.insertEventFn: optional synchronous function(db) → void.
+ *   When provided, called inside the same SQLite transaction as updateActorState
+ *   so the event record and state update are atomic. Used by the route handler
+ *   to write the idempotency_key alongside the state update.
  */
-export async function sendEvent(actorId, event, tick) {
+export async function sendEvent(actorId, event, tick, opts = {}) {
+  const { insertEventFn } = opts;
   const pool = getWorkerPool();
 
   // Load from hot registry or SQLite.
@@ -349,6 +355,17 @@ export async function sendEvent(actorId, event, tick) {
           }
         }
 
+        // Machine-family guard: the engine has a global changepoint registry —
+        // in multi-machine environments a wildcard (prefix_hash=0) from one machine
+        // family can match actors in another family. Only allow migration to a definition
+        // in the SAME machine family as the actor's current definition.
+        if (targetDefId && targetDefId !== entry.definitionId) {
+          const targetDef = cachedFindDefinition(targetDefId);
+          if (targetDef && currentDef && targetDef.machineId !== currentDef.machineId) {
+            targetDefId = null;
+          }
+        }
+
         // Backward-migration guard: never route an actor to a definition deployed
         // before the actor's current definition (engine can return stale routes when
         // logicalStartTick pre-dates multiple changepoints).
@@ -445,14 +462,28 @@ export async function sendEvent(actorId, event, tick) {
   };
   touch(actorId, newEntry);
 
-  updateActorState(actorId, {
-    stateValue:         result.stateValue,
-    context:            result.context,
-    historyFingerprint: result.historyFingerprint,
-    regionFingerprints: newRegionFingerprints,
-    lastEventTick:      tick ?? Date.now(),
-    status:             result.done ? 'terminated' : 'active',
-  });
+  if (insertEventFn) {
+    getDb().transaction(() => {
+      updateActorState(actorId, {
+        stateValue:         result.stateValue,
+        context:            result.context,
+        historyFingerprint: result.historyFingerprint,
+        regionFingerprints: newRegionFingerprints,
+        lastEventTick:      tick ?? Date.now(),
+        status:             result.done ? 'terminated' : 'active',
+      });
+      insertEventFn();
+    })();
+  } else {
+    updateActorState(actorId, {
+      stateValue:         result.stateValue,
+      context:            result.context,
+      historyFingerprint: result.historyFingerprint,
+      regionFingerprints: newRegionFingerprints,
+      lastEventTick:      tick ?? Date.now(),
+      status:             result.done ? 'terminated' : 'active',
+    });
+  }
 
   if (result.done) {
     try {
@@ -515,10 +546,23 @@ export async function getActorState(actorId) {
       const snap = await pool.send(actorId, { type: 'SNAPSHOT', actorId });
       if (snap) {
         touch(actorId, { ...hot, lastAccess: Date.now() });
-        return snap;
+        // Augment worker snapshot with registry metadata not held by the worker thread.
+        return {
+          ...snap,
+          definitionId:       hot.definitionId,
+          historyFingerprint: hot.historyFingerprint,
+          status:             hot.status ?? actor.status ?? 'active',
+        };
       }
     } catch {}
-    return { actorId, stateValue: hot.stateValue, context: hot.context };
+    return {
+      actorId,
+      stateValue:         hot.stateValue,
+      context:            hot.context,
+      definitionId:       hot.definitionId,
+      historyFingerprint: hot.historyFingerprint,
+      status:             hot.status ?? actor.status ?? 'active',
+    };
   }
 
   return {
@@ -574,7 +618,8 @@ export async function migrateActor(actorId, targetDefinitionId) {
   const targetDef = cachedFindDefinition(targetDefinitionId);
   if (!targetDef) throw new Error(`Target definition not found: ${targetDefinitionId}`);
 
-  const stateMapping = targetDef.definitionJson._stateMapping ?? {};
+  const stateMapping    = targetDef.definitionJson._stateMapping    ?? {};
+  const contextTransform = targetDef.definitionJson._contextTransform ?? null;
 
   const result = await pool.send(actorId, {
     type:                 'HYDRATE',
@@ -583,12 +628,21 @@ export async function migrateActor(actorId, targetDefinitionId) {
     oldContext:           actor.context,
     currentStateValue:    actor.stateValue,
     stateMapping,
+    existingFingerprint:  actor.historyFingerprint,
+    contextTransform,
   });
 
   if (result && result.error === 'STATE_NOT_MAPPABLE') {
     throw Object.assign(
       new Error(`STATE_NOT_MAPPABLE: actor ${actorId} in state ${JSON.stringify(result.currentStateValue)}`),
       { code: 'STATE_NOT_MAPPABLE', currentStateValue: result.currentStateValue }
+    );
+  }
+
+  if (result && result.error === 'CONTEXT_TRANSFORM_FAILED') {
+    throw Object.assign(
+      new Error(`CONTEXT_TRANSFORM_FAILED: actor ${actorId}: ${result.message}`),
+      { code: 'CONTEXT_TRANSFORM_FAILED', message: result.message }
     );
   }
 

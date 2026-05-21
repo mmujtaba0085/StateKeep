@@ -445,6 +445,29 @@ export function getDb() {
     console.log('[db] Migration v14 applied: par_changepoints table + idx_actors_def index added');
   }
 
+  // v15 — Idempotency key on events + cursor-efficiency index
+  if (!appliedVersions.has(15)) {
+    const hasIdemKey = _db.prepare(
+      `SELECT COUNT(*) as cnt FROM pragma_table_info('events') WHERE name = 'idempotency_key'`
+    ).get().cnt > 0;
+
+    if (!hasIdemKey) {
+      _db.exec(`ALTER TABLE events ADD COLUMN idempotency_key TEXT;`);
+    }
+    _db.exec(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_events_idempotency
+        ON events(actor_id, idempotency_key)
+        WHERE idempotency_key IS NOT NULL;
+
+      CREATE INDEX IF NOT EXISTS idx_events_actor_cursor
+        ON events(actor_id, id);
+
+      INSERT OR IGNORE INTO schema_migrations(version, applied_at)
+        VALUES (15, unixepoch());
+    `);
+    console.log('[db] Migration v15 applied: idempotency_key on events + actor_cursor index');
+  }
+
   // Graceful shutdown
   process.on('exit',    () => { try { _db.close(); } catch {} });
   process.on('SIGINT',  () => { process.exit(0); });

@@ -96,8 +96,9 @@ export async function actorRoutes(fastify) {
         type: 'object',
         required: ['type'],
         properties: {
-          type:    { type: 'string', minLength: 1 },
-          payload: { type: 'object' },
+          type:           { type: 'string', minLength: 1 },
+          payload:        { type: 'object' },
+          idempotencyKey: { type: 'string', maxLength: 128, pattern: '^[a-zA-Z0-9_\\-:.]+$' },
         },
       },
     },
@@ -113,19 +114,50 @@ export async function actorRoutes(fastify) {
       return reply.code(404).send({ error: `Actor ${id} not found` });
     }
 
-    const event  = { type: request.body.type, ...(request.body.payload ?? {}) };
+    const { type: eventType, payload, idempotencyKey } = request.body;
+
+    // ── Idempotency check ─────────────────────────────────────────────────────
+    if (idempotencyKey) {
+      const duplicate = getDb().prepare(`
+        SELECT e.id FROM events e
+        WHERE e.actor_id = ? AND e.org_id = ? AND e.idempotency_key = ?
+      `).get(id, request.orgId, idempotencyKey);
+
+      if (duplicate) {
+        const current = findActorById(id);
+        recordLatency(Date.now() - t0);
+        return reply.code(200).send({
+          actorId:            id,
+          definitionId:       current.definitionId,
+          stateValue:         current.stateValue,
+          context:            current.context,
+          status:             current.status,
+          historyFingerprint: current.historyFingerprint,
+          done:               current.status === 'terminated',
+          idempotent:         true,
+        });
+      }
+    }
+
+    const event = { type: eventType, ...(payload ?? {}) };
 
     try {
-      const result = await sendEvent(id, event, Number(tick));
-
-      const db = getDb();
-      const encPayload = request.body.payload
-        ? encrypt(Buffer.from(JSON.stringify(request.body.payload)))
+      const db         = getDb();
+      const encPayload = payload
+        ? encrypt(Buffer.from(JSON.stringify(payload)))
         : null;
-      db.prepare(`
-        INSERT INTO events (actor_id, org_id, event_type, event_payload, tick, processed_at)
-        VALUES (?, ?, ?, ?, ?, ?)
-      `).run(id, request.orgId, event.type, encPayload, Number(tick), Date.now());
+      const tickNum    = Number(tick);
+      const orgId      = request.orgId;
+
+      const result = await sendEvent(id, event, tickNum, {
+        insertEventFn: () => {
+          db.prepare(`
+            INSERT INTO events
+              (actor_id, org_id, event_type, event_payload, tick, processed_at, idempotency_key)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+          `).run(id, orgId, event.type, encPayload, tickNum, Date.now(), idempotencyKey ?? null);
+        },
+      });
 
       // Notify WebSocket subscribers
       notifyStateChange(id, result.stateValue, result.context);
@@ -216,6 +248,8 @@ export async function actorRoutes(fastify) {
         type: 'object',
         properties: {
           limit:   { type: 'integer', default: 50, minimum: 1, maximum: 200 },
+          after:   { type: 'integer', minimum: 0 },
+          // afterId is kept for backward compatibility — deprecated
           afterId: { type: 'integer', default: 0, minimum: 0 },
         },
       },
@@ -227,18 +261,25 @@ export async function actorRoutes(fastify) {
       return reply.code(404).send({ error: `Actor ${id} not found` });
     }
 
-    const { limit, afterId } = request.query;
-    const db = getDb();
+    const db    = getDb();
+    const limit = Math.min(request.query.limit ?? 50, 200);
 
+    // `after` is the preferred cursor param; `afterId` is backward-compat alias
+    const after = request.query.after ?? request.query.afterId ?? 0;
+
+    // Fetch limit+1 to detect hasMore without a COUNT query
     const rows = db.prepare(`
       SELECT id, event_type, event_payload, tick, processed_at
       FROM events
       WHERE actor_id = ? AND id > ?
       ORDER BY id ASC
       LIMIT ?
-    `).all(id, afterId, limit);
+    `).all(id, after, limit + 1);
 
-    const events = rows.map(row => {
+    const hasMore   = rows.length > limit;
+    const pageRows  = hasMore ? rows.slice(0, limit) : rows;
+
+    const events = pageRows.map(row => {
       let payload = null;
       if (row.event_payload) {
         try {
@@ -255,8 +296,8 @@ export async function actorRoutes(fastify) {
       };
     });
 
-    const nextCursor = rows.length === limit ? rows[rows.length - 1].id : null;
-    return reply.send({ actorId: id, events, total: events.length, limit, afterId, nextCursor });
+    const nextCursor = hasMore ? pageRows[pageRows.length - 1].id : null;
+    return reply.send({ actorId: id, events, total: events.length, limit, after, hasMore, nextCursor });
   });
 
   // ── DELETE /v1/actors/:id ──────────────────────────────────────────────────

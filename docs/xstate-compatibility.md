@@ -110,6 +110,47 @@ Customer backend                   StateKeep
  4. Execute action (email, DB) ◄─── OR use webhook
 ```
 
+## Context transforms on migration
+
+When deploying a new definition version, you can include a `contextTransform` mapping to reshape an actor's context during migration. This is useful when context field names change between versions.
+
+```json
+PUT /v1/definitions
+{
+  "id": "loan-v2",
+  "parentId": "loan-v1",
+  "definition": { ... },
+  "contextTransform": {
+    "payment.verified": "feePaid",
+    "applicant.name":   "userName"
+  }
+}
+```
+
+Rules:
+- **Additive only** — new fields are added; old fields are preserved. Migrated actors will have both `feePaid` and `payment.verified` in their context.
+- **Dot-notation paths** — both source and destination paths use dot-notation. Intermediate objects are created as needed.
+- **Missing source paths are silently skipped** — no error if the old field doesn't exist on a specific actor's context.
+- **Failed transforms tag actors `needs_rescue`** — if the transform throws (e.g. context is not an object), the actor is tagged and migration is aborted for that actor.
+- **Fingerprint is unchanged** — context reshaping never alters the actor's APV history fingerprint.
+
+## Event history pruning
+
+By default, StateKeep retains all events forever. To cap storage growth, set `STATEKEEP_MAX_EVENT_HISTORY_DAYS` in your environment:
+
+```env
+STATEKEEP_MAX_EVENT_HISTORY_DAYS=90
+```
+
+The `gc-worker` process will prune events older than this threshold on each GC cycle. The following lifecycle events are **always retained** regardless of age:
+
+- `SPAWN`
+- `MIGRATED`
+- `MIGRATION_FAILED`
+- `SCHEDULED_EVENT_FIRED`
+- `SCHEDULED_EVENT_FAILED`
+- `MANUALLY_RESCUED`
+
 ## Why this design
 
 StateKeep's value is **state persistence, migration, and multi-version routing** — not running arbitrary customer code. Keeping the engine pure JSON means definitions are versionable, diffable, and migratable without code execution. Guards and actions belong in the customer's backend where they have access to secrets, databases, and the full application context.

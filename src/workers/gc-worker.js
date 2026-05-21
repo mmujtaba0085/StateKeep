@@ -110,6 +110,33 @@ async function runGC() {
     console.log(`[gc-worker] Pruned ${pruned} terminal scheduled_events older than ${PRUNE_DAYS} days`);
   }
 
+  // Event pruning for active actors (opt-in via STATEKEEP_MAX_EVENT_HISTORY_DAYS)
+  const MAX_HISTORY_DAYS = parseInt(
+    process.env.STATEKEEP_MAX_EVENT_HISTORY_DAYS ?? '0', 10
+  );
+
+  if (MAX_HISTORY_DAYS > 0) {
+    const cutoffMs = Date.now() - (MAX_HISTORY_DAYS * 24 * 60 * 60 * 1000);
+
+    // System events are the audit backbone and required for migration recovery.
+    // They are NEVER pruned regardless of age.
+    const PROTECTED = ['SPAWN','MIGRATED','MIGRATION_FAILED','SCHEDULED_EVENT_FIRED',
+                       'SCHEDULED_EVENT_FAILED','MANUALLY_RESCUED'];
+    const placeholders = PROTECTED.map(() => '?').join(',');
+
+    const pruned = getDb().prepare(`
+      DELETE FROM events
+      WHERE processed_at < ?
+        AND event_type NOT IN (${placeholders})
+    `).run(cutoffMs, ...PROTECTED).changes;
+
+    if (pruned > 0) {
+      console.log(`[gc-worker] Pruned ${pruned} user events older than ${MAX_HISTORY_DAYS} days`);
+      console.warn('[gc-worker] NOTE: pruned events cannot be used to manually re-verify fingerprints. ' +
+                   'Stored fingerprints remain correct and are unaffected by pruning.');
+    }
+  }
+
   // Periodic SQLite maintenance
   const now2 = Date.now();
   if (now2 - lastVacuumAt >= VACUUM_INTERVAL) {

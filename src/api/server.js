@@ -261,6 +261,13 @@ try {
   console.warn(`[server] Tick seeding failed (non-fatal): ${e.message}`);
 }
 
+if (!process.env.STATEKEEP_MULTI_INSTANCE_WARNED) {
+  fastify.log.warn(
+    'StateKeep uses SQLite — only one writer process should be running at a time. ' +
+    'Set STATEKEEP_MULTI_INSTANCE_WARNED=true to suppress this warning.'
+  );
+}
+
 try {
   await fastify.listen({ port: PORT, host: '0.0.0.0' });
   fastify.log.info(`StateKeep API listening on port ${PORT}`);

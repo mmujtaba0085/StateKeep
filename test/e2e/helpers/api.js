@@ -54,3 +54,41 @@ export const SIMPLE_MACHINE_V2 = {
 export function uniqueId(prefix = 'test') {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 }
+
+/**
+ * Poll until a condition is met or timeout is reached.
+ * Never use setTimeout for waiting on async system state.
+ */
+export async function waitUntil(conditionFn, opts = {}) {
+  const { timeoutMs = 10_000, intervalMs = 200, description = 'condition' } = opts;
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await conditionFn()) return;
+    await new Promise(r => setTimeout(r, intervalMs));
+  }
+  throw new Error(`Timeout waiting for: ${description} (${timeoutMs}ms)`);
+}
+
+/** Wait until an actor reaches a specific definitionId (used for migration waits). */
+export async function waitForActorMigration(actorId, targetDefId) {
+  await waitUntil(
+    async () => {
+      const r    = await GET(`/v1/actors/${actorId}/state`);
+      return r.body.definitionId === targetDefId;
+    },
+    { timeoutMs: 10_000, description: `actor ${actorId} to reach ${targetDefId}` }
+  );
+}
+
+/** Wait until an actor reaches a specific stateValue. */
+export async function waitForActorState(actorId, targetState) {
+  await waitUntil(
+    async () => {
+      const r  = await GET(`/v1/actors/${actorId}/state`);
+      const sv = r.body.stateValue;
+      const val = typeof sv === 'string' ? sv : Object.keys(sv ?? {})[0];
+      return val === targetState;
+    },
+    { timeoutMs: 10_000, description: `actor ${actorId} to reach state ${targetState}` }
+  );
+}

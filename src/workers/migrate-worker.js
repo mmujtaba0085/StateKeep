@@ -198,8 +198,8 @@ async function processJob(job) {
     // against the new definition, not the stale cached one.
     evictFromApiCache(actor_id);
   } catch (err) {
-    if (err.code === 'STATE_NOT_MAPPABLE') {
-      // Actor cannot be placed in new definition — tag needs_rescue, do NOT call actorStarted
+    if (err.code === 'STATE_NOT_MAPPABLE' || err.code === 'CONTEXT_TRANSFORM_FAILED') {
+      // Actor cannot be migrated — tag needs_rescue, do NOT call actorStarted
       console.warn(`[migrate-worker] Job ${id}: actor ${actor_id} needs_rescue — ${err.message}`);
       updateActorStatus(actor_id, 'needs_rescue');
 
@@ -212,14 +212,15 @@ async function processJob(job) {
         encrypt(Buffer.from(JSON.stringify({
           fromDefinitionId: fromDefId,
           toDefinitionId:   target_def_id,
-          reason:           'STATE_NOT_MAPPABLE',
-          stateValue:       err.currentStateValue,
+          reason:           err.code,
+          stateValue:       err.currentStateValue ?? null,
+          message:          err.message,
         }))),
         currentTick,
         Date.now()
       );
 
-      markFailed(id, `state_not_mappable: ${JSON.stringify(err.currentStateValue)}`);
+      markFailed(id, `${err.code}: ${err.currentStateValue ?? err.message}`);
     } else {
       console.error(`[migrate-worker] Job ${id} failed for actor ${actor_id}:`, err.message);
       updateActorStatus(actor_id, 'active');   // rollback to active so actor still works

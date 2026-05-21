@@ -44,6 +44,66 @@ function updateFingerprint(hexFp, eventType) {
   return updated.toString(16).padStart(16, '0');
 }
 
+// ── Context transform helpers ─────────────────────────────────────────────────
+
+/**
+ * Get a nested value from an object using dot-notation path.
+ * Returns undefined if any segment of the path is missing. Never throws.
+ */
+export function getNestedValue(obj, path) {
+  if (!obj || typeof obj !== 'object' || !path) return undefined;
+  return String(path).split('.').reduce(
+    (current, key) => current != null ? current[key] : undefined,
+    obj
+  );
+}
+
+/**
+ * Set a nested value in an object using dot-notation path.
+ * Creates intermediate objects as needed. Mutates and returns the object. Never throws.
+ */
+export function setNestedValue(obj, path, value) {
+  if (!obj || typeof obj !== 'object' || !path) return obj;
+  const keys = String(path).split('.');
+  const last = keys.pop();
+  let curr = obj;
+  for (const key of keys) {
+    if (curr[key] == null || typeof curr[key] !== 'object') curr[key] = {};
+    curr = curr[key];
+  }
+  curr[last] = value;
+  return obj;
+}
+
+/**
+ * Apply a declarative field mapping to an actor context.
+ *
+ * transform = { "newPath": "oldPath" }  (dot-notation)
+ *
+ * Rules:
+ * - New fields are SET from old values (additive, not destructive)
+ * - Old fields are PRESERVED — migrated actors have both old and new shapes
+ * - Missing old paths are silently skipped (no undefined set)
+ * - Returns a deep copy when transform is non-empty; original reference when empty
+ * - Throws if input context is not a non-null object
+ */
+export function applyContextTransform(context, transform) {
+  if (!transform || typeof transform !== 'object' || Object.keys(transform).length === 0) {
+    return context;  // no-op — return original reference
+  }
+  if (context == null || typeof context !== 'object') {
+    throw new Error('applyContextTransform: context must be a non-null object');
+  }
+  // Deep clone via JSON round-trip (context is always JSON-serialisable — stored in SQLite)
+  const result = JSON.parse(JSON.stringify(context));
+  for (const [newPath, oldPath] of Object.entries(transform)) {
+    if (typeof newPath !== 'string' || typeof oldPath !== 'string') continue;
+    const value = getNestedValue(context, oldPath);
+    if (value !== undefined) setNestedValue(result, newPath, value);
+  }
+  return result;
+}
+
 // ── Actor store ───────────────────────────────────────────────────────────────
 
 /** Map<actorId, { actor, machine }> */
@@ -189,7 +249,7 @@ export function resolveLandingState(currentStateValue, newMachineStates, stateMa
   return null;
 }
 
-function handleHydrate({ actorId, targetDefinitionJson, oldContext, currentStateValue, stateMapping }) {
+function handleHydrate({ actorId, targetDefinitionJson, oldContext, currentStateValue, stateMapping, existingFingerprint, contextTransform }) {
   // Stop existing actor if present
   const existing = actors.get(actorId);
   if (existing) {
@@ -197,8 +257,16 @@ function handleHydrate({ actorId, targetDefinitionJson, oldContext, currentState
     actors.delete(actorId);
   }
 
-  const machine    = createMachine(targetDefinitionJson).provide({ guards: buildDefaultGuards(targetDefinitionJson) });
-  const newStates  = targetDefinitionJson.states ?? {};
+  const machine   = createMachine(targetDefinitionJson).provide({ guards: buildDefaultGuards(targetDefinitionJson) });
+  const newStates = targetDefinitionJson.states ?? {};
+
+  // Apply context transform — errors here must abort migration (INVARIANT 3)
+  let transformedContext;
+  try {
+    transformedContext = applyContextTransform(oldContext ?? {}, contextTransform);
+  } catch (err) {
+    return { error: 'CONTEXT_TRANSFORM_FAILED', message: err.message };
+  }
 
   // Resolve landing state when we have the actor's current position
   if (currentStateValue != null) {
@@ -211,17 +279,19 @@ function handleHydrate({ actorId, targetDefinitionJson, oldContext, currentState
     try {
       const baseSnapshot = machine.resolveState({
         value:   landingState,
-        context: oldContext ?? {},
+        context: transformedContext,
         status:  'active',
       });
       actor = createActor(machine, { snapshot: baseSnapshot });
     } catch {
-      actor = createActor(machine, { input: oldContext });
+      actor = createActor(machine, { input: transformedContext });
     }
 
     actor.start();
     actors.set(actorId, { actor, machine });
-    return serializeSnapshot(actor.getSnapshot(), actorId);
+    const snap = serializeSnapshot(actor.getSnapshot(), actorId);
+    // INVARIANT 1: fingerprint passes through unchanged — never recomputed from context
+    return { ...snap, historyFingerprint: existingFingerprint ?? null };
   }
 
   // Fallback: no current state provided, land at initial (legacy path)
@@ -229,17 +299,18 @@ function handleHydrate({ actorId, targetDefinitionJson, oldContext, currentState
   try {
     const baseSnapshot = machine.resolveState({
       value:   machine.initial,
-      context: oldContext ?? {},
+      context: transformedContext,
       status:  'active',
     });
     actor = createActor(machine, { snapshot: baseSnapshot });
   } catch {
-    actor = createActor(machine, { input: oldContext });
+    actor = createActor(machine, { input: transformedContext });
   }
 
   actor.start();
   actors.set(actorId, { actor, machine });
-  return serializeSnapshot(actor.getSnapshot(), actorId);
+  const snap = serializeSnapshot(actor.getSnapshot(), actorId);
+  return { ...snap, historyFingerprint: existingFingerprint ?? null };
 }
 
 function handleSnapshot({ actorId }) {

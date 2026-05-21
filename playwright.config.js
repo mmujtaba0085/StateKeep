@@ -38,6 +38,8 @@ export default defineConfig({
       STATEKEEP_ADMIN_KEY:      'test-admin-key',
       STATEKEEP_API_KEY:        process.env.STATEKEEP_API_KEY,
       STATEKEEP_DATA_DIR:       process.env.STATEKEEP_DATA_DIR ?? '/tmp/sk-test-data',
+      // Use local engine when path is set (inherits from shell via run-tests.sh)
+      ...(process.env.STATEKEEP_ENGINE_PATH ? { STATEKEEP_ENGINE_PATH: process.env.STATEKEEP_ENGINE_PATH } : {}),
     },
   },
 
