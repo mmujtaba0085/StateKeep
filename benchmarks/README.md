@@ -199,6 +199,24 @@ node run-all.js --only 4      # Event history SQL only
 node run-all.js --only 1,3,4  # Approaches 1, 3, and 4
 ```
 
+## Antipattern approaches
+
+Approaches prefixed with `ANTIPATTERN-` demonstrate routing strategies that produce
+incorrect results. They are included to show why naive approaches fail, not as
+production recommendations. Running the full benchmark includes these intentionally —
+their low accuracy numbers are expected and correct.
+
+| # | Approach | Failure mode |
+|---|----------|-------------|
+| 7 | Context mutation | `context.group` silently mutated after spawn — approach 3 routes wrong actors |
+| 8 | Event pollution | `events` table injected with synthetic rows — approach 4 routes wrong actors |
+| 9 | Missing context field | Actors spawned before context flag policy — approach 3 misses them entirely |
+
+APV (approach 1) is immune to all three failure modes because routing is based on
+immutable event history fingerprints, not mutable context fields or queryable event rows.
+
+---
+
 ## Notes
 
 - **Each approach runs against an isolated org** — results do not interfere.

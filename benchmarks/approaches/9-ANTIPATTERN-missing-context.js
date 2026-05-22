@@ -26,7 +26,7 @@ import { LOAN_V2, LOAN_V3 } from '../shared/scenarios.js';
 import { verifyRouting, getActorDistribution } from '../shared/setup.js';
 
 export const name          = '9-missing-context';
-export const description   = '9. Missing context field (approach 3 breaks, APV immune)';
+export const description   = '[ANTIPATTERN] 9. Missing context field (approach 3 breaks, APV immune)';
 export const developerCode = 30;
 export const requiresDb    = true;
 

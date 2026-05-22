@@ -27,7 +27,7 @@ import { LOAN_V2, LOAN_V3 }             from '../shared/scenarios.js';
 import { verifyRouting, getActorDistribution } from '../shared/setup.js';
 
 export const name          = '7-context-mutation';
-export const description   = '7. Context mutation (approach 3 breaks, APV immune)';
+export const description   = '[ANTIPATTERN] 7. Context mutation (approach 3 breaks, APV immune)';
 export const developerCode = 30;
 export const requiresDb    = true;
 

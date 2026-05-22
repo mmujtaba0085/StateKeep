@@ -1,155 +1,118 @@
 # @statekeep/sdk
 
-TypeScript client SDK for the [StateKeep](https://github.com/mmujtaba0085/StateKeep) Actor Lifecycle API.
+TypeScript client for StateKeep — a statechart hosting platform that
+runs XState-compatible state machines as persistent actors over HTTP,
+with path-based migration when workflow definitions change.
 
 ## Installation
 
-```bash
+```
 npm install @statekeep/sdk
 ```
 
-## Quick start
+## Quickstart
 
-```typescript
-import { StateKeepClient } from '@statekeep/sdk';
+```js
+import { createClient } from '@statekeep/sdk';
 
-const client = new StateKeepClient({
-  baseUrl: 'https://statekeep.161-97-163-210.nip.io',
-  apiKey:  'sk_live_...',
+const sk = createClient({
+  baseUrl: 'https://your-statekeep-instance.com',
+  apiKey:  'sk_...',
 });
 
-// 1. Deploy a state machine definition
-await client.deployDefinition({
-  id: 'loan-application',
-  machineDefinition: {
-    initial: 'submitted',
-    states: {
-      submitted:  { on: { APPROVE: 'approved', REJECT: 'rejected' } },
-      approved:   { on: { DISBURSE: 'disbursed' } },
-      rejected:   { type: 'final' },
-      disbursed:  { type: 'final' },
-    },
+// Deploy a machine definition
+await sk.deploy('order-v1', {
+  id: 'order', initial: 'pending',
+  states: {
+    pending:   { on: { PAY: 'paid', CANCEL: 'cancelled' } },
+    paid:      { on: { SHIP: 'shipped' } },
+    shipped:   { type: 'final' },
+    cancelled: { type: 'final' },
   },
 });
 
-// 2. Spawn an actor (one actor = one live application)
-const actor = await client.spawnActor({
-  definitionId: 'loan-application',
-  initialContext: { applicantId: 'usr_123', amount: 50000 },
-});
+// Spawn an actor
+const actor = await sk.spawn('order-v1', { orderId: 'ord-001' });
 
-// 3. Drive it forward with events
-await client.sendEvent(actor.id, { type: 'APPROVE' });
+// Send events
+const state = await sk.send(actor.actorId, 'PAY');
+console.log(state.stateValue); // 'paid'
 
-// 4. Read state at any time
-const state = await client.getActor(actor.id);
-console.log(state.stateValue); // 'approved'
-console.log(state.done);       // false
+// Read state
+const current = await sk.getState(actor.actorId);
 ```
 
-## API reference
+## What StateKeep does and does not do
 
-### Constructor
+StateKeep tracks state transitions. It does NOT execute your
+guard functions or action handlers.
 
-```typescript
-new StateKeepClient({
-  baseUrl:   string,   // StateKeep server URL (no trailing slash)
-  apiKey:    string,   // x-api-key header value
-  timeoutMs: number,   // Per-request timeout in ms (default: 30000)
-})
-```
+Guards (`guard: 'myGuard'`) are stubbed to false — guarded transitions
+never fire. Actions (`actions: 'sendEmail'`) are no-ops — state
+transitions happen but nothing executes.
 
-### Actors
+Your backend owns side effects. Read `stateValue` from the `send()`
+response and execute side effects in your own code, or register a
+webhook for `state.changed` notifications.
 
-```typescript
-// Spawn a new actor
-spawnActor(options: SpawnActorOptions): Promise<Actor>
+See the full compatibility guide at `docs/xstate-compatibility.md`
+in the StateKeep repository.
 
-// Get current state (includes stateValue, context, status, done flag)
-getActor(actorId: string): Promise<Actor>
+## Handling deployment confirmation
 
-// Send a state machine event
-sendEvent(actorId: string, options: SendEventOptions): Promise<Actor>
+If a deployment would strand actors in removed states, `deploy()` throws
+a `StateKeepError` with code `'REQUIRES_CONFIRMATION'`. The `error.body`
+contains `confirmToken`, `strandedActors`, and `safeActors`. Re-deploy
+with that `confirmToken` to proceed:
 
-// List event history (cursor-paginated)
-listActorEvents(actorId: string, options?: ListActorEventsOptions): Promise<ListActorEventsResult>
-
-// Bulk-spawn up to 500 actors in one call (returns 207 Multi-Status)
-bulkSpawnActors(options: BulkSpawnOptions): Promise<BulkSpawnResult>
-```
-
-### Definitions
-
-```typescript
-// Deploy or update a state machine definition
-deployDefinition(options: DeployDefinitionOptions): Promise<StateMachineDefinition>
-
-// Fetch a definition by ID
-getDefinition(definitionId: string): Promise<StateMachineDefinition>
-```
-
-### Webhooks
-
-```typescript
-listWebhooks():                                          Promise<ListWebhooksResult>
-getWebhook(webhookId: string):                           Promise<Webhook>
-createWebhook(options: CreateWebhookOptions):            Promise<Webhook>
-updateWebhook(webhookId: string, options: UpdateWebhookOptions): Promise<Webhook>
-deleteWebhook(webhookId: string):                        Promise<void>
-```
-
-### Error handling
-
-All network or HTTP-error responses throw `StateKeepRequestError`:
-
-```typescript
-import { StateKeepClient, StateKeepRequestError } from '@statekeep/sdk';
+```js
+import { StateKeepError } from '@statekeep/sdk';
 
 try {
-  await client.sendEvent('nonexistent-actor', { type: 'START' });
+  await sk.deploy('order-v2', definition, { parentId: 'order-v1' });
 } catch (err) {
-  if (err instanceof StateKeepRequestError) {
-    console.error(err.statusCode, err.body.message);
+  if (err instanceof StateKeepError && err.code === 'REQUIRES_CONFIRMATION') {
+    const { confirmToken, strandedActors } = err.body;
+    console.log(`${strandedActors.length} actor groups will be stranded`);
+    await sk.deploy('order-v2', definition, {
+      parentId: 'order-v1',
+      confirmToken,
+    });
   }
 }
 ```
 
-## Breaking-change deploys (confirmToken flow)
+## Idempotent event dispatch
 
-When a new definition version removes or renames states that live actors occupy, the API returns `requires_confirmation` instead of deploying immediately:
+Pass an `idempotencyKey` to prevent duplicate processing:
 
-```typescript
-const res = await client.deployDefinition({
-  id: 'loan-v2',
-  parentId: 'loan-v1',
-  machineDefinition: { /* new version */ },
-  stateMapping: { submitted: 'in_review' },   // rename state
-});
-
-if ((res as any).status === 'requires_confirmation') {
-  const preview = res as any;
-  console.log(`${preview.strandedActors.length} actors need migration`);
-
-  // Re-submit with the token to confirm
-  await client.deployDefinition({
-    id: 'loan-v2',
-    parentId: 'loan-v1',
-    machineDefinition: { /* same */ },
-    stateMapping: { submitted: 'in_review' },
-    confirmToken: preview.confirmToken,
-  } as any);
-}
+```js
+await sk.send(actorId, 'PAY', {}, 'payment-txn-001');
+// Calling again with the same key returns the current state
+// without re-processing the event
 ```
 
-## Build
+## Error handling
 
-```bash
-npm run build      # tsc → dist/
-npm run typecheck  # type-check only
+```js
+import { StateKeepError } from '@statekeep/sdk';
+
+try {
+  await sk.send(actorId, 'PAY');
+} catch (err) {
+  if (err instanceof StateKeepError) {
+    console.error(err.status, err.code, err.message);
+  }
+}
 ```
 
 ## Limitations
 
-- State machine definitions must be plain JSON (XState v5 `setup()` syntax with inline TypeScript functions is not supported — see [docs/xstate-compatibility.md](../docs/xstate-compatibility.md)).
-- Guards and actions in definitions are stubbed; actors always take the first matching transition. Customer backends own side effects via webhooks or by reading `stateValue` from the response.
-- The SDK ships with zero runtime dependencies and requires Node.js ≥ 18 (uses global `fetch`).
+- State machine definitions must be plain JSON. XState v5 `setup()` syntax with
+  inline TypeScript functions is not supported — see
+  [docs/xstate-compatibility.md](../docs/xstate-compatibility.md).
+- Guards and actions in definitions are never evaluated. StateKeep always takes
+  the first matching transition. Move guard logic to your backend before calling
+  `send()`.
+- The SDK has zero runtime dependencies and requires Node.js ≥ 18 (uses global
+  `fetch`).

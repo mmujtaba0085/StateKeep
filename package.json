@@ -44,7 +44,8 @@
     "test:e2e": "playwright test",
     "test:e2e:api": "playwright test --project=api",
     "test:e2e:dashboard": "playwright test --project=dashboard",
-    "test:e2e:headed": "playwright test --headed"
+    "test:e2e:headed": "playwright test --headed",
+    "test:sdk": "STATEKEEP_API_KEY=$(grep STATEKEEP_API_KEY .env | cut -d= -f2) STATEKEEP_URL=http://localhost:3001 node --test sdk/test/client.test.js"
   },
   "dependencies": {
     "@fastify/rate-limit": "^9.1.0",

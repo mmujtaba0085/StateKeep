@@ -26,7 +26,7 @@ import { LOAN_V2, LOAN_V3 } from '../shared/scenarios.js';
 import { verifyRouting, getActorDistribution } from '../shared/setup.js';
 
 export const name          = '8-event-pollution';
-export const description   = '8. Event pollution (approach 4 breaks, APV immune)';
+export const description   = '[ANTIPATTERN] 8. Event pollution (approach 4 breaks, APV immune)';
 export const developerCode = 35;
 export const requiresDb    = true;
 

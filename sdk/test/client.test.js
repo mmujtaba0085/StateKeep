@@ -1,153 +1,213 @@
 /**
  * sdk/test/client.test.js
  * Integration tests for StateKeepClient.
- * Runs against a live server — set STATEKEEP_URL and STATEKEEP_API_KEY, or
- * defaults to http://localhost:3001 with the standard test key.
+ * Requires a live server — set STATEKEEP_URL and STATEKEEP_API_KEY.
  */
 
-import { test } from 'node:test';
+import { test, describe, before } from 'node:test';
 import assert from 'node:assert/strict';
 
-// ── The SDK is pure TypeScript — for these JS tests we call the compiled dist.
-// Build first: cd sdk && npm run build
-import { StateKeepClient, StateKeepRequestError } from '../dist/index.js';
-
+const API_KEY  = process.env.STATEKEEP_API_KEY;
 const BASE_URL = process.env.STATEKEEP_URL ?? 'http://localhost:3001';
-const API_KEY  = process.env.STATEKEEP_API_KEY ?? 'sk_ab12cd34_0000000000000000000000000000000000000000';
+const SKIP     = !API_KEY;
 
-const client = new StateKeepClient({ baseUrl: BASE_URL, apiKey: API_KEY });
+if (SKIP) console.log('STATEKEEP_API_KEY not set — skipping SDK tests');
 
-const SIMPLE_MACHINE = {
-  initial: 'idle',
+// Polling helper — no fixed delays
+async function waitUntil(fn, timeoutMs = 10_000, intervalMs = 200) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await fn()) return;
+    await new Promise(r => setTimeout(r, intervalMs));
+  }
+  throw new Error(`waitUntil: timed out after ${timeoutMs}ms`);
+}
+
+async function waitForState(sk, actorId, targetState) {
+  await waitUntil(async () => {
+    const s = await sk.getState(actorId);
+    const v = typeof s.stateValue === 'string'
+      ? s.stateValue
+      : Object.keys(s.stateValue ?? {})[0];
+    return v === targetState;
+  }, 10_000, 200);
+}
+
+const MACHINE = {
+  id: 'sdk-test', initial: 'idle',
   states: {
-    idle:    { on: { START: 'running' } },
-    running: { on: { STOP: 'done' } },
+    idle:    { on: { START: 'working' } },
+    working: { on: { COMPLETE: 'done', FAIL: 'failed' } },
     done:    { type: 'final' },
+    failed:  { type: 'final' },
   },
 };
 
-let defId;
-let actorId;
+describe('StateKeepClient', { skip: SKIP }, async () => {
+  let sk;
+  let createClient, StateKeepError;
 
-// ── Setup ──────────────────────────────────────────────────────────────────────
-
-test('deployDefinition — creates a new definition', async () => {
-  defId = `sdk-test-def-${Date.now()}`;
-  const res = await client.deployDefinition({ id: defId, machineDefinition: SIMPLE_MACHINE });
-  assert.ok(res.id, 'response should include id');
-});
-
-// ── Actors ─────────────────────────────────────────────────────────────────────
-
-test('spawnActor — returns actor with initial state', async () => {
-  const actor = await client.spawnActor({ definitionId: defId });
-  assert.ok(actor.id, 'actor should have id');
-  assert.equal(actor.stateValue, 'idle');
-  assert.equal(actor.done, false);
-  actorId = actor.id;
-});
-
-test('getActor — returns current actor state', async () => {
-  const actor = await client.getActor(actorId);
-  assert.equal(actor.id, actorId);
-  assert.equal(actor.stateValue, 'idle');
-  assert.equal(actor.done, false);
-});
-
-test('sendEvent — transitions actor state', async () => {
-  const actor = await client.sendEvent(actorId, { type: 'START' });
-  assert.equal(actor.stateValue, 'running');
-  assert.equal(actor.done, false);
-});
-
-test('sendEvent — reaches final state and sets done=true', async () => {
-  const actor = await client.sendEvent(actorId, { type: 'STOP' });
-  assert.equal(actor.stateValue, 'done');
-  assert.equal(actor.done, true);
-});
-
-test('listActorEvents — returns paginated event history', async () => {
-  const result = await client.listActorEvents(actorId);
-  assert.ok(Array.isArray(result.events));
-  assert.ok(result.events.length >= 3); // SPAWN + START + STOP
-  assert.ok(result.events.some(e => e.eventType === 'SPAWN'));
-  assert.ok(result.events.some(e => e.eventType === 'START'));
-});
-
-test('bulkSpawnActors — spawns multiple actors in one call', async () => {
-  const result = await client.bulkSpawnActors({
-    actors: [
-      { definitionId: defId },
-      { definitionId: defId, initialContext: { tag: 'b' } },
-    ],
+  before(async () => {
+    const mod = await import('../src/index.ts').catch(
+                  () => import('../src/index.js'));
+    createClient   = mod.createClient;
+    StateKeepError = mod.StateKeepError;
+    sk = createClient({ baseUrl: BASE_URL, apiKey: API_KEY });
   });
-  assert.equal(result.created.length, 2);
-  assert.equal(result.failed.length, 0);
-  assert.equal(result.total, 2);
-  for (const actor of result.created) {
-    assert.ok(actor.id);
+
+  test('health() returns ok', async () => {
+    const r = await sk.health();
+    assert.equal(r.status, 'ok');
+  });
+
+  test('validate() returns valid for correct machine', async () => {
+    const r = await sk.validate(MACHINE);
+    assert.equal(r.valid, true);
+    assert.ok(r.states.includes('idle'));
+  });
+
+  test('validate() returns invalid for broken machine', async () => {
+    const r = await sk.validate({ id: 'bad', initial: 'ghost', states: {} });
+    assert.equal(r.valid, false);
+    assert.ok(r.errors.length > 0);
+  });
+
+  test('deploy() creates a definition', async () => {
+    const id = `sdk-${Date.now()}`;
+    const r  = await sk.deploy(id, MACHINE);
+    assert.equal(r.id, id);
+    assert.equal(r.idempotent, false);
+    assert.ok(r.deployedAt > 0);
+
+    // Re-deploy same definition — must be idempotent
+    const r2 = await sk.deploy(id, MACHINE);
+    assert.equal(r2.idempotent, true);
+  });
+
+  test('spawn() creates actor in initial state', async () => {
+    const defId = `sdk-spawn-${Date.now()}`;
+    await sk.deploy(defId, MACHINE);
+    const actor = await sk.spawn(defId, { testRun: true });
+    assert.ok(actor.actorId);
     assert.equal(actor.stateValue, 'idle');
-  }
-});
-
-// ── Definitions ────────────────────────────────────────────────────────────────
-
-test('getDefinition — retrieves deployed definition', async () => {
-  const def = await client.getDefinition(defId);
-  assert.equal(def.id, defId);
-  assert.ok(def.machineDefinition);
-});
-
-// ── Webhooks ───────────────────────────────────────────────────────────────────
-
-let webhookId;
-
-test('createWebhook — registers a webhook endpoint', async () => {
-  const wh = await client.createWebhook({
-    url:    'https://example.com/hook',
-    events: ['actor.transitioned'],
+    assert.equal(actor.definitionId, defId);
+    assert.equal(actor.done, false);
   });
-  assert.ok(wh.id);
-  assert.equal(wh.url, 'https://example.com/hook');
-  webhookId = wh.id;
-});
 
-test('listWebhooks — includes created webhook', async () => {
-  const result = await client.listWebhooks();
-  assert.ok(Array.isArray(result.webhooks));
-  assert.ok(result.webhooks.some(w => w.id === webhookId));
-});
+  test('send() transitions actor state', async () => {
+    const defId = `sdk-send-${Date.now()}`;
+    await sk.deploy(defId, MACHINE);
+    const actor = await sk.spawn(defId);
+    const after = await sk.send(actor.actorId, 'START');
+    assert.equal(after.stateValue, 'working');
+    assert.equal(after.done, false);
+  });
 
-test('getWebhook — returns single webhook by id', async () => {
-  const wh = await client.getWebhook(webhookId);
-  assert.equal(wh.id, webhookId);
-});
+  test('send() with idempotencyKey does not double-process', async () => {
+    const defId = `sdk-idem-${Date.now()}`;
+    await sk.deploy(defId, MACHINE);
+    const actor = await sk.spawn(defId);
 
-test('updateWebhook — marks webhook inactive', async () => {
-  const wh = await client.updateWebhook(webhookId, { active: false });
-  assert.equal(wh.active, false);
-});
+    const r1 = await sk.send(actor.actorId, 'START', {}, 'idem-key-001');
+    assert.equal(r1.stateValue, 'working');
 
-test('deleteWebhook — removes the webhook', async () => {
-  await client.deleteWebhook(webhookId);
-  // Confirm it is gone
-  try {
-    await client.getWebhook(webhookId);
-    assert.fail('Expected 404 after delete');
-  } catch (err) {
-    assert.ok(err instanceof StateKeepRequestError);
-    assert.equal(err.statusCode, 404);
-  }
-});
+    const r2 = await sk.send(actor.actorId, 'START', {}, 'idem-key-001');
+    assert.equal(r2.idempotent, true);
+    assert.equal(r2.stateValue, 'working'); // not double-transitioned
+  });
 
-// ── Error handling ─────────────────────────────────────────────────────────────
+  test('send() to final state sets done=true', async () => {
+    const defId = `sdk-done-${Date.now()}`;
+    await sk.deploy(defId, MACHINE);
+    const actor = await sk.spawn(defId);
+    await sk.send(actor.actorId, 'START');
+    const fin   = await sk.send(actor.actorId, 'COMPLETE');
+    assert.equal(fin.stateValue, 'done');
+    assert.equal(fin.done, true);
+  });
 
-test('StateKeepRequestError — thrown on 404 for unknown actor', async () => {
-  try {
-    await client.getActor('nonexistent-actor-xyz');
-    assert.fail('Expected StateKeepRequestError');
-  } catch (err) {
-    assert.ok(err instanceof StateKeepRequestError);
-    assert.equal(err.statusCode, 404);
-  }
+  test('getState() returns current state', async () => {
+    const defId = `sdk-getstate-${Date.now()}`;
+    await sk.deploy(defId, MACHINE);
+    const actor  = await sk.spawn(defId);
+    await sk.send(actor.actorId, 'START');
+    const state  = await sk.getState(actor.actorId);
+    assert.equal(state.stateValue, 'working');
+    // Fingerprint must be non-empty after processing an event
+    assert.ok(state.historyFingerprint);
+    // Do NOT assert fingerprint format, length, or encoding
+  });
+
+  test('getEvents() returns event history with pagination', async () => {
+    const defId = `sdk-events-${Date.now()}`;
+    await sk.deploy(defId, MACHINE);
+    const actor  = await sk.spawn(defId);
+    await sk.send(actor.actorId, 'START');
+    await sk.send(actor.actorId, 'COMPLETE');
+
+    const r = await sk.getEvents(actor.actorId, { limit: 2 });
+    assert.ok(Array.isArray(r.events));
+    assert.ok(r.events.length > 0);
+    assert.ok('hasMore' in r);
+    assert.ok('nextCursor' in r);
+  });
+
+  test('terminate() marks actor terminated', async () => {
+    const defId = `sdk-term-${Date.now()}`;
+    await sk.deploy(defId, MACHINE);
+    const actor = await sk.spawn(defId);
+    await sk.terminate(actor.actorId);
+    const state = await sk.getState(actor.actorId);
+    assert.equal(state.status, 'terminated');
+  });
+
+  test('StateKeepError thrown on 404', async () => {
+    await assert.rejects(
+      () => sk.getState('does-not-exist-xyz'),
+      (err) => {
+        assert.equal(err.name, 'StateKeepError');
+        assert.equal(err.status, 404);
+        return true;
+      }
+    );
+  });
+
+  test('preview() returns migration analysis without writing definition', async () => {
+    const defId     = `sdk-preview-${Date.now()}`;
+    await sk.deploy(defId, MACHINE);
+    const previewId = `${defId}-v2-preview`;
+    const v2def     = { ...MACHINE, states: { ...MACHINE.states,
+      review: { type: 'final' } } };
+
+    const r = await sk.preview(previewId, v2def, { parentId: defId });
+    assert.ok('wouldDeploy' in r);
+    assert.ok('migration' in r);
+
+    // Definition must NOT have been written
+    await assert.rejects(
+      () => sk.getDefinition(previewId),
+      (err) => {
+        assert.equal(err.status, 404);
+        return true;
+      }
+    );
+  });
+
+  test('schedule() creates pending scheduled event', async () => {
+    const defId = `sdk-sched-${Date.now()}`;
+    await sk.deploy(defId, MACHINE);
+    const actor = await sk.spawn(defId);
+    const sched = await sk.schedule(actor.actorId, 'START', { delay: 300_000 });
+    assert.equal(sched.status, 'pending');
+    assert.equal(sched.eventType, 'START');
+    // Clean up
+    await sk.cancelScheduled(actor.actorId, sched.id);
+    await sk.terminate(actor.actorId);
+  });
+
+  test('listActors() returns actors array', async () => {
+    const r = await sk.listActors({ limit: 5 });
+    assert.ok(Array.isArray(r.actors));
+    assert.ok(typeof r.count === 'number');
+  });
 });
