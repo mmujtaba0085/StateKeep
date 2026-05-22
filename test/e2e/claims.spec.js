@@ -2,215 +2,47 @@
  * test/e2e/claims.spec.js
  * Stage 6: Core APV migration claims — Q2, Q4, Q9, Q10, Q13, Q14, Q16, Q22.
  *
- * Tests are engine-agnostic: assertions hold whether or not the APV engine
- * is available. Migration claims are verified via the API response (affectedActors,
- * strandedActors, fingerprint field) and by sending events that produce consistent
- * outcomes regardless of whether inline migration occurred.
+ * Engine-dependent tests (Q2, Q9, Q10, Q22) automatically skip in fallback mode.
+ * Engine-agnostic tests (Q4, Q13, Q14, Q16) run in all environments.
+ *
+ * Run via WSL with STATEKEEP_ENGINE_PATH set so the real APV engine is active.
+ *
+ * Design note: tests deliberately avoid driving actors to final states so that
+ * getActorState always returns definitionId (terminated actors omit it).
  */
 
 import { test, expect } from '@playwright/test';
-import { GET, POST, PUT, PATCH, uniqueId, waitUntil } from './helpers/api.js';
+import { GET, POST, PUT, uniqueId, waitForActorMigration } from './helpers/api.js';
 
 function expect2xx(res, label = '') {
   const ok = res.status >= 200 && res.status < 300;
   expect(ok, `${label}HTTP ${res.status}: ${JSON.stringify(res.body)}`).toBe(true);
 }
 
-// ── Q2: Wildcard deploy enqueues every active actor ────────────────────────────
+// ── Q2: stateMapping maps actor to renamed state; definitionId advances to v2 ──
 
-test('Q2: wildcard deployment (no historyPath) enqueues all active actors for migration', async () => {
+test('Q2: stateMapping maps actor to renamed state — definitionId advances to v2 after inline migration', async () => {
+  const health = await GET('/v1/health');
+  if (health.body?.engine !== 'real') { test.skip(); return; }
+
   const v1Id = uniqueId('q2-v1');
   const v2Id = uniqueId('q2-v2');
 
-  const V1 = { id: 'q2', initial: 'idle', states: { idle: { on: { GO: 'running' } }, running: { on: { STOP: 'done' } }, done: { type: 'final' } } };
-  const V2 = { id: 'q2', initial: 'idle', states: { idle: { on: { GO: 'running' } }, running: { on: { STOP: 'done', PAUSE: 'paused' } }, paused: { on: { RESUME: 'running' } }, done: { type: 'final' } } };
-
-  expect2xx(await PUT('/v1/definitions', { id: v1Id, definition: V1 }), 'v1: ');
-
-  // Spawn three actors and advance each to 'running'
-  const ids = [];
-  for (let i = 0; i < 3; i++) {
-    const r = await POST('/v1/actors', { definitionId: v1Id });
-    expect(r.status).toBe(201);
-    ids.push(r.body.id);
-    expect2xx(await POST(`/v1/actors/${r.body.id}/event`, { type: 'GO' }), `GO[${i}]: `);
-  }
-
-  // Wildcard deploy — no historyPath: all active actors enrolled
-  const deployRes = await PUT('/v1/definitions', { id: v2Id, parentId: v1Id, definition: V2 });
-  expect2xx(deployRes, 'v2 deploy: ');
-  expect(deployRes.body.affectedActors).toBe(3);
-
-  // Send an event valid from 'running' on BOTH v1 and v2 — state must reach 'done'
-  for (const actorId of ids) {
-    expect2xx(await POST(`/v1/actors/${actorId}/event`, { type: 'STOP' }), `STOP: `);
-    const state = await GET(`/v1/actors/${actorId}/state`);
-    expect(state.body.stateValue).toBe('done');
-  }
-});
-
-// ── Q4: historyPath deploy targets only path-matching actors ───────────────────
-
-test('Q4: historyPath deployment enrolls fewer actors than a wildcard would', async () => {
-  const v1Id = uniqueId('q4-v1');
-  const v2Id = uniqueId('q4-v2');
-
-  const V1 = { id: 'q4', initial: 'idle', states: { idle: { on: { PAY: 'paid', SKIP: 'free' } }, paid: { on: { USE: 'done' } }, free: { on: { USE: 'done' } }, done: { type: 'final' } } };
-  const V2 = { id: 'q4', initial: 'idle', states: { idle: { on: { PAY: 'paid', SKIP: 'free' } }, paid: { on: { USE: 'done', REFUND: 'idle' } }, free: { on: { USE: 'done' } }, done: { type: 'final' } } };
-
-  expect2xx(await PUT('/v1/definitions', { id: v1Id, definition: V1 }), 'v1: ');
-
-  // Actor A: takes PAY path; Actor B: takes SKIP path
-  const rA = await POST('/v1/actors', { definitionId: v1Id });
-  const rB = await POST('/v1/actors', { definitionId: v1Id });
-  expect2xx(await POST(`/v1/actors/${rA.body.id}/event`, { type: 'PAY' }),  'PAY: ');
-  expect2xx(await POST(`/v1/actors/${rB.body.id}/event`, { type: 'SKIP' }), 'SKIP: ');
-
-  // Wildcard deploy: should enroll both actors
-  const wildcardRes = await PUT('/v1/definitions', { id: v2Id + '-wc', parentId: v1Id, definition: V2 });
-  expect2xx(wildcardRes, 'wildcard v2: ');
-  const wildcardAffected = wildcardRes.body.affectedActors;
-  expect(wildcardAffected).toBe(2);
-
-  // Deploy with historyPath: only PAY actor matches — fewer than wildcard
-  const v3Id = uniqueId('q4-v3');
-  const pathRes = await PUT('/v1/definitions', {
-    id: v3Id, parentId: v1Id, definition: V2,
-    historyPath: ['PAY'],
-  });
-  expect2xx(pathRes, 'historyPath v3: ');
-  // historyPath deploy enrolls ≤ N actors (engine-dependent: 0 in fallback, ≥1 with engine)
-  expect(pathRes.body.affectedActors).toBeLessThan(wildcardAffected);
-});
-
-// ── Q9: STATE_NOT_MAPPABLE → needs_rescue via confirm flow ────────────────────
-
-test('Q9: actor in removed state with no stateMapping is tagged needs_rescue', async () => {
-  const v1Id = uniqueId('q9-v1');
-  const v2Id = uniqueId('q9-v2');
-
-  const V1 = { id: 'q9', initial: 'idle', states: { idle: { on: { SUBMIT: 'review' } }, review: { on: { APPROVE: 'done' } }, done: { type: 'final' } } };
-  // V2 removes 'review' state — actors in 'review' would be stranded
-  const V2 = { id: 'q9', initial: 'idle', states: { idle: { on: { SUBMIT: 'done' } }, done: { type: 'final' } } };
-
-  expect2xx(await PUT('/v1/definitions', { id: v1Id, definition: V1 }), 'v1: ');
-
-  const r = await POST('/v1/actors', { definitionId: v1Id });
-  const actorId = r.body.id;
-  expect2xx(await POST(`/v1/actors/${actorId}/event`, { type: 'SUBMIT' }), 'SUBMIT: ');
-
-  // First PUT — returns requires_confirmation with strandedActors list
-  const preview = await PUT('/v1/definitions', { id: v2Id, parentId: v1Id, definition: V2 });
-  expect(preview.status).toBe(200);
-  expect(preview.body.status).toBe('requires_confirmation');
-  expect(preview.body.strandedActors.length).toBeGreaterThan(0);
-  const { confirmToken } = preview.body;
-
-  // Confirmed deploy — stranded actors tagged needs_rescue
-  const deployRes = await PUT('/v1/definitions', {
-    id: v2Id, parentId: v1Id, definition: V2, confirmToken,
-  });
-  expect2xx(deployRes, 'v2 confirmed: ');
-  expect(deployRes.body.strandedTagged).toBeGreaterThan(0);
-
-  // Actor should now be needs_rescue
-  await waitUntil(
-    async () => {
-      const s = await GET(`/v1/actors/${actorId}/state`);
-      return s.body.status === 'needs_rescue';
-    },
-    { timeoutMs: 10_000, description: 'actor to reach needs_rescue' }
-  );
-
-  const finalState = await GET(`/v1/actors/${actorId}/state`);
-  expect(finalState.body.status).toBe('needs_rescue');
-});
-
-// ── Q10: contextTransform field is accepted and stored in definitions ──────────
-
-test('Q10: contextTransform field is accepted by PUT /v1/definitions and stored', async () => {
-  const v1Id = uniqueId('q10-v1');
-  const v2Id = uniqueId('q10-v2');
-
-  const V = { id: 'q10', initial: 'active', states: { active: { on: { NEXT: 'done' } }, done: { type: 'final' } } };
-
-  expect2xx(await PUT('/v1/definitions', { id: v1Id, definition: V }), 'v1: ');
-
-  // Deploy v2 with contextTransform — must be accepted (201)
-  const deployRes = await PUT('/v1/definitions', {
-    id: v2Id, parentId: v1Id, definition: V,
-    contextTransform: { 'payment.verified': 'feePaid', 'payment.amount': 'amount' },
-  });
-  expect2xx(deployRes, 'v2 with contextTransform: ');
-  expect(deployRes.status).toBe(201);
-  expect(deployRes.body.id).toBe(v2Id);
-
-  // Definition was stored and is retrievable
-  const defRes = await GET(`/v1/definitions/${v2Id}/status`);
-  expect(defRes.status).toBe(200);
-  expect(defRes.body.definition.id).toBe(v2Id);
-
-  // Actors with the old context fields can still send events without error
-  const actor = await POST('/v1/actors', { definitionId: v1Id, context: { feePaid: true, amount: 500 } });
-  expect(actor.status).toBe(201);
-  const eventRes = await POST(`/v1/actors/${actor.body.id}/event`, { type: 'NEXT' });
-  // Event processes (may have migrated inline or stayed on v1 — both are valid)
-  expect([200, 201]).toContain(eventRes.status);
-  const state = await GET(`/v1/actors/${actor.body.id}/state`);
-  expect(state.body.stateValue).toBe('done');
-});
-
-// ── Q13: historyFingerprint field is present and stable (not reset by events) ──
-
-test('Q13: historyFingerprint is present on actor state and advances with each event', async () => {
-  const defId = uniqueId('q13-def');
-  const def   = { id: 'q13', initial: 'a', states: { a: { on: { X: 'b' } }, b: { on: { X: 'c' } }, c: { type: 'final' } } };
-
-  expect2xx(await PUT('/v1/definitions', { id: defId, definition: def }), 'def: ');
-
-  const r = await POST('/v1/actors', { definitionId: defId });
-  const actorId = r.body.id;
-
-  const s0 = await GET(`/v1/actors/${actorId}/state`);
-  const fp0 = s0.body.historyFingerprint;
-  // Initial fingerprint is '0' (sentinel: no events yet) or 16-char hex after SPAWN event
-  expect(fp0 !== undefined && fp0 !== null).toBe(true);
-
-  // Send one event — fingerprint must change to a proper 16-char hex chain value
-  expect2xx(await POST(`/v1/actors/${actorId}/event`, { type: 'X' }), 'X: ');
-  const s1 = await GET(`/v1/actors/${actorId}/state`);
-  const fp1 = s1.body.historyFingerprint;
-  expect(fp1).not.toBe(fp0);              // changed after event
-  expect(fp1).toMatch(/^[0-9a-f]{16}$/); // must be valid 16-char hex
-
-  // Second event — fingerprint changes again
-  expect2xx(await POST(`/v1/actors/${actorId}/event`, { type: 'X' }), 'X2: ');
-  const s2 = await GET(`/v1/actors/${actorId}/state`);
-  expect(s2.body.historyFingerprint).not.toBe(fp1);
-});
-
-// ── Q14: stateMapping routes actor to renamed state on event dispatch ──────────
-
-test('Q14: stateMapping allows actor to transition correctly after definition rename', async () => {
-  const v1Id = uniqueId('q14-v1');
-  const v2Id = uniqueId('q14-v2');
-
-  // V1: idle → working → done
   const V1 = {
-    id: 'q14', initial: 'idle',
+    id: 'q2', initial: 'idle',
     states: {
       idle:    { on: { WORK: 'working' } },
-      working: { on: { FINISH: 'done', PAUSE: 'paused' } },
+      working: { on: { PAUSE: 'paused', FINISH: 'done' } },
       paused:  { on: { RESUME: 'working' } },
       done:    { type: 'final' },
     },
   };
-  // V2: renames 'working' → 'active'; stateMapping routes actors across
+  // V2 renames 'working' → 'active'; stateMapping routes migrating actors
   const V2 = {
-    id: 'q14', initial: 'idle',
+    id: 'q2', initial: 'idle',
     states: {
       idle:   { on: { WORK: 'active' } },
-      active: { on: { FINISH: 'done', PAUSE: 'paused' } },
+      active: { on: { PAUSE: 'paused', FINISH: 'done' } },
       paused: { on: { RESUME: 'active' } },
       done:   { type: 'final' },
     },
@@ -218,90 +50,316 @@ test('Q14: stateMapping allows actor to transition correctly after definition re
 
   expect2xx(await PUT('/v1/definitions', { id: v1Id, definition: V1 }), 'v1: ');
 
-  const spawnRes = await POST('/v1/actors', { definitionId: v1Id });
-  const actorId  = spawnRes.body.id;
+  const r       = await POST('/v1/actors', { definitionId: v1Id });
+  const actorId = r.body.id;
   expect2xx(await POST(`/v1/actors/${actorId}/event`, { type: 'WORK' }), 'WORK: ');
 
-  // Deploy v2 with stateMapping: working → active
   expect2xx(await PUT('/v1/definitions', {
     id: v2Id, parentId: v1Id, definition: V2,
     stateMapping: { working: 'active' },
-  }), 'v2 stateMapping deploy: ');
+  }), 'v2 stateMapping: ');
 
-  // PAUSE is valid from 'working' (v1) AND 'active' (v2 via stateMapping)
-  // so the assertion holds regardless of whether inline migration ran
-  await POST(`/v1/actors/${actorId}/event`, { type: 'PAUSE' });
+  // PAUSE triggers inline migration: actor migrates to V2 via stateMapping (working→active),
+  // then PAUSE applied → 'paused'.  Actor stays non-final so state reads return definitionId.
+  const pauseRes = await POST(`/v1/actors/${actorId}/event`, { type: 'PAUSE' });
+  expect2xx(pauseRes, 'PAUSE: ');
+  expect(pauseRes.body.migratedTo).toBe(v2Id);
+
+  // definitionId must update to v2Id confirming migration completed
+  await waitForActorMigration(actorId, v2Id);
+
   const state = await GET(`/v1/actors/${actorId}/state`);
+  expect(state.body.definitionId).toBe(v2Id);
   expect(state.body.stateValue).toBe('paused');
 });
 
-// ── Q16: Multi-version deployment chain ───────────────────────────────────────
+// ── Q4: Unknown event type is silently ignored ────────────────────────────────
 
-test('Q16: two chained deployments create a valid v1→v2→v3 parent chain', async () => {
-  const v1Id = uniqueId('q16-v1');
-  const v2Id = uniqueId('q16-v2');
-  const v3Id = uniqueId('q16-v3');
-
-  const makeV = (extra) => ({
-    id: 'q16', initial: 'idle',
+test('Q4: unknown event type is silently ignored — stateValue unchanged, no error', async () => {
+  const defId = uniqueId('q4-def');
+  const def   = {
+    id: 'q4', initial: 'idle',
     states: {
-      idle:    { on: { GO: 'running' } },
-      running: { on: { STOP: 'done', ...extra } },
-      paused:  { on: { RESUME: 'running' } },    // included in all versions
+      idle:    { on: { START: 'running' } },
+      running: { on: { STOP: 'done' } },
       done:    { type: 'final' },
     },
+  };
+
+  expect2xx(await PUT('/v1/definitions', { id: defId, definition: def }), 'def: ');
+
+  const r       = await POST('/v1/actors', { definitionId: defId });
+  const actorId = r.body.id;
+  expect2xx(await POST(`/v1/actors/${actorId}/event`, { type: 'START' }), 'START: ');
+
+  // Send an event with no matching transition in 'running'
+  const res = await POST(`/v1/actors/${actorId}/event`, { type: 'UNKNOWN_EVENT_XYZ' });
+  expect2xx(res, 'unknown event: ');
+
+  // State must be unchanged
+  const state = await GET(`/v1/actors/${actorId}/state`);
+  expect(state.body.stateValue).toBe('running');
+});
+
+// ── Q9: Multi-event historyPath selects only actors with the exact fingerprint path ─
+
+test('Q9: multi-event historyPath targets only actors whose fingerprint matches the full sequence', async () => {
+  const health = await GET('/v1/health');
+  if (health.body?.engine !== 'real') { test.skip(); return; }
+
+  const v1Id = uniqueId('q9-v1');
+  const v2Id = uniqueId('q9-v2');
+
+  const V1 = {
+    id: 'q9', initial: 'idle',
+    states: {
+      idle:       { on: { APPROVE: 'approved' } },
+      approved:   { on: { PROCESS: 'processing', CANCEL: 'idle' } },
+      processing: { on: { DONE: 'idle', EXPEDITE: 'idle' } },
+    },
+  };
+  // V2 only targets actors that followed [APPROVE, PROCESS] exactly.
+  // historyPath = ['APPROVE', 'PROCESS'] → prefix_hash = hash(APPROVE+PROCESS).
+  // Actors that only sent [APPROVE] (fingerprint = hash(APPROVE)) are NOT eligible.
+  const V2 = {
+    id: 'q9', initial: 'idle',
+    states: {
+      idle:       { on: { APPROVE: 'approved' } },
+      approved:   { on: { PROCESS: 'processing', CANCEL: 'idle' } },
+      processing: { on: { DONE: 'idle', EXPEDITE: 'idle', RUSH: 'idle' } },
+    },
+  };
+
+  expect2xx(await PUT('/v1/definitions', { id: v1Id, definition: V1 }), 'v1: ');
+
+  // Actor A: follows [APPROVE, PROCESS] — fingerprint = hash(APPROVE+PROCESS)
+  const rA       = await POST('/v1/actors', { definitionId: v1Id });
+  const actorIdA = rA.body.id;
+  expect2xx(await POST(`/v1/actors/${actorIdA}/event`, { type: 'APPROVE' }),  'A:APPROVE: ');
+  expect2xx(await POST(`/v1/actors/${actorIdA}/event`, { type: 'PROCESS' }), 'A:PROCESS: ');
+
+  // Actor B: follows [APPROVE] only — fingerprint = hash(APPROVE); NOT at hash(APPROVE+PROCESS)
+  const rB       = await POST('/v1/actors', { definitionId: v1Id });
+  const actorIdB = rB.body.id;
+  expect2xx(await POST(`/v1/actors/${actorIdB}/event`, { type: 'APPROVE' }),  'B:APPROVE: ');
+
+  // Deploy V2 with historyPath=['APPROVE','PROCESS'] — only Actor A's fingerprint matches
+  const deployRes = await PUT('/v1/definitions', {
+    id: v2Id, parentId: v1Id, definition: V2,
+    historyPath: ['APPROVE', 'PROCESS'],
   });
+  expect2xx(deployRes, 'v2 historyPath: ');
+  // Exactly 1 actor enrolled (A), not 2 — B's fingerprint is hash(APPROVE) which doesn't match
+  expect(deployRes.body.affectedActors).toBe(1);
 
-  expect2xx(await PUT('/v1/definitions', { id: v1Id, definition: makeV({}) }), 'v1: ');
+  // RUSH is V2-only in 'processing' — proves Actor A migrated inline
+  const rushRes = await POST(`/v1/actors/${actorIdA}/event`, { type: 'RUSH' });
+  expect2xx(rushRes, 'A:RUSH: ');
+  expect(rushRes.body.migratedTo).toBe(v2Id);
 
-  // Spawn actor on v1 and advance to 'running'
-  const r      = await POST('/v1/actors', { definitionId: v1Id });
+  await waitForActorMigration(actorIdA, v2Id);
+  const stateA = await GET(`/v1/actors/${actorIdA}/state`);
+  expect(stateA.body.definitionId).toBe(v2Id);
+
+  // Actor B sends PROCESS (valid on V1) — no migration because fingerprint doesn't match
+  const procRes = await POST(`/v1/actors/${actorIdB}/event`, { type: 'PROCESS' });
+  expect2xx(procRes, 'B:PROCESS: ');
+  expect(procRes.body.migratedTo).toBeNull();
+
+  const stateB = await GET(`/v1/actors/${actorIdB}/state`);
+  expect(stateB.body.definitionId).toBe(v1Id);
+});
+
+// ── Q10: Actor is not left in 'migrating' status after inline migration ────────
+
+test('Q10: actor status is not migrating after inline migration completes', async () => {
+  const health = await GET('/v1/health');
+  if (health.body?.engine !== 'real') { test.skip(); return; }
+
+  const v1Id = uniqueId('q10-v1');
+  const v2Id = uniqueId('q10-v2');
+
+  // V1 does not have PAUSE from running; V2 adds it.
+  // Sending PAUSE proves inline migration ran (V1 would silently ignore it).
+  const V1 = {
+    id: 'q10', initial: 'idle',
+    states: {
+      idle:    { on: { GO: 'running' } },
+      running: { on: { STOP: 'done' } },
+      done:    { type: 'final' },
+    },
+  };
+  const V2 = {
+    id: 'q10', initial: 'idle',
+    states: {
+      idle:    { on: { GO: 'running' } },
+      running: { on: { STOP: 'done', PAUSE: 'paused' } },
+      paused:  { on: { RESUME: 'running' } },
+      done:    { type: 'final' },
+    },
+  };
+
+  expect2xx(await PUT('/v1/definitions', { id: v1Id, definition: V1 }), 'v1: ');
+
+  // Spawn actor and send events BEFORE deploying V2 so logicalStartTick < V2.deployedAt
+  const r       = await POST('/v1/actors', { definitionId: v1Id });
   const actorId = r.body.id;
   expect2xx(await POST(`/v1/actors/${actorId}/event`, { type: 'GO' }), 'GO: ');
 
-  // Deploy v2 as child of v1 (wildcard)
-  const v2Res = await PUT('/v1/definitions', { id: v2Id, parentId: v1Id, definition: makeV({ PAUSE: 'paused' }) });
-  expect2xx(v2Res, 'v2: ');
-  expect(v2Res.body.affectedActors).toBeGreaterThanOrEqual(1);
+  expect2xx(await PUT('/v1/definitions', { id: v2Id, parentId: v1Id, definition: V2 }), 'v2: ');
 
-  // Deploy v3 as child of v2 (wildcard)
-  const v3Res = await PUT('/v1/definitions', { id: v3Id, parentId: v2Id, definition: makeV({ PAUSE: 'paused', CANCEL: 'idle' }) });
-  expect2xx(v3Res, 'v3: ');
-  // v3 deployment either enrolls actors (engine available) or 0 (fallback mode) — both valid
-  expect(v3Res.body.affectedActors).toBeGreaterThanOrEqual(0);
+  // PAUSE is V2-only: triggers inline migration (V1→V2 same-name 'running') then PAUSE → 'paused'
+  const pauseRes = await POST(`/v1/actors/${actorId}/event`, { type: 'PAUSE' });
+  expect2xx(pauseRes, 'PAUSE: ');
+  // migratedTo in event response confirms inline migration was atomic — no 'migrating' limbo
+  expect(pauseRes.body.migratedTo).toBe(v2Id);
+  expect(pauseRes.body.stateValue).toBe('paused');
 
-  // v1→v2 parent relationship is stored
-  const v2Status = await GET(`/v1/definitions/${v2Id}/status`);
-  expect(v2Status.status).toBe(200);
-  expect(v2Status.body.definition.parentId).toBe(v1Id);
-
-  // v2→v3 parent relationship is stored
-  const v3Status = await GET(`/v1/definitions/${v3Id}/status`);
-  expect(v3Status.status).toBe(200);
-  expect(v3Status.body.definition.parentId).toBe(v2Id);
-
-  // Actor can still process events (on whichever version it's on)
-  expect2xx(await POST(`/v1/actors/${actorId}/event`, { type: 'STOP' }), 'STOP: ');
-  const finalState = await GET(`/v1/actors/${actorId}/state`);
-  expect(finalState.body.stateValue).toBe('done');
+  // State check immediately after: must not be left in 'migrating'
+  const state = await GET(`/v1/actors/${actorId}/state`);
+  expect(state.body.status).not.toBe('migrating');
+  expect(state.body.definitionId).toBe(v2Id);
+  expect(state.body.status).toBe('active');
 });
 
-// ── Q22: Idempotent re-deploy returns existing definition, skips re-migration ──
+// ── Q13: No rollback endpoint exists — returns 404 ────────────────────────────
 
-test('Q22: re-deploying same definition ID and content is idempotent (no new jobs)', async () => {
-  const defId = uniqueId('q22-def');
-  const def   = { id: 'q22', initial: 'idle', states: { idle: { on: { GO: 'done' } }, done: { type: 'final' } } };
+test('Q13: POST /v1/definitions/:id/rollback returns 404 (no rollback endpoint)', async () => {
+  const defId = uniqueId('q13-def');
+  const def   = {
+    id: 'q13', initial: 'idle',
+    states: { idle: { on: { GO: 'done' } }, done: { type: 'final' } },
+  };
 
-  const r1 = await PUT('/v1/definitions', { id: defId, definition: def });
-  expect2xx(r1, 'first deploy: ');
+  expect2xx(await PUT('/v1/definitions', { id: defId, definition: def }), 'deploy: ');
 
-  // Spawn an actor so there is work to do IF migration were to run
-  const actor = await POST('/v1/actors', { definitionId: defId });
-  expect(actor.status).toBe(201);
+  const { status } = await POST(`/v1/definitions/${defId}/rollback`, {});
+  expect(status).toBe(404);
+});
 
-  // Re-deploy with identical content — must return 200 idempotent, no affectedActors
-  const r2 = await PUT('/v1/definitions', { id: defId, definition: def });
-  expect(r2.status).toBe(200);
-  expect(r2.body.idempotent).toBe(true);
-  expect(r2.body.affectedActors ?? 0).toBe(0);
+// ── Q14: Export returns decrypted actor context (not an encrypted blob) ────────
+
+test('Q14: GET /v1/actors/:id/export returns the actor context decrypted', async () => {
+  const defId = uniqueId('q14-def');
+  const def   = {
+    id: 'q14', initial: 'active',
+    states: {
+      active: { on: { NEXT: 'done' } },
+      done:   { type: 'final' },
+    },
+  };
+
+  expect2xx(await PUT('/v1/definitions', { id: defId, definition: def }), 'def: ');
+
+  const spawnRes = await POST('/v1/actors', {
+    definitionId:   defId,
+    initialContext: { secret: 'plan-xyz', amount: 1000, nested: { key: 'value' } },
+  });
+  expect(spawnRes.status).toBe(201);
+  const actorId = spawnRes.body.id;
+
+  const exportRes = await GET(`/v1/actors/${actorId}/export`);
+  expect(exportRes.status).toBe(200);
+
+  // Context must be the original plain object, not a binary or hex blob
+  const ctx = exportRes.body.actor?.context;
+  expect(ctx).not.toBeNull();
+  expect(typeof ctx).toBe('object');
+  expect(ctx.secret).toBe('plan-xyz');
+  expect(ctx.amount).toBe(1000);
+  expect(ctx.nested?.key).toBe('value');
+});
+
+// ── Q16: historyFingerprint is identical across 3 concurrent reads ─────────────
+
+test('Q16: historyFingerprint is stable across 3 concurrent GET /state reads', async () => {
+  const defId = uniqueId('q16-def');
+  const def   = {
+    id: 'q16', initial: 'a',
+    states: {
+      a: { on: { X: 'b' } },
+      b: { on: { X: 'c' } },
+      c: { on: { X: 'b' } },   // non-final: stay reachable
+    },
+  };
+
+  expect2xx(await PUT('/v1/definitions', { id: defId, definition: def }), 'def: ');
+
+  const r       = await POST('/v1/actors', { definitionId: defId });
+  const actorId = r.body.id;
+  expect2xx(await POST(`/v1/actors/${actorId}/event`, { type: 'X' }), 'X1: ');
+  expect2xx(await POST(`/v1/actors/${actorId}/event`, { type: 'X' }), 'X2: ');
+  // Actor now in state 'c' with a 16-char hex fingerprint
+
+  // 3 concurrent reads — fingerprint must be identical across all
+  const [s1, s2, s3] = await Promise.all([
+    GET(`/v1/actors/${actorId}/state`),
+    GET(`/v1/actors/${actorId}/state`),
+    GET(`/v1/actors/${actorId}/state`),
+  ]);
+
+  const fp1 = s1.body.historyFingerprint;
+  const fp2 = s2.body.historyFingerprint;
+  const fp3 = s3.body.historyFingerprint;
+
+  expect(fp1).toMatch(/^[0-9a-f]{16}$/);
+  expect(fp2).toBe(fp1);
+  expect(fp3).toBe(fp1);
+});
+
+// ── Q22: Migration decisions logged in migration_decisions and queryable ────────
+
+test('Q22: inline migration decision is logged and queryable via GET /v1/actors/:id/decisions', async () => {
+  const health = await GET('/v1/health');
+  if (health.body?.engine !== 'real') { test.skip(); return; }
+
+  const v1Id = uniqueId('q22-v1');
+  const v2Id = uniqueId('q22-v2');
+
+  // V2 adds CANCEL from running → idle (V1 does not have CANCEL, proving migration ran)
+  const V1 = {
+    id: 'q22', initial: 'idle',
+    states: {
+      idle:    { on: { GO: 'running' } },
+      running: { on: { STOP: 'done' } },
+      done:    { type: 'final' },
+    },
+  };
+  const V2 = {
+    id: 'q22', initial: 'idle',
+    states: {
+      idle:    { on: { GO: 'running' } },
+      running: { on: { STOP: 'done', CANCEL: 'idle' } },
+      done:    { type: 'final' },
+    },
+  };
+
+  expect2xx(await PUT('/v1/definitions', { id: v1Id, definition: V1 }), 'v1: ');
+
+  // Spawn actor and send events BEFORE deploying V2 so logicalStartTick < V2.deployedAt
+  const r       = await POST('/v1/actors', { definitionId: v1Id });
+  const actorId = r.body.id;
+  expect2xx(await POST(`/v1/actors/${actorId}/event`, { type: 'GO' }), 'GO: ');
+
+  expect2xx(await PUT('/v1/definitions', { id: v2Id, parentId: v1Id, definition: V2 }), 'v2: ');
+
+  // CANCEL is V2-only: triggers inline migration (V1→V2) then CANCEL → 'idle' (non-final)
+  const cancelRes = await POST(`/v1/actors/${actorId}/event`, { type: 'CANCEL' });
+  expect2xx(cancelRes, 'CANCEL: ');
+  expect(cancelRes.body.migratedTo).toBe(v2Id);
+
+  // Wait for definitionId to confirm migration (actor is non-final → state returns definitionId)
+  await waitForActorMigration(actorId, v2Id);
+
+  // Decisions must be queryable via dedicated endpoint
+  const decisionsRes = await GET(`/v1/actors/${actorId}/decisions`);
+  expect(decisionsRes.status).toBe(200);
+  expect(Array.isArray(decisionsRes.body.decisions)).toBe(true);
+  expect(decisionsRes.body.decisions.length).toBeGreaterThan(0);
+
+  const migrated = decisionsRes.body.decisions.find(d => d.decision === 'migrated');
+  expect(migrated).toBeDefined();
+  expect(migrated.fromDefinitionId).toBe(v1Id);
+  expect(migrated.toDefinitionId).toBe(v2Id);
+  expect(migrated.trigger).toBe('inline_event');
 });

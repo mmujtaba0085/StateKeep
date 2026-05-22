@@ -532,10 +532,11 @@ export async function getActorState(actorId) {
   // Archived actors may still be in the hot cache from before force-archive ran.
   if (actor.status === 'terminated' || actor.status === 'archived') {
     return {
-      actorId:    actor.id,
-      stateValue: actor.stateValue,
-      context:    actor.context,
-      status:     actor.status,
+      actorId:      actor.id,
+      definitionId: actor.definitionId,
+      stateValue:   actor.stateValue,
+      context:      actor.context,
+      status:       actor.status,
     };
   }
 
@@ -567,6 +568,7 @@ export async function getActorState(actorId) {
 
   return {
     actorId:            actor.id,
+    definitionId:       actor.definitionId,
     stateValue:         actor.stateValue,
     context:            actor.context,
     historyFingerprint: actor.historyFingerprint,
