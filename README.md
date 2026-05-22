@@ -381,13 +381,55 @@ STRESS=1 npm run test:stress
 
 ---
 
+## SDK
+
+```bash
+npm install @statekeep/sdk
+```
+
+```js
+import { createClient } from '@statekeep/sdk';
+
+const sk = createClient({ baseUrl: 'https://your-statekeep-instance.com', apiKey: 'sk_...' });
+
+await sk.deploy('order-v1', { id: 'order', initial: 'pending', states: {
+  pending:   { on: { PAY: 'paid', CANCEL: 'cancelled' } },
+  paid:      { on: { SHIP: 'shipped' } },
+  shipped:   { type: 'final' },
+  cancelled: { type: 'final' },
+}});
+
+const actor = await sk.spawn('order-v1', { orderId: 'ord-001' });
+const state = await sk.send(actor.actorId, 'PAY');
+console.log(state.stateValue); // 'paid'
+```
+
+See [`sdk/README.md`](sdk/README.md) for full SDK documentation.
+
+---
+
+## CLI
+
+```bash
+# Push a machine definition file to StateKeep
+statekeep push order.machine.js --url https://your-instance.com --key sk_...
+
+# Watch a directory and auto-push on file changes (dev mode)
+statekeep dev --url http://localhost:3001 --key sk_...
+
+# Preview migration impact before deploying a new version
+statekeep preview order-v2.machine.js --parent order-v1 --url https://your-instance.com --key sk_...
+```
+
+---
+
 ## Production Deployment
 
-Full instructions in `INSTALL.md`. The minimal checklist:
+Full instructions in `docs/deployment.md`. The minimal checklist:
 
 1. Set `STATEKEEP_ENCRYPTION_KEY` to 32 cryptographically random bytes (hex-encoded).
-2. Put the SQLite file on a volume with regular snapshots.
-3. Run all five processes under systemd. The four worker processes are safe to restart independently; the API server is the only one accepting external traffic.
+2. Put the SQLite file on a volume with Litestream continuous replication.
+3. Run the API server and all five worker processes under systemd or PM2. Workers are safe to restart independently.
 4. Put Caddy or nginx in front of the API server for TLS termination.
 5. Back up the SQLite file with `PRAGMA wal_checkpoint(FULL)` before copying.
 
