@@ -246,11 +246,13 @@ async function checkDeploymentComplete(deploymentId) {
 
 async function processLoop() {
   while (true) {
+    let hadWork = false;
     try {
       syncRegistry();  // pick up any changepoints registered since last poll
       const jobs = claimBatch(BATCH_SIZE);
 
       if (jobs.length > 0) {
+        hadWork = true;
         console.log(`[migrate-worker] Processing ${jobs.length} migration jobs`);
 
         // Process all jobs in this batch concurrently (but cap at 20 parallel)
@@ -270,7 +272,7 @@ async function processLoop() {
       console.error('[migrate-worker] Error in process loop:', err);
     }
 
-    await new Promise(r => setTimeout(r, jobs.length > 0 ? 50 : POLL_INTERVAL));
+    await new Promise(r => setTimeout(r, hadWork ? 50 : POLL_INTERVAL));
   }
 }
 
