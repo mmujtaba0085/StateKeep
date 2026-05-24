@@ -14,14 +14,16 @@ export function startHeartbeat(workerType, intervalMs = 30_000) {
   const startedAt = Date.now();
   const db        = getDb();
 
-  // Prune stale rows for this worker type before registering ourselves.
-  // A row is stale if last_beat is older than 2 minutes — it belongs to a
-  // crashed process that never cleaned up.
+  // On startup, remove all existing rows for this worker type that belong to
+  // other PIDs. PM2 restarts happen in seconds — the old row is still "fresh"
+  // (last_beat < 2 min old) when the new process starts, so a time-based prune
+  // misses it and ghost records accumulate. Deleting by worker_id mismatch
+  // clears all prior instances regardless of how recently they ran.
   try {
     db.prepare(`
       DELETE FROM worker_heartbeats
-      WHERE worker_type = ? AND last_beat < ?
-    `).run(workerType, Date.now() - 120_000);
+      WHERE worker_type = ? AND worker_id != ?
+    `).run(workerType, workerId);
   } catch {}
 
   const upsert = db.prepare(`

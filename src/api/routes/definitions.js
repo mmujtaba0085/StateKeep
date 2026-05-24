@@ -625,9 +625,9 @@ export async function definitionRoutes(fastify) {
     const rows = db.prepare(`
       SELECT state_value, COUNT(*) as cnt
       FROM actors
-      WHERE definition_id = ? AND status = 'active'
+      WHERE definition_id = ? AND org_id = ? AND status = 'active'
       GROUP BY state_value
-    `).all(id);
+    `).all(id, request.orgId);
 
     const byState   = {};
     let totalActive = 0;
@@ -785,11 +785,11 @@ export async function definitionRoutes(fastify) {
     // Aggregate needs_rescue + terminated counts across all versions
     const summary = db.prepare(`
       SELECT status, COUNT(*) as cnt FROM actors
-      WHERE definition_id IN (
-        SELECT id FROM definitions WHERE machine_id = ?
+      WHERE org_id = ? AND definition_id IN (
+        SELECT id FROM definitions WHERE machine_id = ? AND org_id = ?
       )
       GROUP BY status
-    `).all(id);
+    `).all(request.orgId, id, request.orgId);
     const byStatus = {};
     for (const r of summary) byStatus[r.status] = r.cnt;
 
@@ -818,16 +818,17 @@ export async function definitionRoutes(fastify) {
     const { limit, offset } = request.query;
 
     try {
+      // Verify deployment exists and belongs to this org before returning any data
+      const deployment = getDb()
+        .prepare(`SELECT id FROM deployments WHERE id = ? AND org_id = ?`)
+        .get(id, request.orgId);
+      if (!deployment) return reply.code(404).send({ error: `Deployment ${id} not found` });
+
       const rows = findDecisionsByDeployment(id, { limit, offset });
-      if (rows.length === 0) {
-        // Check if deployment actually exists
-        const exists = getDb().prepare(`SELECT id FROM deployments WHERE id = ?`).get(id);
-        if (!exists) return reply.code(404).send({ error: `Deployment ${id} not found` });
-      }
 
       const total = getDb()
-        .prepare(`SELECT COUNT(*) as cnt FROM migration_decisions WHERE deployment_id = ?`)
-        .get(id)?.cnt ?? 0;
+        .prepare(`SELECT COUNT(*) as cnt FROM migration_decisions WHERE deployment_id = ? AND org_id = ?`)
+        .get(id, request.orgId)?.cnt ?? 0;
 
       const decisions = rows.map(r => ({
         id:               r.id,

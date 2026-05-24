@@ -47,9 +47,17 @@ export async function healthRoutes(fastify) {
 
   fastify.get('/v1/health/workers', async (_req, reply) => {
     const now  = Date.now();
+    // GROUP BY worker_type keeps only the most-recent heartbeat per type.
+    // This prevents ghost records from crashed/restarted processes from
+    // making the endpoint report unhealthy when the current worker is fine.
     const rows = getDb().prepare(`
-      SELECT worker_id, worker_type, last_beat, started_at, pid
+      SELECT worker_type,
+             MAX(last_beat) AS last_beat,
+             pid,
+             started_at,
+             worker_id
       FROM worker_heartbeats
+      GROUP BY worker_type
       ORDER BY worker_type
     `).all();
 
@@ -63,7 +71,7 @@ export async function healthRoutes(fastify) {
       healthy:    (now - r.last_beat) < STALE_THRESHOLD_MS,
     }));
 
-    const allHealthy = workers.every(w => w.healthy);
+    const allHealthy = workers.length > 0 && workers.every(w => w.healthy);
 
     return reply.code(allHealthy ? 200 : 503).send({
       healthy:          allHealthy,
