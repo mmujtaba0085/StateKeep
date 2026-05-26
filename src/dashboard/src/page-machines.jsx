@@ -42,7 +42,7 @@ function DefinitionDetail({ def }) {
   }
 
   const states = def.definitionJson?.states ? Object.keys(def.definitionJson.states) : [];
-  const deployedAt = def.deployedAt ? new Date(def.deployedAt * 1000).toLocaleString() : "—";
+  const deployedAt = def.createdAt ? new Date(def.createdAt * 1000).toLocaleString() : "—";
   const deployedDate = deployedAt.split(",")[0];
   const deployedTime = (deployedAt.split(",")[1] || "").trim();
 

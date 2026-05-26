@@ -468,6 +468,15 @@ export function getDb() {
     console.log('[db] Migration v15 applied: idempotency_key on events + actor_cursor index');
   }
 
+  if (!applied.has(16)) {
+    _db.exec(`
+      ALTER TABLE definitions ADD COLUMN created_at INTEGER NOT NULL DEFAULT (unixepoch());
+      INSERT OR IGNORE INTO schema_migrations(version, applied_at)
+        VALUES (16, unixepoch());
+    `);
+    console.log('[db] Migration v16 applied: created_at added to definitions');
+  }
+
   // Graceful shutdown
   process.on('exit',    () => { try { _db.close(); } catch {} });
   process.on('SIGINT',  () => { process.exit(0); });

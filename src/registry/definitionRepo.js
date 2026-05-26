@@ -14,8 +14,8 @@ function getStmts() {
   const db = getDb();
   stmts = {
     insert: db.prepare(`
-      INSERT INTO definitions (id, parent_id, machine_id, org_id, definition_json, deployed_at, status)
-      VALUES (@id, @parent_id, @machine_id, @org_id, @definition_json, @deployed_at, 'active')
+      INSERT INTO definitions (id, parent_id, machine_id, org_id, definition_json, deployed_at, status, created_at)
+      VALUES (@id, @parent_id, @machine_id, @org_id, @definition_json, @deployed_at, 'active', @created_at)
     `),
     findById:      db.prepare(`SELECT * FROM definitions WHERE id = ?`),
     findByMachine: db.prepare(`SELECT * FROM definitions WHERE machine_id = ? AND org_id = ? ORDER BY deployed_at ASC`),
@@ -42,6 +42,7 @@ function rowToDefinition(row) {
         : String(row.definition_json)
     ),
     deployedAt:     row.deployed_at,
+    createdAt:      row.created_at,
     status:         row.status,
   };
 }
@@ -60,6 +61,7 @@ export function createDefinition({ id, parentId, orgId, definitionJson, deployed
     org_id:          orgId,
     definition_json: JSON.stringify(definitionJson),
     deployed_at:     deployedAt,
+    created_at:      Math.floor(Date.now() / 1000),
   });
 }
 

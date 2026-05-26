@@ -774,6 +774,7 @@ export async function definitionRoutes(fastify) {
         definitionId: def.id,
         parentId:     def.parentId,
         deployedAt:   def.deployedAt,
+        createdAt:    def.createdAt,
         status:       def.status,
         activeActors: totalActive,
         byState,

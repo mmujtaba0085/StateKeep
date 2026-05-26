@@ -33,7 +33,7 @@ function DefinitionDetail({ def }) {
 
   const states = def.definitionJson?.states ? Object.keys(def.definitionJson.states) : [];
   const transitions = def.definitionJson?.transitions || def.definitionJson?.on || {};
-  const deployedAt = def.deployedAt ? new Date(def.deployedAt * 1000).toLocaleString() : "—";
+  const deployedAt = def.createdAt ? new Date(def.createdAt * 1000).toLocaleString() : "—";
 
   return React.createElement("div", { className: "diagram-wrap" },
     React.createElement("div", { className: "diagram-h" },
