@@ -9,6 +9,7 @@ import { LRUCache } from './lruCache.js';
 import { FNV_OFFSET, fingerprintToBigInt, regionFingerprintsToArray } from '../ffi/hashUtils.js';
 import { getEngine } from '../ffi/engine.js';
 import { getWorkerPool } from './workerPool.js';
+import { getWriteBuffer } from './writeBuffer.js';
 import {
   createActor as dbCreateActor,
   findActorById,
@@ -125,21 +126,12 @@ function logDecision({
   decision, reason, fromDefinitionId, toDefinitionId,
   actorFingerprint, prefixHash = '0',
 }) {
-  try {
-    getDb().prepare(`
-      INSERT INTO migration_decisions
-        (actor_id, org_id, deployment_id, trigger, evaluated_at, decision, reason,
-         from_definition_id, to_definition_id, actor_fingerprint, prefix_hash, created_at)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
-    `).run(
-      actorId, orgId, deploymentId ?? null, trigger, Number(evaluatedAt),
-      decision, reason,
-      fromDefinitionId ?? null, toDefinitionId ?? null,
-      actorFingerprint, prefixHash, Date.now()
-    );
-  } catch (e) {
-    console.warn(`[actorManager] decision log failed: ${e.message}`);
-  }
+  getWriteBuffer().queueDecision([
+    actorId, orgId, deploymentId ?? null, trigger, Number(evaluatedAt),
+    decision, reason,
+    fromDefinitionId ?? null, toDefinitionId ?? null,
+    actorFingerprint, prefixHash, Date.now(),
+  ]);
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -239,13 +231,12 @@ export async function spawnActor({ definitionId, orgId, initialContext, logicalS
  * Performs an inline migration check before dispatching the event —
  * if the engine returns a new target definition the actor is swapped first.
  *
- * opts.insertEventFn: optional synchronous function(db) → void.
- *   When provided, called inside the same SQLite transaction as updateActorState
- *   so the event record and state update are atomic. Used by the route handler
- *   to write the idempotency_key alongside the state update.
+ * opts.eventData: optional plain object with event row fields.
+ *   When provided, queued to the write buffer alongside the state update so
+ *   both land in the same 50ms flush transaction.
  */
 export async function sendEvent(actorId, event, tick, opts = {}) {
-  const { insertEventFn } = opts;
+  const { eventData } = opts;
   const pool = getWorkerPool();
 
   // Load from hot registry or SQLite.
@@ -462,28 +453,16 @@ export async function sendEvent(actorId, event, tick, opts = {}) {
   };
   touch(actorId, newEntry);
 
-  if (insertEventFn) {
-    getDb().transaction(() => {
-      updateActorState(actorId, {
-        stateValue:         result.stateValue,
-        context:            result.context,
-        historyFingerprint: result.historyFingerprint,
-        regionFingerprints: newRegionFingerprints,
-        lastEventTick:      tick ?? Date.now(),
-        status:             result.done ? 'terminated' : 'active',
-      });
-      insertEventFn();
-    })();
-  } else {
-    updateActorState(actorId, {
-      stateValue:         result.stateValue,
-      context:            result.context,
-      historyFingerprint: result.historyFingerprint,
-      regionFingerprints: newRegionFingerprints,
-      lastEventTick:      tick ?? Date.now(),
-      status:             result.done ? 'terminated' : 'active',
-    });
-  }
+  const buf = getWriteBuffer();
+  buf.queueState(actorId, {
+    stateValue:         result.stateValue,
+    context:            result.context,
+    historyFingerprint: result.historyFingerprint,
+    regionFingerprints: newRegionFingerprints,
+    lastEventTick:      tick ?? Date.now(),
+    status:             result.done ? 'terminated' : 'active',
+  });
+  if (eventData) buf.queueEvent(eventData);
 
   if (result.done) {
     try {
@@ -597,6 +576,7 @@ export async function terminateActor(actorId) {
   for (const key of migrationCheckCache.keys()) {
     if (key.startsWith(_prefix)) migrationCheckCache.delete(key);
   }
+  getWriteBuffer().flushActor(actorId);  // persist latest state before marking terminal
   updateActorStatus(actorId, 'terminated');
 
   try {

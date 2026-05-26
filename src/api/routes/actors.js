@@ -10,6 +10,7 @@
  */
 
 import { spawnActor, sendEvent, getActorState, terminateActor } from '../../runtime/actorManager.js';
+import { getWriteBuffer } from '../../runtime/writeBuffer.js';
 import { findActorById, listActors, findNeedsRescueActors, updateActorStatus } from '../../registry/actorRepo.js';
 import { findDecisionsByActor } from '../../registry/jobRepo.js';
 import { cancelAllPendingForActor } from '../../registry/scheduledEventRepo.js';
@@ -59,11 +60,15 @@ export async function actorRoutes(fastify) {
         logicalStartTick: Number(tick),
       });
 
-      const db = getDb();
-      db.prepare(`
-        INSERT INTO events (actor_id, org_id, event_type, event_payload, tick, processed_at)
-        VALUES (?, ?, 'SPAWN', NULL, ?, ?)
-      `).run(result.id, request.orgId, Number(tick), Date.now());
+      getWriteBuffer().queueEvent({
+        actor_id:        result.id,
+        org_id:          request.orgId,
+        event_type:      'SPAWN',
+        event_payload:   null,
+        tick:            Number(tick),
+        processed_at:    Date.now(),
+        idempotency_key: null,
+      });
 
       recordLatency(Date.now() - t0);
       return reply.code(201).send({
@@ -118,13 +123,15 @@ export async function actorRoutes(fastify) {
 
     // ── Idempotency check ─────────────────────────────────────────────────────
     if (idempotencyKey) {
-      const duplicate = getDb().prepare(`
-        SELECT e.id FROM events e
-        WHERE e.actor_id = ? AND e.org_id = ? AND e.idempotency_key = ?
-      `).get(id, request.orgId, idempotencyKey);
+      // Check write buffer first (event processed but not yet flushed to DB)
+      const inFlight = getWriteBuffer().hasPendingEvent(id, idempotencyKey);
+      const inDb = !inFlight && !!getDb().prepare(
+        `SELECT e.id FROM events e WHERE e.actor_id = ? AND e.org_id = ? AND e.idempotency_key = ?`
+      ).get(id, request.orgId, idempotencyKey);
 
-      if (duplicate) {
-        const current = findActorById(id);
+      if (inFlight || inDb) {
+        const snap = inFlight ? await getActorState(id) : null;
+        const current = snap ?? findActorById(id);
         recordLatency(Date.now() - t0);
         return reply.code(200).send({
           actorId:            id,
@@ -142,20 +149,21 @@ export async function actorRoutes(fastify) {
     const event = { type: eventType, ...(payload ?? {}) };
 
     try {
-      const db         = getDb();
       const encPayload = payload
         ? encrypt(Buffer.from(JSON.stringify(payload)))
         : null;
-      const tickNum    = Number(tick);
-      const orgId      = request.orgId;
+      const tickNum = Number(tick);
+      const orgId   = request.orgId;
 
       const result = await sendEvent(id, event, tickNum, {
-        insertEventFn: () => {
-          db.prepare(`
-            INSERT INTO events
-              (actor_id, org_id, event_type, event_payload, tick, processed_at, idempotency_key)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-          `).run(id, orgId, event.type, encPayload, tickNum, Date.now(), idempotencyKey ?? null);
+        eventData: {
+          actor_id:        id,
+          org_id:          orgId,
+          event_type:      event.type,
+          event_payload:   encPayload,
+          tick:            tickNum,
+          processed_at:    Date.now(),
+          idempotency_key: idempotencyKey ?? null,
         },
       });
 
