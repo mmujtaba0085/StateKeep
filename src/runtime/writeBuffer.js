@@ -22,7 +22,7 @@ const FLUSH_MS = 50;
 
 class WriteBuffer {
   constructor() {
-    this._states    = new Map();  // actorId → { stateValue, context, ... }
+    this._states    = new Map();  // actorId → serialized row (pre-encrypted at queueState time)
     this._events    = [];         // event row objects
     this._decisions = [];         // positional arg arrays for migration_decisions
     this._pending   = new Set();  // `${actorId}:${idempotencyKey}` for in-flight dedup
@@ -31,7 +31,9 @@ class WriteBuffer {
   }
 
   queueState(actorId, data) {
-    this._states.set(actorId, data);
+    // Serialize (and encrypt context) here, inline with the request handler,
+    // so the flush timer never calls encrypt() — prevents timer-callback blocking.
+    this._states.set(actorId, this._serialize(actorId, data));
   }
 
   queueEvent(row) {
@@ -52,11 +54,11 @@ class WriteBuffer {
 
   // Force-write one actor's state immediately — used before termination/migration.
   flushActor(actorId) {
-    const data = this._states.get(actorId);
-    if (!data) return;
+    const row = this._states.get(actorId);  // already serialized by queueState()
+    if (!row) return;
     this._states.delete(actorId);
     try {
-      this._getStmts().state.run(this._serialize(actorId, data));
+      this._getStmts().state.run(row);
     } catch (err) {
       console.error(`[writeBuffer] flushActor(${actorId}) error:`, err.message);
     }
@@ -65,7 +67,8 @@ class WriteBuffer {
   flush() {
     if (this._states.size === 0 && this._events.length === 0 && this._decisions.length === 0) return;
 
-    const states    = [...this._states.entries()];
+    // Rows are already serialized — queueState() called _serialize() at request time.
+    const rows      = [...this._states.values()];
     const events    = this._events.splice(0);
     const decisions = this._decisions.splice(0);
     this._states.clear();
@@ -74,12 +77,12 @@ class WriteBuffer {
       if (ev.idempotency_key) this._pending.delete(`${ev.actor_id}:${ev.idempotency_key}`);
     }
 
-    if (states.length === 0 && events.length === 0 && decisions.length === 0) return;
+    if (rows.length === 0 && events.length === 0 && decisions.length === 0) return;
 
     try {
       const { state: stateStmt, event: eventStmt, decision: decisionStmt } = this._getStmts();
       getDb().transaction(() => {
-        for (const [id, d] of states)  stateStmt.run(this._serialize(id, d));
+        for (const row of rows)        stateStmt.run(row);
         for (const ev of events)       eventStmt.run(ev);
         for (const dec of decisions)   decisionStmt.run(...dec);
       })();
