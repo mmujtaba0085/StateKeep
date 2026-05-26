@@ -30,13 +30,6 @@ export async function actorRoutes(fastify) {
 
   // ── POST /v1/actors ────────────────────────────────────────────────────────
   fastify.post('/v1/actors', {
-    config: {
-      rateLimit: {
-        max:          100,
-        timeWindow:   '1 minute',
-        keyGenerator: (req) => req.headers['x-api-key'] ?? req.ip,
-      },
-    },
     schema: {
       body: {
         type: 'object',
@@ -88,13 +81,6 @@ export async function actorRoutes(fastify) {
 
   // ── POST /v1/actors/:id/event ──────────────────────────────────────────────
   fastify.post('/v1/actors/:id/event', {
-    config: {
-      rateLimit: {
-        max:          500,
-        timeWindow:   '1 minute',
-        keyGenerator: (req) => req.headers['x-api-key'] ?? req.ip,
-      },
-    },
     schema: {
       params: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
       body: {

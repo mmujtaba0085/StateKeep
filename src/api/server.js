@@ -117,15 +117,24 @@ await fastify.register(FastifySwaggerUI, {
 
 await fastify.register(FastifyWebSocket);
 
+// Tier limit cache: rawApiKey → max-per-minute.
+// Populated by auth middleware after first successful key validation.
+// Avoids bcrypt in the hot-path rate-limit check.
+const _tierCache = new Map();
+export function cacheTierLimit(rawKey, tier) {
+  const TIER_LIMITS = { free: 300, pro: 1000, enterprise: 5000 };
+  _tierCache.set(rawKey, TIER_LIMITS[tier] ?? 1000);
+}
+
 await fastify.register(FastifyRateLimit, {
   global: true,
-  max: 100,
   timeWindow: 60_000,
-  // Bypass rate limiting in test mode — test suites issue many requests from localhost.
   allowList: (_req, _key) => process.env.NODE_ENV === 'test',
-  // Auth hook runs in preHandler, AFTER rate limit; key auth gets higher limit
-  // via a per-route override on authenticated routes.
-  keyGenerator: (req) => req.ip,
+  // Per-org bucket: each API key gets its own counter. IP fallback for unauthenticated.
+  keyGenerator: (req) => req.headers['x-api-key'] ?? req.ip,
+  // max is a function so tier limits take effect without a separate hook.
+  // Uses cached tier from previous auth; defaults to 100 on first request.
+  max: (_req, key) => _tierCache.get(key) ?? 100,
   errorResponseBuilder: (_req, context) => ({
     error:      'Rate limit exceeded',
     limit:      context.max,
@@ -145,13 +154,14 @@ fastify.addHook('onRequest', async (req, reply) => {
 // ── Auth (global preHandler, skips public paths) ──────────────────────────────
 fastify.addHook('preHandler', authMiddleware);
 
-// ── Per-tier rate limits (runs after auth sets apiKey + tier) ────────────────
-const TIER_RATE_LIMITS = { free: 300, pro: 1000, enterprise: 5000 };
-
+// ── Populate tier cache after auth resolves the key ──────────────────────────
+// The rate-limit plugin's max() function reads _tierCache synchronously.
+// First request from a new key gets the default (100/min); all subsequent
+// requests use the tier limit once auth has populated the cache here.
 fastify.addHook('preHandler', async (req) => {
-  if (req.apiKey) {
-    const max = TIER_RATE_LIMITS[req.apiKey.tier] ?? 1000;
-    req.rateLimit = { max, timeWindow: 60_000 };
+  const raw = req.headers['x-api-key'];
+  if (raw && req.apiKey?.tier && !_tierCache.has(raw)) {
+    cacheTierLimit(raw, req.apiKey.tier);
   }
 });
 
