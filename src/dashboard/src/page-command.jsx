@@ -158,11 +158,8 @@ function PageCommand() {
   useEffect1(() => {
     if (!apiKey) return;
     setLoading(true);
-    Promise.all([
-      Api.get("/v1/definitions?limit=50"),
-      Api.get("/v1/actors?limit=1").catch(() => ({ count: 0 })),
-    ])
-      .then(([defData, actorData]) => {
+    Api.get("/v1/definitions?limit=50")
+      .then(defData => {
         const definitions = defData.definitions || [];
         setDefs(definitions);
         if (definitions.length > 0) setSelectedDef(definitions[0]);

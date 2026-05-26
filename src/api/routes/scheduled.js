@@ -129,7 +129,6 @@ export async function scheduledRoutes(fastify) {
 
   // ── GET /v1/scheduled (admin) ─────────────────────────────────────────────────
   fastify.get('/v1/scheduled', {
-    preHandler: adminMiddleware,
     schema: {
       querystring: {
         type: 'object',
@@ -143,12 +142,22 @@ export async function scheduledRoutes(fastify) {
     const limit = request.query.limit ?? 100;
     const rows  = db.prepare(`
       SELECT * FROM scheduled_events
-      WHERE status = 'pending'
+      WHERE status = 'pending' AND org_id = ?
       ORDER BY fire_at ASC
       LIMIT ?
-    `).all(limit);
+    `).all(request.orgId, limit);
 
-    return reply.send({ count: rows.length, scheduledEvents: rows });
+    const scheduled = rows.map(r => ({
+      id:        r.id,
+      actorId:   r.actor_id,
+      orgId:     r.org_id,
+      eventType: r.event_type,
+      fireAt:    r.fire_at,
+      status:    r.status,
+      createdAt: r.created_at,
+    }));
+
+    return reply.send({ count: scheduled.length, scheduled });
   });
 
   // ── GET /v1/scheduled/dead-letter (admin) ─────────────────────────────────

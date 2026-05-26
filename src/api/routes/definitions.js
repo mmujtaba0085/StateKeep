@@ -892,6 +892,17 @@ export async function definitionRoutes(fastify) {
     },
   }, async (request, reply) => {
     const defs = listDefinitions({ ...request.query, orgId: request.orgId });
-    return reply.send({ definitions: defs, count: defs.length });
+
+    // One GROUP BY query — no N+1
+    const countRows = getDb().prepare(`
+      SELECT definition_id, COUNT(*) as cnt
+      FROM actors
+      WHERE org_id = ? AND status IN ('active','migrating','needs_rescue')
+      GROUP BY definition_id
+    `).all(request.orgId);
+    const countByDef = Object.fromEntries(countRows.map(r => [r.definition_id, r.cnt]));
+
+    const definitions = defs.map(d => ({ ...d, _actorCount: countByDef[d.id] ?? 0 }));
+    return reply.send({ definitions, count: definitions.length });
   });
 }
