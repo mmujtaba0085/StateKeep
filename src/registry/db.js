@@ -469,11 +469,14 @@ export function getDb() {
   }
 
   if (!appliedVersions.has(16)) {
-    _db.exec(`
-      ALTER TABLE definitions ADD COLUMN created_at INTEGER NOT NULL DEFAULT (unixepoch());
-      INSERT OR IGNORE INTO schema_migrations(version, applied_at)
-        VALUES (16, unixepoch());
-    `);
+    const hasCreatedAt = _db.prepare(
+      `SELECT COUNT(*) as cnt FROM pragma_table_info('definitions') WHERE name = 'created_at'`
+    ).get().cnt > 0;
+    if (!hasCreatedAt) {
+      _db.exec(`ALTER TABLE definitions ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0;`);
+      _db.exec(`UPDATE definitions SET created_at = unixepoch() WHERE created_at = 0;`);
+    }
+    _db.exec(`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (16, unixepoch());`);
     console.log('[db] Migration v16 applied: created_at added to definitions');
   }
 
