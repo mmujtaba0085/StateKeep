@@ -166,9 +166,13 @@ fastify.addHook('preHandler', async (req) => {
 });
 
 // ── Static dashboard ──────────────────────────────────────────────────────────
+// No caching for dashboard JS/JSX — every deploy should be visible immediately.
 await fastify.register(FastifyStatic, {
-  root:   join(__dirname, '..', 'dashboard'),
-  prefix: '/dashboard/',
+  root:        join(__dirname, '..', 'dashboard'),
+  prefix:      '/dashboard/',
+  setHeaders:  (res) => {
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+  },
 });
 
 // ── Routes ────────────────────────────────────────────────────────────────────
