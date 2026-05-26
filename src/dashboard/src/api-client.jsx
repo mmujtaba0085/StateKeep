@@ -59,11 +59,20 @@ const Api = (() => {
         body: body !== undefined ? JSON.stringify(body) : undefined,
       });
       if (res.status === 401) {
-        const err = new Error('Invalid or missing API key');
+        // Stale or revoked key — clear it so the login page re-appears
+        self.setKey('');
+        const err = new Error('Session expired — please sign in again');
         err.status = 401;
         throw err;
       }
-      if (!res.ok) throw new Error('HTTP ' + res.status);
+      if (!res.ok) {
+        const text = await res.text().catch(() => '');
+        let msg = 'HTTP ' + res.status;
+        try { msg = JSON.parse(text).error || msg; } catch {}
+        const err = new Error(msg);
+        err.status = res.status;
+        throw err;
+      }
       return res.json();
     },
 
