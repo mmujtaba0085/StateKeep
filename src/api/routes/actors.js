@@ -11,7 +11,7 @@
 
 import { spawnActor, sendEvent, getActorState, terminateActor } from '../../runtime/actorManager.js';
 import { getWriteBuffer } from '../../runtime/writeBuffer.js';
-import { findActorById, getActorIdentity, listActors, findNeedsRescueActors, updateActorStatus } from '../../registry/actorRepo.js';
+import { findActorById, getActorIdentity, listActors, findNeedsRescueActors, updateActorStatus, getActorCountsByStatus } from '../../registry/actorRepo.js';
 import { findDecisionsByActor } from '../../registry/jobRepo.js';
 import { cancelAllPendingForActor } from '../../registry/scheduledEventRepo.js';
 import { getDb } from '../../registry/db.js';
@@ -501,6 +501,12 @@ export async function actorRoutes(fastify) {
   }, async (request, reply) => {
     const { limit, offset, status, definitionId } = request.query;
     const actors = listActors({ limit, offset, status, definitionId, orgId: request.orgId });
-    return reply.send({ actors, count: actors.length });
+    const counts = getActorCountsByStatus(request.orgId);
+    return reply.send({
+      actors,
+      count:  actors.length,
+      total:  counts.active + counts.migrating + counts.needs_rescue,
+      counts,
+    });
   });
 }

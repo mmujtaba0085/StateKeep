@@ -14,16 +14,24 @@ function KpiTile({ label, value, sub }) {
 
 function PageMetrics() {
   const { apiKey } = useApp();
-  const [actorCount, setActorCount] = useStateM(null);
+  const [counts, setCounts] = useStateM(null);
   const [health, setHealth] = useStateM(null);
 
   useEffectM(() => {
-    Api.get("/v1/health").then(setHealth).catch(() => {});
-    if (!apiKey) return;
-    Api.get("/v1/actors?limit=1")
-      .then(d => setActorCount(d.count != null ? d.count : null))
-      .catch(() => {});
+    function load() {
+      Api.get("/v1/health").then(setHealth).catch(() => {});
+      if (!apiKey) return;
+      Api.get("/v1/actors?limit=1")
+        .then(d => setCounts(d.counts ?? null))
+        .catch(() => {});
+    }
+    load();
+    const t = setInterval(load, 15000);
+    return () => clearInterval(t);
   }, [apiKey]);
+
+  const activeCount = counts ? (counts.active ?? 0) + (counts.migrating ?? 0) + (counts.needs_rescue ?? 0) : null;
+  const terminatedCount = counts ? (counts.terminated ?? 0) : null;
 
   return React.createElement(React.Fragment, null,
     React.createElement("div", { className: "page-header" },
@@ -34,9 +42,14 @@ function PageMetrics() {
     ),
     React.createElement("div", { className: "kpi-row" },
       React.createElement(KpiTile, {
-        label: "Total actors",
-        value: apiKey ? actorCount : null,
-        sub: apiKey ? "live count" : "set API key to load"
+        label: "Active actors",
+        value: apiKey ? activeCount : null,
+        sub: apiKey ? "active + migrating" : "set API key to load"
+      }),
+      React.createElement(KpiTile, {
+        label: "Terminated",
+        value: apiKey ? terminatedCount : null,
+        sub: apiKey ? "completed lifecycle" : "set API key to load"
       }),
       React.createElement(KpiTile, {
         label: "API status",
@@ -45,8 +58,8 @@ function PageMetrics() {
       }),
       React.createElement(KpiTile, {
         label: "APV engine",
-        value: health?.engine,
-        sub: health?.engine === "real" ? "native mode" : (health ? "fallback mode" : "")
+        value: health ? (health.engine || "—") : "—",
+        sub: health?.engine === "real" ? "native mode" : (health ? "fallback mode" : "loading…")
       }),
       React.createElement(KpiTile, {
         label: "Uptime",
