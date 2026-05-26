@@ -341,6 +341,19 @@ export function deleteActor(id) {
 }
 
 /**
+ * Cheapest org-isolation check — reads only id/org_id/status, no context decrypt.
+ * Use this in hot-path route handlers that only need to verify ownership.
+ * Returns { id, orgId, status } or null.
+ */
+export function getActorIdentity(id) {
+  const row = getDb().prepare(
+    `SELECT id, org_id, status FROM actors WHERE id = ?`
+  ).get(id);
+  if (!row) return null;
+  return { id: row.id, orgId: row.org_id, status: row.status };
+}
+
+/**
  * Cheap single-column lookup used by the stale-cache check in actorManager.sendEvent.
  * Returns { id, definitionId } or null.
  */

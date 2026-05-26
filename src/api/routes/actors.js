@@ -11,7 +11,7 @@
 
 import { spawnActor, sendEvent, getActorState, terminateActor } from '../../runtime/actorManager.js';
 import { getWriteBuffer } from '../../runtime/writeBuffer.js';
-import { findActorById, listActors, findNeedsRescueActors, updateActorStatus } from '../../registry/actorRepo.js';
+import { findActorById, getActorIdentity, listActors, findNeedsRescueActors, updateActorStatus } from '../../registry/actorRepo.js';
 import { findDecisionsByActor } from '../../registry/jobRepo.js';
 import { cancelAllPendingForActor } from '../../registry/scheduledEventRepo.js';
 import { getDb } from '../../registry/db.js';
@@ -99,8 +99,8 @@ export async function actorRoutes(fastify) {
     const tick  = eng.clockTick();
     const { id } = request.params;
 
-    // Org isolation check — 404 hides existence from other orgs
-    const actor = findActorById(id);
+    // Org isolation check — no context decrypt needed here, use lightweight lookup
+    const actor = getActorIdentity(id);
     if (!actor || actor.orgId !== request.orgId) {
       return reply.code(404).send({ error: `Actor ${id} not found` });
     }
@@ -187,7 +187,7 @@ export async function actorRoutes(fastify) {
     },
   }, async (request, reply) => {
     const { id } = request.params;
-    const actor = findActorById(id);
+    const actor = getActorIdentity(id);
     if (!actor || actor.orgId !== request.orgId) {
       return reply.code(404).send({ error: `Actor ${id} not found` });
     }
@@ -214,7 +214,7 @@ export async function actorRoutes(fastify) {
     const t0 = Date.now();
     const { id } = request.params;
 
-    const actor = findActorById(id);
+    const actor = getActorIdentity(id);
     if (!actor || actor.orgId !== request.orgId) {
       return reply.code(404).send({ error: `Actor ${id} not found` });
     }
@@ -250,7 +250,7 @@ export async function actorRoutes(fastify) {
     },
   }, async (request, reply) => {
     const { id } = request.params;
-    const actor = findActorById(id);
+    const actor = getActorIdentity(id);
     if (!actor || actor.orgId !== request.orgId) {
       return reply.code(404).send({ error: `Actor ${id} not found` });
     }
@@ -301,7 +301,7 @@ export async function actorRoutes(fastify) {
     },
   }, async (request, reply) => {
     const { id } = request.params;
-    const actor = findActorById(id);
+    const actor = getActorIdentity(id);
     if (!actor || actor.orgId !== request.orgId) {
       return reply.code(404).send({ error: `Actor ${id} not found` });
     }
@@ -354,7 +354,7 @@ export async function actorRoutes(fastify) {
     },
   }, async (request, reply) => {
     const { id } = request.params;
-    const actor = findActorById(id);
+    const actor = getActorIdentity(id);
     if (!actor || actor.orgId !== request.orgId) {
       return reply.code(404).send({ error: `Actor ${id} not found` });
     }
@@ -394,7 +394,7 @@ export async function actorRoutes(fastify) {
     },
   }, async (request, reply) => {
     const { id } = request.params;
-    const actor = findActorById(id);
+    const actor = getActorIdentity(id);
     if (!actor || actor.orgId !== request.orgId) {
       return reply.code(404).send({ error: `Actor ${id} not found` });
     }
