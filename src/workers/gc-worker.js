@@ -9,7 +9,7 @@
  */
 
 import { mkdirSync, writeFileSync } from 'fs';
-import { join } from 'path';
+import { join, dirname } from 'path';
 import { gzipSync } from 'zlib';
 
 import { getDb } from '../registry/db.js';
@@ -19,7 +19,8 @@ import { cancelAllPendingForActor } from '../registry/scheduledEventRepo.js';
 import { getEngine, engineReady } from '../ffi/engine.js';
 import { fingerprintToBigInt } from '../ffi/hashUtils.js';
 
-const DATA_DIR         = process.env.STATEKEEP_DATA_DIR ?? '/opt/statekeep/data';
+const DB_PATH          = process.env.STATEKEEP_DB_PATH ?? 'data/statekeep.db';
+const DATA_DIR         = process.env.STATEKEEP_DATA_DIR ?? dirname(DB_PATH);
 const ARCHIVE_DIR      = join(DATA_DIR, 'archives');
 const IDLE_MS          = 24 * 60 * 60 * 1000;   // 24 hours
 const BATCH_SIZE       = 500;

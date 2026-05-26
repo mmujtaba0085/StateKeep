@@ -12,7 +12,7 @@ import { getDb } from '../registry/db.js';
 import { startHeartbeat } from './heartbeat.js';
 
 const INTERVAL_MS   = 60_000;
-const DB_PATH       = process.env.STATEKEEP_DB_PATH ?? '/opt/statekeep/data/statekeep.db';
+const DB_PATH       = process.env.STATEKEEP_DB_PATH ?? 'data/statekeep.db';
 const WAL_PATH      = DB_PATH + '-wal';
 
 // Latency tracking (exported from actors route via shared in-process state)
