@@ -99,7 +99,11 @@ function PageWorkers() {
         ),
         React.createElement("div", { className: "stat-tile" },
           React.createElement("div", { className: "stat-tile-label" }, "Uptime"),
-          React.createElement("div", { className: "stat-tile-val" }, health?.uptime ? Math.floor(health.uptime / 60) + "m" : "—"),
+          React.createElement("div", { className: "stat-tile-val" }, health?.uptime
+            ? (health.uptime >= 3600
+                ? Math.floor(health.uptime / 3600) + "h " + Math.floor((health.uptime % 3600) / 60) + "m"
+                : Math.floor(health.uptime / 60) + "m")
+            : "—"),
           React.createElement("div", { className: "stat-tile-sub" }, "server process uptime")
         )
       )

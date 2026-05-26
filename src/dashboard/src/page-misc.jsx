@@ -1,86 +1,124 @@
 /* global React, Icons, Pill, EmptyState, useApp, Api */
-const { useState: useStateX, useEffect: useEffectX, useMemo: useMemoX } = React;
+const { useState: useStateX, useEffect: useEffectX } = React;
 
+// ============ Scheduled ============
 function PageScheduled() {
+  const { apiKey } = useApp();
+  const [items, setItems] = useStateX([]);
+  const [loading, setLoading] = useStateX(true);
+
+  useEffectX(() => {
+    if (!apiKey) return;
+    Api.get("/v1/scheduled")
+      .then(d => setItems(d.scheduled || []))
+      .catch(() => setItems([]))
+      .finally(() => setLoading(false));
+  }, [apiKey]);
+
   return React.createElement(React.Fragment, null,
     React.createElement("div", { className: "page-header" },
       React.createElement("div", null,
         React.createElement("h1", { className: "page-title" }, "Scheduled Events"),
         React.createElement("div", { className: "page-sub" }, "Events queued to fire at a future time")
-      ),
-      React.createElement("button", { className: "btn btn-primary" }, Icons.Plus({ size: 12 }), "Schedule event")
+      )
     ),
     React.createElement("div", { style: { padding: "14px 28px 28px" } },
-      React.createElement("div", { className: "card" },
-        React.createElement(EmptyState, {
-          title: "No scheduled events",
-          desc: "Schedule an event from an actor's detail drawer, or via POST /v1/actors/:id/event with a delay parameter.",
-          action: React.createElement("button", { className: "btn btn-primary", style: { marginTop: 8 } }, Icons.Plus({ size: 12 }), "Schedule event")
-        })
+      React.createElement("div", { className: "card", style: loading || items.length === 0 ? {} : { padding: 0 } },
+        loading
+          ? React.createElement("div", { style: { padding: "40px 0", textAlign: "center", color: "var(--muted)", fontSize: 12 } }, "Loading…")
+          : items.length === 0
+          ? React.createElement(EmptyState, {
+              title: "No scheduled events",
+              desc: "Schedule an event from an actor's detail view via POST /v1/actors/:id/schedule."
+            })
+          : React.createElement("table", { className: "tbl" },
+              React.createElement("thead", null,
+                React.createElement("tr", null,
+                  React.createElement("th", null, "Actor"),
+                  React.createElement("th", null, "Event"),
+                  React.createElement("th", null, "Fire at"),
+                  React.createElement("th", null, "Status")
+                )
+              ),
+              React.createElement("tbody", null,
+                items.map(s => React.createElement("tr", { key: s.id },
+                  React.createElement("td", { className: "mono", style: { fontSize: 11 } }, s.actorId),
+                  React.createElement("td", null, React.createElement(Pill, { kind: "blue" }, s.eventType)),
+                  React.createElement("td", { className: "mono muted", style: { fontSize: 11 } },
+                    new Date(s.fireAt).toLocaleString()
+                  ),
+                  React.createElement("td", null, React.createElement(Pill, { kind: s.status === "pending" ? "amber" : "green" }, s.status))
+                ))
+              )
+            )
       )
     )
   );
 }
 
 // ============ Webhooks ============
-const ALL_EVENTS = [
-  "actor.transitioned",
+const VALID_EVENTS = [
+  "state.changed",
+  "actor.migrated",
   "actor.terminated",
-  "actor.rescue",
-  "deployment.started",
-  "deployment.completed",
-  "migration.completed",
-  "worker.restarted"
+  "actor.needs_rescue",
+  "scheduled.fired",
+  "scheduled.failed",
 ];
 
-function RegisterWebhookForm({ onCancel, onSubmit }) {
-  const [url, setUrl] = useStateX("");
+function RegisterWebhookForm({ onChange }) {
+  const [url, setUrl]       = useStateX("");
   const [secret, setSecret] = useStateX("");
-  const [picked, setPicked] = useStateX(new Set(["actor.transitioned"]));
+  const [picked, setPicked] = useStateX(new Set(["state.changed"]));
 
   const toggle = (e) => {
     const next = new Set(picked);
     next.has(e) ? next.delete(e) : next.add(e);
     setPicked(next);
+    onChange({ url, secret, events: [...next] });
   };
+
+  const onUrl    = (v) => { setUrl(v);    onChange({ url: v,    secret, events: [...picked] }); };
+  const onSecret = (v) => { setSecret(v); onChange({ url, secret: v, events: [...picked] }); };
 
   return React.createElement(React.Fragment, null,
     React.createElement("div", null,
       React.createElement("label", { className: "field-label" }, "Endpoint URL"),
       React.createElement("input", {
         className: "input mono",
-        placeholder: "https://api.example.com/webhooks/statekeep",
-        value: url, onChange: (e) => setUrl(e.target.value)
-      })
-    ),
-    React.createElement("div", { style: { marginTop: 14 } },
-      React.createElement("label", { className: "field-label" }, "Subscribed events"),
-      React.createElement("div", { style: { display: "flex", flexWrap: "wrap", gap: 6 } },
-        ALL_EVENTS.map(e => {
-          const on = picked.has(e);
-          return React.createElement("button", {
-            key: e,
-            className: "event-pill",
-            onClick: () => toggle(e),
-            style: on
-              ? { background: "var(--blue-bg)", borderColor: "var(--blue-bd)", color: "var(--blue)", cursor: "pointer" }
-              : { background: "var(--surface2)", borderColor: "var(--border)", color: "var(--muted)", cursor: "pointer" }
-          },
-            on ? Icons.Check({ size: 10 }) : null,
-            e
-          );
-        })
-      )
+        placeholder: "https://api.example.com/hooks/statekeep",
+        value: url,
+        onChange: (e) => onUrl(e.target.value),
+      }),
+      React.createElement("div", { className: "muted", style: { fontSize: 11, marginTop: 4 } }, "Must be HTTPS.")
     ),
     React.createElement("div", { style: { marginTop: 14 } },
       React.createElement("label", { className: "field-label" }, "Signing secret"),
       React.createElement("input", {
         className: "input mono",
-        placeholder: "whsec_...",
-        value: secret, onChange: (e) => setSecret(e.target.value)
+        placeholder: "min 16 characters",
+        value: secret,
+        onChange: (e) => onSecret(e.target.value),
       }),
-      React.createElement("div", { className: "muted", style: { fontSize: 11, marginTop: 6 } },
-        "Used to sign payloads with HMAC-SHA256."
+      React.createElement("div", { className: "muted", style: { fontSize: 11, marginTop: 4 } },
+        "Used to sign payloads with HMAC-SHA256. Save it — not stored in plain text."
+      )
+    ),
+    React.createElement("div", { style: { marginTop: 14 } },
+      React.createElement("label", { className: "field-label" }, "Subscribed events"),
+      React.createElement("div", { style: { display: "flex", flexWrap: "wrap", gap: 6 } },
+        VALID_EVENTS.map(e => {
+          const on = picked.has(e);
+          return React.createElement("button", {
+            key: e,
+            type: "button",
+            className: "event-pill",
+            onClick: () => toggle(e),
+            style: on
+              ? { background: "var(--blue-bg)", borderColor: "var(--blue-bd)", color: "var(--blue)", cursor: "pointer" }
+              : { background: "var(--surface2)", borderColor: "var(--border)", color: "var(--muted)", cursor: "pointer" }
+          }, on ? Icons.Check({ size: 10 }) : null, " ", e);
+        })
       )
     )
   );
@@ -89,75 +127,93 @@ function RegisterWebhookForm({ onCancel, onSubmit }) {
 function PageWebhooks() {
   const { setModal, pushToast, apiKey } = useApp();
   const [webhooks, setWebhooks] = useStateX([]);
-  const [loadingWh, setLoadingWh] = useStateX(false);
-  const [extra, setExtra] = useStateX([]);
-  const [pinging, setPinging] = useStateX(null);
-  const [deactivated, setDeactivated] = useStateX(new Set());
+  const [loading, setLoading]   = useStateX(false);
+  const [saving, setSaving]     = useStateX(null);
 
-  useEffectX(() => {
+  const reload = () => {
     if (!apiKey) return;
-    setLoadingWh(true);
+    setLoading(true);
     Api.get("/v1/webhooks")
       .then(data => setWebhooks((data.webhooks || []).map(w => Api.mapWebhook(w))))
       .catch(() => {})
-      .finally(() => setLoadingWh(false));
-  }, [apiKey]);
+      .finally(() => setLoading(false));
+  };
 
-  const baseRows = webhooks.length > 0 ? webhooks : [];
-  const rows = [...baseRows, ...extra].map((w, i) => ({
-    ...w,
-    _id: w.id || w._id || ("wh_" + i),
-    active: deactivated.has(w.id || w._id || ("wh_" + i)) ? false : w.active
-  }));
+  useEffectX(() => { reload(); }, [apiKey]);
 
-  const active = rows.filter(r => r.active).length;
-  const inactive = rows.length - active;
-  const totalFails = rows.reduce((s, r) => s + r.failures, 0);
+  const active      = webhooks.filter(w => w.active).length;
+  const inactive    = webhooks.length - active;
+  const totalFails  = webhooks.reduce((s, w) => s + (w.failures || 0), 0);
+
+  // worst offender label
+  const worstLabel = () => {
+    if (totalFails === 0) return "all endpoints healthy";
+    const worst = [...webhooks].sort((a, b) => (b.failures || 0) - (a.failures || 0))[0];
+    try {
+      return "most from " + new URL(worst.url).hostname;
+    } catch {
+      return "check endpoint health";
+    }
+  };
 
   const onRegister = () => {
-    let formState = { url: "", events: ["actor.transitioned"], secret: "" };
+    let draft = { url: "", secret: "", events: ["state.changed"] };
     setModal({
       title: "Register webhook",
       body: React.createElement(RegisterWebhookForm, {
-        onCancel: () => setModal(null),
-        onSubmit: () => {}
+        onChange: (v) => { draft = v; }
       }),
       footer: React.createElement(React.Fragment, null,
         React.createElement("button", { className: "btn btn-ghost", onClick: () => setModal(null) }, "Cancel"),
         React.createElement("button", {
           className: "btn btn-primary",
-          onClick: () => {
-            setExtra(prev => [...prev, {
-              _id: "wh_new_" + Date.now(),
-              url: "https://hooks.example.com/new-endpoint",
-              events: ["actor.transitioned"],
-              active: true,
-              failures: 0,
-              lastDelivery: "just now"
-            }]);
-            setModal(null);
-            pushToast({ kind: "success", title: "Webhook registered", desc: "Sending a test ping..." });
+          onClick: async () => {
+            if (!draft.url.startsWith("https://")) {
+              pushToast({ kind: "error", title: "URL must be HTTPS" }); return;
+            }
+            if (draft.secret.length < 16) {
+              pushToast({ kind: "error", title: "Secret must be at least 16 characters" }); return;
+            }
+            if (draft.events.length === 0) {
+              pushToast({ kind: "error", title: "Select at least one event type" }); return;
+            }
+            try {
+              await Api.post("/v1/webhooks", { url: draft.url, secret: draft.secret, events: draft.events });
+              setModal(null);
+              pushToast({ kind: "success", title: "Webhook registered" });
+              reload();
+            } catch (err) {
+              pushToast({ kind: "error", title: "Registration failed", desc: err.message });
+            }
           }
         }, "Register webhook")
       )
     });
   };
 
-  const onPing = (id, url) => {
-    setPinging(id);
-    setTimeout(() => {
-      setPinging(null);
-      pushToast({ kind: "success", title: "Ping delivered · 200 OK", desc: url });
-    }, 700);
+  const onPing = async (id, url) => {
+    setSaving(id + "_ping");
+    try {
+      await Api.post("/v1/webhooks/" + id + "/ping", {});
+      pushToast({ kind: "success", title: "Ping queued", desc: url });
+    } catch (err) {
+      pushToast({ kind: "error", title: "Ping failed", desc: err.message });
+    } finally {
+      setSaving(null);
+    }
   };
 
-  const onToggle = (id, currentlyActive) => {
-    setDeactivated(prev => {
-      const next = new Set(prev);
-      currentlyActive ? next.add(id) : next.delete(id);
-      return next;
-    });
-    pushToast({ kind: "info", title: currentlyActive ? "Webhook deactivated" : "Webhook reactivated" });
+  const onToggle = async (id, currentlyActive) => {
+    setSaving(id + "_toggle");
+    try {
+      await Api.patch("/v1/webhooks/" + id, { active: !currentlyActive });
+      pushToast({ kind: "info", title: currentlyActive ? "Webhook deactivated" : "Webhook activated" });
+      reload();
+    } catch (err) {
+      pushToast({ kind: "error", title: "Update failed", desc: err.message });
+    } finally {
+      setSaving(null);
+    }
   };
 
   return React.createElement(React.Fragment, null,
@@ -167,7 +223,7 @@ function PageWebhooks() {
         React.createElement("div", { className: "page-sub" }, "Push system events to external endpoints. Payloads are HMAC-signed.")
       ),
       React.createElement("button", { className: "btn btn-primary", onClick: onRegister },
-        Icons.Plus({ size: 12 }), "Register webhook"
+        Icons.Plus({ size: 12 }), " Register webhook"
       )
     ),
     React.createElement("div", { style: { padding: "20px 28px" } },
@@ -175,25 +231,32 @@ function PageWebhooks() {
         React.createElement("div", { className: "stat-tile green" },
           React.createElement("div", { className: "stat-tile-label" }, "Active endpoints"),
           React.createElement("div", { className: "stat-tile-val" }, active),
-          React.createElement("div", { className: "stat-tile-sub" }, inactive, " deactivated")
+          React.createElement("div", { className: "stat-tile-sub" }, inactive + " deactivated")
         ),
         React.createElement("div", { className: "stat-tile blue" },
-          React.createElement("div", { className: "stat-tile-label" }, "Deliveries · 24h"),
-          React.createElement("div", { className: "stat-tile-val" }, "12,847"),
-          React.createElement("div", { className: "stat-tile-sub" }, "average 142/min")
+          React.createElement("div", { className: "stat-tile-label" }, "Total endpoints"),
+          React.createElement("div", { className: "stat-tile-val" }, webhooks.length),
+          React.createElement("div", { className: "stat-tile-sub" }, active + " active, " + inactive + " inactive")
         ),
-        React.createElement("div", { className: "stat-tile red" },
-          React.createElement("div", { className: "stat-tile-label" }, "Failures · 24h"),
+        React.createElement("div", { className: "stat-tile " + (totalFails > 0 ? "red" : "green") },
+          React.createElement("div", { className: "stat-tile-label" }, "Total failures"),
           React.createElement("div", { className: "stat-tile-val" }, totalFails),
-          React.createElement("div", { className: "stat-tile-sub" }, totalFails > 0 ? "most from legacy.meridian.fi" : "all endpoints healthy")
+          React.createElement("div", { className: "stat-tile-sub" }, worstLabel())
         )
       ),
-      rows.length === 0
+
+      loading
+        ? React.createElement("div", { className: "card" },
+            React.createElement("div", { style: { padding: "40px 0", textAlign: "center", color: "var(--muted)", fontSize: 12 } }, "Loading…")
+          )
+        : webhooks.length === 0
         ? React.createElement("div", { className: "card" },
             React.createElement(EmptyState, {
               title: "No webhooks registered",
               desc: "Subscribe an HTTPS endpoint to receive events as they happen.",
-              action: React.createElement("button", { className: "btn btn-primary", style: { marginTop: 8 }, onClick: onRegister }, Icons.Plus({ size: 12 }), "Register webhook")
+              action: React.createElement("button", {
+                className: "btn btn-primary", style: { marginTop: 8 }, onClick: onRegister
+              }, Icons.Plus({ size: 12 }), " Register webhook")
             })
           )
         : React.createElement("div", { className: "card", style: { padding: 0 } },
@@ -209,28 +272,24 @@ function PageWebhooks() {
                 )
               ),
               React.createElement("tbody", null,
-                !apiKey
-                  ? React.createElement("tr", null, React.createElement("td", { colSpan: 6, style: { textAlign: "center", padding: "40px 0", color: "var(--muted)" } }, "Set your API key in the sidebar to load webhooks"))
-                  : loadingWh
-                  ? React.createElement("tr", null, React.createElement("td", { colSpan: 6, style: { textAlign: "center", padding: "40px 0", color: "var(--muted)" } }, "Loading…"))
-                  : rows.map(w => React.createElement("tr", { key: w._id, style: { cursor: "default" } },
+                webhooks.map(w => React.createElement("tr", { key: w.id },
                   React.createElement("td", null,
                     React.createElement("div", { className: "mono truncate", title: w.url, style: { maxWidth: 320 } }, w.url)
                   ),
                   React.createElement("td", null,
                     React.createElement("div", { style: { display: "flex", gap: 4, flexWrap: "wrap" } },
-                      w.events.map(e => React.createElement(Pill, { kind: "blue", key: e }, e))
+                      (w.events || []).map(e => React.createElement(Pill, { kind: "blue", key: e }, e))
                     )
                   ),
                   React.createElement("td", null,
                     React.createElement(Pill, { kind: w.active ? "green" : "muted" },
                       React.createElement("span", { className: "dot dot-" + (w.active ? "green" : "dim") }),
-                      w.active ? "active" : "inactive"
+                      " ", w.active ? "active" : "inactive"
                     )
                   ),
                   React.createElement("td", null,
-                    w.failures > 0
-                      ? React.createElement(Pill, { kind: w.failures > 50 ? "red" : "amber" }, w.failures)
+                    (w.failures || 0) > 0
+                      ? React.createElement(Pill, { kind: (w.failures || 0) > 50 ? "red" : "amber" }, w.failures)
                       : React.createElement("span", { className: "muted mono", style: { fontSize: 11 } }, "0")
                   ),
                   React.createElement("td", { className: "muted mono", style: { fontSize: 11 } }, w.lastDelivery),
@@ -238,14 +297,15 @@ function PageWebhooks() {
                     React.createElement("div", { style: { display: "inline-flex", gap: 6 } },
                       React.createElement("button", {
                         className: "btn btn-sm btn-ghost",
-                        disabled: pinging === w._id || !w.active,
-                        onClick: () => onPing(w._id, w.url)
-                      }, pinging === w._id ? "Pinging..." : "Ping"),
+                        disabled: saving === w.id + "_ping" || !w.active,
+                        onClick: () => onPing(w.id, w.url)
+                      }, saving === w.id + "_ping" ? "Pinging…" : "Ping"),
                       React.createElement("button", {
                         className: "btn btn-sm " + (w.active ? "btn-ghost" : ""),
-                        onClick: () => onToggle(w._id, w.active),
+                        disabled: saving === w.id + "_toggle",
+                        onClick: () => onToggle(w.id, w.active),
                         style: w.active ? {} : { color: "var(--green)", borderColor: "var(--green-bd)", background: "var(--green-bg)" }
-                      }, w.active ? "Deactivate" : "Activate")
+                      }, saving === w.id + "_toggle" ? "…" : w.active ? "Deactivate" : "Activate")
                     )
                   )
                 ))

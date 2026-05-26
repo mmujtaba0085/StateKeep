@@ -104,7 +104,7 @@ const Api = (() => {
         url:          w.url,
         events:       w.events || [],
         active:       w.active,
-        failures:     w.failures || 0,
+        failures:     w.failureCount || w.failures || 0,
         lastDelivery: w.lastFiredAt ? formatRelTime(w.lastFiredAt) : 'never',
         _raw:         w,
       };
