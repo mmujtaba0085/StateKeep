@@ -145,11 +145,13 @@ fastify.addHook('onRequest', async (req, reply) => {
 // ── Auth (global preHandler, skips public paths) ──────────────────────────────
 fastify.addHook('preHandler', authMiddleware);
 
-// ── Bump rate limit for authenticated requests (runs after auth sets apiKey) ──
+// ── Per-tier rate limits (runs after auth sets apiKey + tier) ────────────────
+const TIER_RATE_LIMITS = { free: 300, pro: 1000, enterprise: 5000 };
+
 fastify.addHook('preHandler', async (req) => {
   if (req.apiKey) {
-    // Fastify rate-limit reads req.rateLimit to override per-request
-    req.rateLimit = { max: 1000, timeWindow: 60_000 };
+    const max = TIER_RATE_LIMITS[req.apiKey.tier] ?? 1000;
+    req.rateLimit = { max, timeWindow: 60_000 };
   }
 });
 
