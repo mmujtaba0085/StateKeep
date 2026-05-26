@@ -468,7 +468,7 @@ export function getDb() {
     console.log('[db] Migration v15 applied: idempotency_key on events + actor_cursor index');
   }
 
-  if (!applied.has(16)) {
+  if (!appliedVersions.has(16)) {
     _db.exec(`
       ALTER TABLE definitions ADD COLUMN created_at INTEGER NOT NULL DEFAULT (unixepoch());
       INSERT OR IGNORE INTO schema_migrations(version, applied_at)
