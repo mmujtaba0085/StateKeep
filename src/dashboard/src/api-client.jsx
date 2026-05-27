@@ -76,25 +76,27 @@ const Api = (() => {
       return res.json();
     },
 
-    get:   (path)        => self.request('GET',   path),
-    post:  (path, body)  => self.request('POST',  path, body),
-    put:   (path, body)  => self.request('PUT',   path, body),
-    patch: (path, body)  => self.request('PATCH', path, body),
+    get:    (path)        => self.request('GET',    path),
+    post:   (path, body)  => self.request('POST',   path, body),
+    put:    (path, body)  => self.request('PUT',    path, body),
+    patch:  (path, body)  => self.request('PATCH',  path, body),
+    delete: (path)        => self.request('DELETE', path),
 
     // ── Data mappers ─────────────────────────────────────────────────────────
 
     mapActor(a) {
       const defId = a.definitionId || '';
       return {
-        id:        a.id,
-        machine:   defId,
-        version:   extractVersion(defId),
-        state:     extractState(a.stateValue),
-        status:    a.status,
-        lastEvt:   a.lastEventTick != null ? 'tick ' + a.lastEventTick : '—',
-        lastTime:  formatRelTime(a.updatedAt),
-        age:       formatRelTime(a.createdAt),
-        _raw:      a,
+        id:       a.id,
+        defId,
+        machine:  defId,
+        version:  extractVersion(defId),
+        state:    extractState(a.stateValue),
+        status:   a.status,
+        lastEvt:  a.lastEventTick != null ? 'tick ' + a.lastEventTick : '—',
+        lastTime: formatRelTime(a.updatedAt),
+        age:      formatRelTime(a.createdAt),
+        _raw:     a,
       };
     },
 
