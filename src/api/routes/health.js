@@ -7,6 +7,7 @@
 import { getDb } from '../../registry/db.js';
 import { getEngine } from '../../ffi/engine.js';
 import { adminMiddleware } from '../middleware/auth.js';
+import { getWorkerPool } from '../../runtime/workerPool.js';
 
 const STALE_THRESHOLD_MS = 2 * 60 * 1000;   // 2 minutes
 
@@ -79,6 +80,12 @@ export async function healthRoutes(fastify) {
       staleThresholdMs: STALE_THRESHOLD_MS,
       workers,
     });
+  });
+
+  // ── GET /v1/health/queues — worker queue stats ───────────────────────────
+  fastify.get('/v1/health/queues', async (_req, reply) => {
+    const pool = getWorkerPool();
+    return reply.send(pool.getQueueStats());
   });
 
   // ── DELETE /v1/health/workers/:workerId (admin) ───────────────────────────

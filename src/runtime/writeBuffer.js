@@ -18,7 +18,8 @@
 
 import { getDb, encrypt } from '../registry/db.js';
 
-const FLUSH_MS = 50;
+const FLUSH_MS      = 50;
+const HIGH_WATER    = 200;   // flush immediately when pending items reach this
 
 class WriteBuffer {
   constructor() {
@@ -34,6 +35,7 @@ class WriteBuffer {
     // Serialize (and encrypt context) here, inline with the request handler,
     // so the flush timer never calls encrypt() — prevents timer-callback blocking.
     this._states.set(actorId, this._serialize(actorId, data));
+    if (this._states.size + this._events.length >= HIGH_WATER) this.flush();
   }
 
   queueEvent(row) {
@@ -41,6 +43,7 @@ class WriteBuffer {
     if (row.idempotency_key) {
       this._pending.add(`${row.actor_id}:${row.idempotency_key}`);
     }
+    if (this._states.size + this._events.length >= HIGH_WATER) this.flush();
   }
 
   queueDecision(args) {

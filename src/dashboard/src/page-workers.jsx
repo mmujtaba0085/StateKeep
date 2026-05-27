@@ -1,6 +1,66 @@
 /* global React, Icons, Pill, Api */
 const { useState: useState6, useEffect: useEffect6 } = React;
 
+function QueueStatsPanel() {
+  const [stats, setStats] = useState6(null);
+
+  useEffect6(() => {
+    const load = () => Api.get("/v1/health/queues").then(setStats).catch(() => {});
+    load();
+    const t = setInterval(load, 5000);
+    return () => clearInterval(t);
+  }, []);
+
+  if (!stats) return null;
+  const { totals, workerCount } = stats;
+
+  const tierRow = (label, tier, color) => {
+    const q = totals.queued[tier];
+    const s = totals.served[tier];
+    const w = totals.avgWaitMs[tier];
+    return React.createElement("tr", { key: tier },
+      React.createElement("td", null,
+        React.createElement("span", { className: "dot dot-" + color, style: { marginRight: 6 } }),
+        React.createElement("span", { style: { fontWeight: 600, fontSize: 12 } }, label)
+      ),
+      React.createElement("td", { className: "mono", style: { color: q > 0 ? (tier === 'high' ? "var(--amber)" : "var(--muted)") : "var(--muted)" } },
+        q > 0 ? q.toLocaleString() : "—"
+      ),
+      React.createElement("td", { className: "mono muted" }, s.toLocaleString()),
+      React.createElement("td", { className: "mono muted" }, w > 0 ? w + " ms" : "< 1 ms")
+    );
+  };
+
+  return React.createElement("div", { style: { padding: "0 28px 28px" } },
+    React.createElement("div", { className: "card", style: { padding: 0 } },
+      React.createElement("div", { style: { padding: "14px 16px", display: "flex", justifyContent: "space-between", alignItems: "center", borderBottom: "1px solid var(--border)" } },
+        React.createElement("h3", { className: "card-h-title", style: { margin: 0 } }, "Worker Queue Stats"),
+        React.createElement("div", { className: "mono muted", style: { fontSize: 11 } },
+          workerCount + " workers · auto-refreshes every 5s"
+        )
+      ),
+      React.createElement("table", { className: "tbl" },
+        React.createElement("thead", null,
+          React.createElement("tr", null,
+            React.createElement("th", null, "Tier"),
+            React.createElement("th", null, "Queued now"),
+            React.createElement("th", null, "Total served"),
+            React.createElement("th", null, "Avg wait")
+          )
+        ),
+        React.createElement("tbody", null,
+          tierRow("High   (dashboard)", "high",   "green"),
+          tierRow("Normal (API calls)", "normal", "blue"),
+          tierRow("Low    (background)", "low",   "purple")
+        )
+      ),
+      React.createElement("div", { style: { padding: "10px 16px", fontSize: 10.5, color: "var(--muted)", borderTop: "1px solid var(--border)" } },
+        "Round-robin: 3 high → 2 normal → 1 low per round. Within each tier, orgs are served in round-robin so no single org can starve others."
+      )
+    )
+  );
+}
+
 function WorkerFleetTable() {
   const [workers, setWorkers] = useState6([]);
   const [loading, setLoading] = useState6(true);
@@ -109,7 +169,7 @@ function PageWorkers() {
         )
       )
     ),
-    React.createElement("div", { style: { padding: "18px 28px 28px" } },
+    React.createElement("div", { style: { padding: "18px 28px 14px" } },
       React.createElement("div", { className: "card", style: { padding: 0 } },
         React.createElement("div", { style: { padding: "14px 16px", display: "flex", justifyContent: "space-between", alignItems: "center", borderBottom: "1px solid var(--border)" } },
           React.createElement("h3", { className: "card-h-title", style: { margin: 0 } }, "Worker Fleet"),
@@ -117,7 +177,8 @@ function PageWorkers() {
         ),
         React.createElement(WorkerFleetTable, null)
       )
-    )
+    ),
+    React.createElement(QueueStatsPanel, null)
   );
 }
 

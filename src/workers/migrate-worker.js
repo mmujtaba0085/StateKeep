@@ -157,7 +157,7 @@ async function processJob(job) {
 
   try {
     invalidateDefinitionCache(target_def_id);
-    const result = await migrateActor(actor_id, target_def_id);
+    const result = await migrateActor(actor_id, target_def_id, { priority: 'low', orgId: org_id ?? '_system' });
 
     // Gap 5 fix: notify engine that the actor has started on the new definition.
     // t_star      = the engine tick at which the TARGET definition was deployed

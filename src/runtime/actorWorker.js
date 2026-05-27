@@ -364,6 +364,22 @@ if (parentPort) parentPort.on('message', (msg) => {
       case 'SNAPSHOT':  result = handleSnapshot(msg);  break;
       case 'TERMINATE': result = handleTerminate(msg); break;
       case 'PING':      result = { alive: true, actorCount: actors.size }; break;
+      case 'BATCH_EVENTS': {
+        // Chain fingerprints across events so each one builds on the previous result.
+        // Ignore the per-event historyFingerprint sent by the pool (may be stale when
+        // multiple requests were in-flight simultaneously) — use the running value instead.
+        const results = [];
+        let fp  = msg.events[0]?.historyFingerprint  ?? '0';
+        let rfp = msg.events[0]?.regionFingerprints  ?? null;
+        for (const evData of msg.events) {
+          const r = handleEvent({ actorId: msg.actorId, event: evData.event, historyFingerprint: fp, regionFingerprints: rfp });
+          results.push(r);
+          fp  = r.historyFingerprint;
+          rfp = r.regionFingerprints;
+        }
+        result = { results };
+        break;
+      }
       default:          error  = `Unknown message type: ${type}`;
     }
   } catch (err) {

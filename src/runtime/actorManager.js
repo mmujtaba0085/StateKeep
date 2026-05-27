@@ -141,7 +141,7 @@ function touch(id, entry) {
   hotRegistry.set(id, entry);
 }
 
-async function ensureInWorker(actorId, actor, priority = 'normal') {
+async function ensureInWorker(actorId, actor, priority = 'normal', orgId = '_system') {
   const pool = getWorkerPool();
   const def  = cachedFindDefinition(actor.definitionId);
   if (!def) throw new Error(`Definition ${actor.definitionId} not found`);
@@ -153,7 +153,7 @@ async function ensureInWorker(actorId, actor, priority = 'normal') {
     stateSnapshot:  actor.stateValue
       ? { value: actor.stateValue, context: actor.context, status: 'active' }
       : undefined,
-  }, { priority });
+  }, { priority, orgId });
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -236,7 +236,7 @@ export async function spawnActor({ definitionId, orgId, initialContext, logicalS
  *   both land in the same 50ms flush transaction.
  */
 export async function sendEvent(actorId, event, tick, opts = {}) {
-  const { eventData, priority = 'normal' } = opts;
+  const { eventData, priority = 'normal', orgId: optsOrgId } = opts;
   const pool = getWorkerPool();
 
   // Load from hot registry or SQLite.
@@ -278,9 +278,11 @@ export async function sendEvent(actorId, event, tick, opts = {}) {
       // Evict the stale machine from the worker thread so SPAWN re-initialises with the
       // new definition. This happens when the migrate-worker (separate process) migrated
       // this actor while it was resident in our worker pool.
-      await pool.send(actorId, { type: 'TERMINATE', actorId }, { priority }).catch(() => {});
+      const _orgId = optsOrgId ?? actor.orgId ?? '_system';
+      await pool.send(actorId, { type: 'TERMINATE', actorId }, { priority, orgId: _orgId }).catch(() => {});
     }
-    await ensureInWorker(actorId, actor, priority);
+    const _ensureOrgId = optsOrgId ?? actor.orgId ?? '_system';
+    await ensureInWorker(actorId, actor, priority, _ensureOrgId);
     entry = {
       definitionId:       actor.definitionId,
       orgId:              actor.orgId,
@@ -382,7 +384,7 @@ export async function sendEvent(actorId, event, tick, opts = {}) {
       // Version swap: migrate first, then process event on new definition
       const fromDefId = entry.definitionId;
       try {
-        await migrateActor(actorId, targetDefId, { priority });
+        await migrateActor(actorId, targetDefId, { priority, orgId: entry.orgId });
         // Evict ALL cached decisions for this actor/fromDef (key now includes fingerprint)
         const _prefix = `${actorId}:${fromDefId}:`;
         for (const key of migrationCheckCache.keys()) {
@@ -428,6 +430,8 @@ export async function sendEvent(actorId, event, tick, opts = {}) {
     }
   }
 
+  const _eventOrgId = optsOrgId ?? entry.orgId ?? '_system';
+
   // Dispatch event (on current or just-swapped definition)
   const result = await pool.send(actorId, {
     type:               'EVENT',
@@ -435,7 +439,7 @@ export async function sendEvent(actorId, event, tick, opts = {}) {
     event,
     historyFingerprint: entry.historyFingerprint,
     regionFingerprints: entry.regionFingerprints ?? null,
-  }, { priority });
+  }, { priority, orgId: _eventOrgId });
 
   const newRegionFingerprints = result.regionFingerprints ?? entry.regionFingerprints ?? null;
 
@@ -558,7 +562,7 @@ export async function getActorState(actorId) {
 /**
  * Terminate an actor.
  */
-export async function terminateActor(actorId, { priority = 'normal' } = {}) {
+export async function terminateActor(actorId, { priority = 'normal', orgId } = {}) {
   const pool = getWorkerPool();
 
   // Capture before removal so actorStopped gets accurate args
@@ -566,9 +570,10 @@ export async function terminateActor(actorId, { priority = 'normal' } = {}) {
   const fromDb = hot ? null : findActorById(actorId);
   const fp     = hot?.historyFingerprint ?? fromDb?.historyFingerprint ?? '0';
   const lst    = hot?.logicalStartTick   ?? fromDb?.logicalStartTick   ?? 0;
+  const _orgId = orgId ?? hot?.orgId ?? fromDb?.orgId ?? '_system';
 
   try {
-    await pool.send(actorId, { type: 'TERMINATE', actorId }, { priority });
+    await pool.send(actorId, { type: 'TERMINATE', actorId }, { priority, orgId: _orgId });
   } catch {}
 
   hotRegistry.delete(actorId);
@@ -592,7 +597,7 @@ export async function terminateActor(actorId, { priority = 'normal' } = {}) {
  * Migrate an actor to a new definition (called by migrate-worker and inline).
  * Throws with code 'STATE_NOT_MAPPABLE' if the actor's state cannot be resolved.
  */
-export async function migrateActor(actorId, targetDefinitionId, { priority = 'normal' } = {}) {
+export async function migrateActor(actorId, targetDefinitionId, { priority = 'normal', orgId } = {}) {
   const pool   = getWorkerPool();
   const actor  = findActorById(actorId);
   if (!actor) throw new Error(`Actor not found: ${actorId}`);
@@ -600,8 +605,9 @@ export async function migrateActor(actorId, targetDefinitionId, { priority = 'no
   const targetDef = cachedFindDefinition(targetDefinitionId);
   if (!targetDef) throw new Error(`Target definition not found: ${targetDefinitionId}`);
 
-  const stateMapping    = targetDef.definitionJson._stateMapping    ?? {};
+  const stateMapping     = targetDef.definitionJson._stateMapping    ?? {};
   const contextTransform = targetDef.definitionJson._contextTransform ?? null;
+  const _orgId           = orgId ?? actor.orgId ?? '_system';
 
   const result = await pool.send(actorId, {
     type:                 'HYDRATE',
@@ -612,7 +618,7 @@ export async function migrateActor(actorId, targetDefinitionId, { priority = 'no
     stateMapping,
     existingFingerprint:  actor.historyFingerprint,
     contextTransform,
-  }, { priority });
+  }, { priority, orgId: _orgId });
 
   if (result && result.error === 'STATE_NOT_MAPPABLE') {
     throw Object.assign(
