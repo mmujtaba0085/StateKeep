@@ -1,5 +1,8 @@
 /* global React, Icons, Pill, useApp, Api */
 const { useState: useState1, useEffect: useEffect1, useRef: useRef1 } = React;
+const ACTORS_INTERVAL  = 15_000;
+const DEFS_INTERVAL    = 30_000;
+const CLOCK_INTERVAL   = 1_000;
 
 function DefinitionCard({ d, selected, onClick }) {
   return React.createElement("div", {
@@ -69,11 +72,15 @@ function RecentActors({ apiKey }) {
 
   useEffect1(() => {
     if (!apiKey) return;
+    function load() {
+      Api.get("/v1/actors?limit=12")
+        .then(d => { setActors((d.actors || []).map(a => Api.mapActor(a))); setLoading(false); })
+        .catch(() => setLoading(false));
+    }
     setLoading(true);
-    Api.get("/v1/actors?limit=12")
-      .then(d => setActors((d.actors || []).map(a => Api.mapActor(a))))
-      .catch(() => {})
-      .finally(() => setLoading(false));
+    load();
+    const t = setInterval(load, ACTORS_INTERVAL);
+    return () => clearInterval(t);
   }, [apiKey]);
 
   return React.createElement("div", { className: "feed-wrap" },
@@ -154,18 +161,35 @@ function PageCommand() {
   const [defs, setDefs] = useState1([]);
   const [loading, setLoading] = useState1(false);
   const [selectedDef, setSelectedDef] = useState1(null);
+  const [now, setNow] = useState1(new Date());
+
+  useEffect1(() => {
+    const t = setInterval(() => setNow(new Date()), CLOCK_INTERVAL);
+    return () => clearInterval(t);
+  }, []);
 
   useEffect1(() => {
     if (!apiKey) return;
+    function load() {
+      Api.get("/v1/definitions?limit=50")
+        .then(defData => {
+          const definitions = defData.definitions || [];
+          setDefs(definitions);
+          setLoading(false);
+          setSelectedDef(prev => {
+            if (prev) {
+              const refreshed = definitions.find(d => d.id === prev.id);
+              return refreshed || (definitions.length > 0 ? definitions[0] : null);
+            }
+            return definitions.length > 0 ? definitions[0] : null;
+          });
+        })
+        .catch(() => setLoading(false));
+    }
     setLoading(true);
-    Api.get("/v1/definitions?limit=50")
-      .then(defData => {
-        const definitions = defData.definitions || [];
-        setDefs(definitions);
-        if (definitions.length > 0) setSelectedDef(definitions[0]);
-      })
-      .catch(() => {})
-      .finally(() => setLoading(false));
+    load();
+    const t = setInterval(load, DEFS_INTERVAL);
+    return () => clearInterval(t);
   }, [apiKey]);
 
   const selected = selectedDef;
@@ -178,7 +202,7 @@ function PageCommand() {
       ),
       React.createElement("div", { className: "mono muted", style: { fontSize: 11 } },
         React.createElement("span", { className: "dot dot-green dot-pulse", style: { marginRight: 6 } }),
-        "operational · ", new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })
+        "operational · ", now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })
       )
     ),
     React.createElement("div", { className: "cmd-grid" },
