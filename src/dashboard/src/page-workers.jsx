@@ -74,12 +74,14 @@ function WorkerFleetTable() {
 
   useEffect6(() => {
     load();
-    const t = setInterval(load, 30000);
+    const t = setInterval(load, 10000);
     return () => clearInterval(t);
   }, []);
 
   if (loading) return React.createElement("div", { style: { padding: "40px 0", textAlign: "center", color: "var(--muted)", fontSize: 12 } }, "Loading…");
   if (workers.length === 0) return React.createElement("div", { style: { padding: "40px 0", textAlign: "center", color: "var(--muted)", fontSize: 12 } }, "No active workers found");
+
+  const RECENT_MS = 5 * 60 * 1000; // 5 minutes = recently restarted
 
   return React.createElement("table", { className: "tbl" },
     React.createElement("thead", null,
@@ -87,7 +89,7 @@ function WorkerFleetTable() {
         React.createElement("th", null, "Worker"),
         React.createElement("th", null, "PID"),
         React.createElement("th", null, "Last Heartbeat"),
-        React.createElement("th", null, "Uptime"),
+        React.createElement("th", null, "Started"),
         React.createElement("th", null, "Status")
       )
     ),
@@ -95,18 +97,22 @@ function WorkerFleetTable() {
       workers.map(w => {
         const lastBeat = w.lastBeat ? new Date(w.lastBeat).toLocaleTimeString() : "—";
         const uptimeSec = w.startedAt ? Math.floor((Date.now() - w.startedAt) / 1000) : null;
-        const uptime = uptimeSec == null ? "—"
-          : uptimeSec < 60 ? uptimeSec + "s"
-          : uptimeSec < 3600 ? Math.floor(uptimeSec / 60) + "m"
-          : Math.floor(uptimeSec / 3600) + "h " + Math.floor((uptimeSec % 3600) / 60) + "m";
+        const recentlyRestarted = w.startedAt && (Date.now() - w.startedAt) < RECENT_MS;
+        const startedLabel = !w.startedAt ? "—"
+          : recentlyRestarted
+            ? (uptimeSec < 60 ? uptimeSec + "s ago" : Math.floor(uptimeSec / 60) + "m ago")
+          : new Date(w.startedAt).toLocaleTimeString();
         return React.createElement("tr", { key: w.workerId },
           React.createElement("td", { className: "mono" }, w.workerType),
           React.createElement("td", { className: "mono muted", style: { fontSize: 11 } }, w.pid || "—"),
           React.createElement("td", { className: "mono muted", style: { fontSize: 11 } }, lastBeat,
             w.staleSecs > 0 ? React.createElement("span", { style: { color: "var(--amber)", marginLeft: 6 } }, w.staleSecs + "s ago") : null
           ),
-          React.createElement("td", { className: "mono muted", style: { fontSize: 11 } }, uptime),
-          React.createElement("td", null, React.createElement(Pill, { kind: w.healthy ? "green" : "red" }, w.healthy ? "healthy" : "stale"))
+          React.createElement("td", { className: "mono", style: { fontSize: 11, color: recentlyRestarted ? "var(--amber)" : "var(--muted)" } },
+            startedLabel,
+            recentlyRestarted && React.createElement("span", { style: { marginLeft: 6, fontSize: 10, fontWeight: 600, color: "var(--amber)" } }, "↺ restarted")
+          ),
+          React.createElement("td", null, React.createElement(Pill, { kind: w.healthy ? (recentlyRestarted ? "amber" : "green") : "red" }, w.healthy ? (recentlyRestarted ? "restarted" : "healthy") : "stale"))
         );
       })
     )
@@ -158,14 +164,18 @@ function PageWorkers() {
           React.createElement("div", { className: "stat-tile-val" }, health?.engine || "—"),
           React.createElement("div", { className: "stat-tile-sub" }, !loaded ? "loading…" : engineReal ? "native .so loaded" : "fallback — migrations paused")
         ),
-        React.createElement("div", { className: "stat-tile" },
-          React.createElement("div", { className: "stat-tile-label" }, "Uptime"),
+        React.createElement("div", { className: "stat-tile " + (!loaded ? "" : (health?.uptime && health.uptime < 300) ? "amber" : "") },
+          React.createElement("div", { className: "stat-tile-label" }, "API Uptime"),
           React.createElement("div", { className: "stat-tile-val" }, health?.uptime
             ? (health.uptime >= 3600
                 ? Math.floor(health.uptime / 3600) + "h " + Math.floor((health.uptime % 3600) / 60) + "m"
-                : Math.floor(health.uptime / 60) + "m")
+                : health.uptime >= 60
+                ? Math.floor(health.uptime / 60) + "m"
+                : health.uptime + "s")
             : "—"),
-          React.createElement("div", { className: "stat-tile-sub" }, "server process uptime")
+          React.createElement("div", { className: "stat-tile-sub" },
+            health?.uptime && health.uptime < 300 ? "recently restarted" : "server process uptime"
+          )
         )
       )
     ),
@@ -173,7 +183,7 @@ function PageWorkers() {
       React.createElement("div", { className: "card", style: { padding: 0 } },
         React.createElement("div", { style: { padding: "14px 16px", display: "flex", justifyContent: "space-between", alignItems: "center", borderBottom: "1px solid var(--border)" } },
           React.createElement("h3", { className: "card-h-title", style: { margin: 0 } }, "Worker Fleet"),
-          React.createElement("div", { className: "mono muted", style: { fontSize: 11 } }, "auto-refreshes every 30s")
+          React.createElement("div", { className: "mono muted", style: { fontSize: 11 } }, "auto-refreshes every 10s")
         ),
         React.createElement(WorkerFleetTable, null)
       )
