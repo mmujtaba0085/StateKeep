@@ -133,7 +133,8 @@ export async function actorRoutes(fastify) {
     }
 
     const event    = { type: eventType, ...(payload ?? {}) };
-    const priority = request.headers['x-priority'] === 'high' ? 'high' : 'normal';
+    const _pri     = request.headers['x-priority'];
+    const priority = _pri === 'urgent' ? 'urgent' : _pri === 'high' ? 'high' : 'normal';
 
     try {
       const encPayload = payload
@@ -195,7 +196,9 @@ export async function actorRoutes(fastify) {
       return reply.code(404).send({ error: `Actor ${id} not found` });
     }
     try {
-      const state = await getActorState(id);
+      const _pri3   = request.headers['x-priority'];
+      const priority = _pri3 === 'urgent' ? 'urgent' : _pri3 === 'high' ? 'high' : 'normal';
+      const state = await getActorState(id, { priority });
       return reply.send({
         ...state,
         id,
@@ -310,7 +313,8 @@ export async function actorRoutes(fastify) {
     }
 
     try {
-      const priority = request.headers['x-priority'] === 'high' ? 'high' : 'normal';
+      const _pri2    = request.headers['x-priority'];
+      const priority = _pri2 === 'urgent' ? 'urgent' : _pri2 === 'high' ? 'high' : 'normal';
       const cancelled = cancelAllPendingForActor(id, request.orgId);
       await terminateActor(id, { priority, orgId: request.orgId });
       return reply.code(200).send({ cancelled });

@@ -124,7 +124,7 @@ function ActorDrawer({ actor, open, onClose, onActionDone, pushToast }) {
     setEventType("");
     setEventPayload("");
     // full detail (includes context)
-    Api.get("/v1/actors/" + actor.id)
+    Api.get("/v1/actors/" + actor.id, { priority: 'urgent' })
       .then(d => setDetail(d))
       .catch(() => setDetail(actor._raw || actor));
     // event history
@@ -162,7 +162,7 @@ function ActorDrawer({ actor, open, onClose, onActionDone, pushToast }) {
       try { payload = JSON.parse(eventPayload); } catch { pushToast({ kind: "error", title: "Invalid JSON payload" }); return; }
     }
     setSending(true);
-    Api.post("/v1/actors/" + actor.id + "/event", { type: eventType.trim(), payload })
+    Api.post("/v1/actors/" + actor.id + "/event", { type: eventType.trim(), payload }, { priority: 'urgent' })
       .then(() => { pushToast({ kind: "success", title: "Event sent: " + eventType }); setEventType(""); setEventPayload(""); onActionDone(); })
       .catch(e => pushToast({ kind: "error", title: "Send failed", desc: e.message }))
       .finally(() => setSending(false));
@@ -189,14 +189,14 @@ function ActorDrawer({ actor, open, onClose, onActionDone, pushToast }) {
   const handleTerminate = () => {
     if (!window.confirm("Terminate actor " + actor.id.slice(0, 10) + "?")) return;
     setTerminating(true);
-    Api.delete("/v1/actors/" + actor.id)
+    Api.delete("/v1/actors/" + actor.id, { priority: 'urgent' })
       .then(() => { pushToast({ kind: "success", title: "Actor terminated" }); onClose(); onActionDone(); })
       .catch(e => pushToast({ kind: "error", title: "Terminate failed", desc: e.message }))
       .finally(() => setTerminating(false));
   };
 
   const handleRescue = () => {
-    Api.patch("/v1/actors/" + actor.id, { status: "active" })
+    Api.patch("/v1/actors/" + actor.id, { status: "active" }, { priority: 'urgent' })
       .then(() => { pushToast({ kind: "success", title: "Actor rescued" }); onActionDone(); })
       .catch(e => pushToast({ kind: "error", title: "Rescue failed", desc: e.message }));
   };

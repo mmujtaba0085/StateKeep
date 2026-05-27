@@ -50,8 +50,8 @@ const Api = (() => {
       return () => { _listeners = _listeners.filter(l => l !== fn); };
     },
 
-    async request(method, path, body) {
-      const headers = { 'Content-Type': 'application/json', 'X-Priority': 'high' };
+    async request(method, path, body, opts = {}) {
+      const headers = { 'Content-Type': 'application/json', 'X-Priority': opts.priority ?? 'high' };
       if (_key) headers['X-Api-Key'] = _key;
       const res = await fetch(path, {
         method,
@@ -76,11 +76,11 @@ const Api = (() => {
       return res.json();
     },
 
-    get:    (path)        => self.request('GET',    path),
-    post:   (path, body)  => self.request('POST',   path, body),
-    put:    (path, body)  => self.request('PUT',    path, body),
-    patch:  (path, body)  => self.request('PATCH',  path, body),
-    delete: (path)        => self.request('DELETE', path),
+    get:    (path, opts)        => self.request('GET',    path, undefined, opts),
+    post:   (path, body, opts) => self.request('POST',   path, body,      opts),
+    put:    (path, body, opts) => self.request('PUT',    path, body,      opts),
+    patch:  (path, body, opts) => self.request('PATCH',  path, body,      opts),
+    delete: (path, opts)       => self.request('DELETE', path, undefined, opts),
 
     // ── Data mappers ─────────────────────────────────────────────────────────
 

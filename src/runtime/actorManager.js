@@ -507,7 +507,7 @@ export async function sendEvent(actorId, event, tick, opts = {}) {
 /**
  * Get current actor state snapshot.
  */
-export async function getActorState(actorId) {
+export async function getActorState(actorId, { priority = 'normal' } = {}) {
   const actor = findActorById(actorId);
   if (!actor) throw new Error(`Actor not found: ${actorId}`);
 
@@ -527,7 +527,7 @@ export async function getActorState(actorId) {
   if (hot) {
     const pool = getWorkerPool();
     try {
-      const snap = await pool.send(actorId, { type: 'SNAPSHOT', actorId });
+      const snap = await pool.send(actorId, { type: 'SNAPSHOT', actorId }, { priority, orgId: actor.orgId ?? '_system' });
       if (snap) {
         touch(actorId, { ...hot, lastAccess: Date.now() });
         // Augment worker snapshot with registry metadata not held by the worker thread.
