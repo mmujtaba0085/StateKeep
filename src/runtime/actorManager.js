@@ -589,8 +589,7 @@ export async function terminateActor(actorId, { priority = 'normal', orgId } = {
     if (eng.available) eng.actorStopped(BigInt(lst), fingerprintToBigInt(fp));
   } catch {}
 
-  const orgId = hot?.orgId ?? fromDb?.orgId;
-  if (orgId) emitWebhookEvent(orgId, 'actor.terminated', { actorId });
+  if (_orgId && _orgId !== '_system') emitWebhookEvent(_orgId, 'actor.terminated', { actorId });
 }
 
 /**
