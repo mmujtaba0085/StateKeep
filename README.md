@@ -150,9 +150,9 @@ StateKeep writes the following internal event types to an actor's event history.
 │                   Fastify API Server (:3001)             │
 │   preHandler: auth (X-API-Key) → rate-limit             │
 │   routes: /v1/actors  /v1/definitions  /v1/keys          │
-│           /v1/definitions/validate                       │
-│           /v1/definitions/scenario                       │
-│           /v1/metrics  /v1/health  /dashboard/*          │
+│           /v1/definitions/validate  /v1/definitions/scenario│
+│           /v1/health  /v1/health/workers  /v1/health/queues│
+│           /v1/metrics  /v1/webhooks  /dashboard/*         │
 │   actorManager: LRU hot registry + workerPool dispatch   │
 └────────┬─────────────────────────────┬───────────────────┘
          │                             │
@@ -191,6 +191,12 @@ StateKeep writes the following internal event types to an actor's event history.
 **SQLite as the backbone.** The entire operational state lives in one WAL-mode SQLite file. This is a deliberate architectural choice: ACID guarantees with no distributed system, zero external dependencies, directly queryable with SQL, backed up with `cp`, inspectable with any SQLite client. WAL mode allows multiple concurrent readers while a single writer holds the lock, which is sufficient for the access pattern of this system.
 
 **Worker pool.** Actor execution runs in worker threads to avoid blocking the event loop. Each thread manages up to `ACTORS_PER_WORKER` XState actor instances. The LRU hot registry keeps recently-accessed actors in the pool. Cold actors (not recently accessed) are evicted from memory and their state is spilled to SQLite synchronously; they are rehydrated into a thread on next event arrival.
+
+**Priority queue.** Each worker slot holds a three-tier queue: `high` (dashboard requests, `X-Priority: high`), `normal` (default API calls), and `low` (background migrate-worker jobs). The scheduler serves 3 high → 2 normal → 1 low per round. Within each tier, requests are served in per-org round-robin so a single org's burst cannot starve other orgs at the same priority level. Queue stats are exposed at `GET /v1/health/queues`.
+
+**Event coalescing.** When a worker slot finishes a job, it looks ahead in the same-org, same-tier queue for consecutive EVENT messages targeting the same actor. Up to 8 are batched into a single `BATCH_EVENTS` dispatch. This reduces inter-thread IPC and lets fingerprint chaining happen in-worker across the batch in a single pass.
+
+**Deferred write buffer.** State updates, events, and migration decisions are collected in an in-process buffer and flushed to SQLite in a single transaction every 50ms. If 200 items accumulate before the timer fires, the buffer flushes immediately. Crash window is at most 50ms of unwritten state.
 
 **Fingerprint chain.** Every event processed by an actor updates its history fingerprint: `fp = fnv1aUpdate(fp, eventType)`. The fingerprint starts from `FNV_OFFSET` (the standard 64-bit FNV-1a offset basis, `0xcbf29ce484222325`). The sentinel `'0'` stored in the database for a freshly spawned actor maps to `FNV_OFFSET` when the chain starts. The computation is identical in the C engine and the JavaScript worker.
 
@@ -405,6 +411,16 @@ console.log(state.stateValue); // 'paid'
 ```
 
 See [`sdk/README.md`](sdk/README.md) for full SDK documentation.
+
+---
+
+## API Reference
+
+Full endpoint documentation covering all routes, request/response shapes, error codes, and the priority queue header is in [`docs/API.md`](docs/API.md).
+
+For a step-by-step integration tutorial with curl examples, see [`docs/getting-started.md`](docs/getting-started.md).
+
+For backend developers integrating StateKeep into their apps, see [`docs/developer-guide.md`](docs/developer-guide.md).
 
 ---
 

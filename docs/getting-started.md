@@ -585,6 +585,8 @@ Click **API Explorer** in the sidebar (or navigate to `/api-explorer`). This is 
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/v1/health` | Health check — `{ status: "ok", engine: "real"\|"fallback" }` |
+| `GET` | `/v1/health/workers` | Worker heartbeat status (503 if any worker is stale) |
+| `GET` | `/v1/health/queues` | Worker priority queue stats — queued/served/avgWait per tier |
 | `GET` | `/v1/metrics` | Prometheus-format metrics |
 | `POST` | `/v1/auth/login` | Dashboard login — `{ username, password }` → `{ apiKey }` |
 
@@ -592,12 +594,23 @@ Click **API Explorer** in the sidebar (or navigate to `/api-explorer`). This is 
 
 ```json
 {
-  "id":           "string (required) — unique version ID",
-  "definition":   "object (required) — XState v5 machine config",
-  "parentId":     "string (optional) — previous version ID",
-  "historyPath":  "string[] (optional) — ordered event sequence to match",
-  "stateMapping": "{ oldState: newState } (optional) — rename actors in old states",
-  "confirmToken": "string (optional) — UUID from requires_confirmation response",
-  "refinement":   "integer (optional, default 1)"
+  "id":               "string (required) — unique version ID",
+  "definition":       "object (required) — XState v5 machine config",
+  "parentId":         "string (optional) — previous version ID",
+  "historyPath":      "string[] (optional) — ordered event sequence to match",
+  "stateMapping":     "{ oldState: newState } (optional) — rename actors in old states",
+  "contextTransform": "{ 'new.path': 'old.path' } (optional) — field renames in actor context during migration",
+  "confirmToken":     "string (optional) — UUID from requires_confirmation response",
+  "refinement":       "integer (optional, default 1)"
 }
 ```
+
+### POST /v1/actors/:id/event — priority header
+
+Add `X-Priority: high` to route the request to the high-priority worker queue. Default (no header) is `normal`. Background workers use `low` internally. You don't need this for typical application use — it's used by the dashboard for lower-latency reads.
+
+### Event idempotency
+
+Include `"idempotencyKey": "your-unique-key"` in the event body to make the call idempotent. If a request with the same key was already processed, the current actor state is returned without reprocessing. The key must match `[a-zA-Z0-9_\-:.]` and be at most 128 characters.
+
+For the full endpoint reference including webhooks, scheduled events, admin routes, and all response shapes, see `docs/API.md`.

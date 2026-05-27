@@ -330,22 +330,33 @@ await sk.deploy('order-v2', newDef, {
 });
 ```
 
+### Renaming context fields (`contextTransform`)
+
+When you rename fields in the actor context schema, use `contextTransform` to copy values to the new field names during migration. The old field is preserved (additive, not destructive):
+
+```js
+await sk.deploy('order-v2', newDef, {
+  parentId: 'order-v1',
+  contextTransform: {
+    'shipping.address': 'shippingAddress',  // new.path: old.path (dot notation)
+    'payment.method':   'paymentMethod',
+  },
+});
+```
+
+Old actors will have both `shippingAddress` (old) and `shipping.address` (new) in their context after migration. New actors spawned on v2 should use the new field names.
+
 ---
 
 ## Scheduled Events
 
-Schedule a future event for an actor:
+Schedule a future event for an actor. The API requires a `fireAt` unix millisecond timestamp:
 
 ```js
-// Fire in 1 hour
+// Fire in 1 hour — compute fireAt from now + delay
 const sched = await sk.schedule(actorId, 'SEND_REMINDER', {
-  delay: 60 * 60 * 1000,  // milliseconds from now
+  fireAt: Date.now() + 60 * 60 * 1000,  // unix ms timestamp (required)
   payload: { message: 'Your order is waiting' },
-});
-
-// Or fire at a specific time
-const sched = await sk.schedule(actorId, 'SEND_REMINDER', {
-  fireAt: Date.now() + 3600000,  // unix ms timestamp
 });
 
 // Cancel before it fires

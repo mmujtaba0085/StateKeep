@@ -1,6 +1,6 @@
 # StateKeep Deployment Guide
 
-Production deployment checklist, Nginx TLS termination config, and systemd unit files.
+Production deployment checklist, Caddy/Nginx TLS termination config, and systemd unit files. For the full API reference, see `docs/API.md`.
 
 ---
 
