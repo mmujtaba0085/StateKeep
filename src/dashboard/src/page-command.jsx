@@ -11,8 +11,9 @@ function DefinitionCard({ d, selected, onClick }) {
   },
     React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "flex-start" } },
       React.createElement("div", null,
-        React.createElement("h3", { className: "mfc-name" }, d.machineId || d.id),
-        React.createElement("div", { className: "mfc-id" }, d.id)
+        React.createElement("h3", { className: "mfc-name" }, d.id),
+        d.machineId && d.machineId !== d.id &&
+          React.createElement("div", { className: "mfc-id" }, "machine: " + d.machineId)
       ),
       React.createElement("div", { className: "mono muted", style: { fontSize: 10.5, textAlign: "right" } },
         (d._actorCount || 0).toLocaleString(),
@@ -22,7 +23,7 @@ function DefinitionCard({ d, selected, onClick }) {
     React.createElement("div", { className: "mfc-chips" },
       React.createElement(Pill, { kind: "green", glow: (d._actorCount || 0) > 0 }, (d._actorCount || 0).toLocaleString(), " active"),
       d.status === "deprecated" && React.createElement(Pill, { kind: "muted" }, "deprecated"),
-      d.parentId && React.createElement(Pill, { kind: "purple" }, "has parent")
+      d.parentId && React.createElement(Pill, { kind: "purple" }, "↑ " + d.parentId)
     )
   );
 }
@@ -41,8 +42,10 @@ function DefinitionDetail({ def }) {
   return React.createElement("div", { className: "diagram-wrap" },
     React.createElement("div", { className: "diagram-h" },
       React.createElement("div", null,
-        React.createElement("h3", { className: "diagram-title" }, def.machineId || def.id),
-        React.createElement("div", { className: "muted", style: { fontSize: 11, marginTop: 3, fontFamily: "JetBrains Mono, monospace" } }, def.id)
+        React.createElement("h3", { className: "diagram-title" }, def.id),
+        def.machineId && def.machineId !== def.id &&
+          React.createElement("div", { className: "muted", style: { fontSize: 11, marginTop: 3, fontFamily: "JetBrains Mono, monospace" } },
+            "machine family: " + def.machineId)
       ),
       React.createElement("div", { className: "mono muted", style: { fontSize: 10.5 } }, "deployed: ", deployedAt)
     ),
@@ -60,7 +63,7 @@ function DefinitionDetail({ def }) {
           )
         : React.createElement("div", { className: "muted", style: { fontSize: 12 } }, "No state data available — deploy a definition to see states."),
       def.parentId && React.createElement("div", { style: { marginTop: 14, fontSize: 11.5, color: "var(--muted)" } },
-        "Parent definition: ", React.createElement("span", { className: "mono" }, def.parentId)
+        "Parent: ", React.createElement("span", { className: "mono" }, def.parentId)
       )
     )
   );
