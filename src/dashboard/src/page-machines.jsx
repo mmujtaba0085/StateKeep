@@ -49,8 +49,9 @@ function DefinitionDetail({ def }) {
   return React.createElement("div", { className: "machine-detail" },
     React.createElement("div", { style: { display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 14 } },
       React.createElement("div", null,
-        React.createElement("h2", { className: "display", style: { fontSize: 22, fontWeight: 600, margin: 0 } }, def.machineId || def.id),
-        React.createElement("div", { className: "mono muted", style: { marginTop: 4, fontSize: 11 } }, def.id)
+        React.createElement("h2", { className: "display", style: { fontSize: 22, fontWeight: 600, margin: 0 } }, def.id),
+        def.machineId && def.machineId !== def.id &&
+          React.createElement("div", { className: "mono muted", style: { marginTop: 4, fontSize: 11 } }, "machine: " + def.machineId)
       ),
       React.createElement("a", { href: "#deploy", className: "btn" }, Icons.Plus({ size: 12 }), "Deploy new version")
     ),
