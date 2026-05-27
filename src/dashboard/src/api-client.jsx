@@ -73,6 +73,7 @@ const Api = (() => {
         err.status = res.status;
         throw err;
       }
+      if (res.status === 204 || res.headers.get('content-length') === '0') return null;
       return res.json();
     },
 
