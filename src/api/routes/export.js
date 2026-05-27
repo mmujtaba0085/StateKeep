@@ -11,7 +11,7 @@
  */
 
 import { getDb, decrypt }              from '../../registry/db.js';
-import { findActorById }               from '../../registry/actorRepo.js';
+import { findActorById, getActorIdentity } from '../../registry/actorRepo.js';
 import { findDefinitionsByMachine }    from '../../registry/definitionRepo.js';
 
 const MACHINE_EXPORT_LIMIT = 5_000;
@@ -102,12 +102,20 @@ export async function exportRoutes(fastify) {
         required: ['id'],
         properties: { id: { type: 'string' } },
       },
+      querystring: {
+        type: 'object',
+        properties: {
+          limit:  { type: 'integer', minimum: 1, maximum: 10000, default: 1000 },
+          format: { type: 'string', enum: ['json', 'csv'], default: 'json' },
+        },
+      },
     },
   }, async (request, reply) => {
-    const { id } = request.params;
+    const { id }             = request.params;
+    const { limit, format }  = request.query;
 
-    const actor = findActorById(id);
-    if (!actor || actor.orgId !== request.orgId) {
+    const identity = getActorIdentity(id);
+    if (!identity || identity.orgId !== request.orgId) {
       return reply.code(404).send({ error: `Actor ${id} not found` });
     }
 
@@ -116,22 +124,39 @@ export async function exportRoutes(fastify) {
       SELECT id, event_type, event_payload, tick, processed_at
       FROM events
       WHERE actor_id = ?
-      ORDER BY id ASC
-    `).all(id);
+      ORDER BY id DESC
+      LIMIT ?
+    `).all(id, limit ?? 1000);
 
+    rows.reverse(); // return in chronological order
+
+    if (format === 'csv') {
+      const csvHeader = 'id,event_type,tick,processed_at\n';
+      const csvRows   = rows.map(r =>
+        [csvCell(r.id), csvCell(r.event_type), csvCell(r.tick), csvCell(r.processed_at)].join(',')
+      ).join('\n');
+      return reply
+        .type('text/csv')
+        .header('Content-Disposition', `attachment; filename="actor-${id}-events.csv"`)
+        .send(csvHeader + csvRows);
+    }
+
+    const actor = findActorById(id);
     return reply.send({
       actor: {
-        id:                 actor.id,
-        definitionId:       actor.definitionId,
-        stateValue:         actor.stateValue,
-        context:            actor.context,
-        status:             actor.status,
-        logicalStartTick:   actor.logicalStartTick,
-        historyFingerprint: actor.historyFingerprint,
-        createdAt:          actor.createdAt,
-        updatedAt:          actor.updatedAt,
+        id:                 identity.id,
+        definitionId:       actor?.definitionId,
+        stateValue:         actor?.stateValue,
+        context:            actor?.context,
+        status:             identity.status,
+        logicalStartTick:   actor?.logicalStartTick,
+        historyFingerprint: actor?.historyFingerprint,
+        createdAt:          actor?.createdAt,
+        updatedAt:          actor?.updatedAt,
       },
       events:     decodeEvents(rows),
+      eventCount: rows.length,
+      limited:    rows.length === (limit ?? 1000),
       exportedAt: new Date().toISOString(),
     });
   });

@@ -115,6 +115,10 @@ function ActorDrawer({ actor, open, onClose, onActionDone, pushToast }) {
     setHistory([]);
     setScheduled([]);
     setHistLoading(true);
+    setSending(false);
+    setTerminating(false);
+    setEventType("");
+    setEventPayload("");
     // full detail (includes context)
     Api.get("/v1/actors/" + actor.id)
       .then(d => setDetail(d))
@@ -193,8 +197,15 @@ function ActorDrawer({ actor, open, onClose, onActionDone, pushToast }) {
       .catch(e => pushToast({ kind: "error", title: "Rescue failed", desc: e.message }));
   };
 
-  const handleExport = () => {
-    Api.get("/v1/actors/" + actor.id + "/export")
+  const handleExport = (fmt) => {
+    const path = "/v1/actors/" + actor.id + "/export?limit=1000&format=" + (fmt || "json");
+    if (fmt === "csv") {
+      // CSV is a direct download via anchor, not through Api.get
+      const a = document.createElement("a");
+      a.href = path; a.download = actor.id + "-events.csv"; a.click();
+      return;
+    }
+    Api.get(path)
       .then(data => {
         const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
         const url = URL.createObjectURL(blob);
@@ -282,7 +293,8 @@ function ActorDrawer({ actor, open, onClose, onActionDone, pushToast }) {
       // Actions
       React.createElement("div", { className: "drawer-section" },
         React.createElement("div", { style: { display: "flex", gap: 8 } },
-          React.createElement("button", { className: "btn", onClick: handleExport }, Icons.Download({ size: 12 }), " Export JSON"),
+          React.createElement("button", { className: "btn", onClick: () => handleExport("json") }, Icons.Download({ size: 12 }), " JSON"),
+          React.createElement("button", { className: "btn", onClick: () => handleExport("csv") }, Icons.Download({ size: 12 }), " CSV"),
           React.createElement("button", { className: "btn btn-ghost", onClick: handleTerminate, disabled: terminating, style: { color: "var(--red)" } }, terminating ? "…" : "Terminate")
         ),
         isRescue && React.createElement("div", { style: { marginTop: 14, padding: 14, background: "var(--red-bg)", border: "1px solid var(--red-bd)", borderRadius: 8 } },
@@ -345,15 +357,27 @@ function PageActors() {
     return () => clearTimeout(t);
   }, [selectedActor]);
 
-  const handleExportAll = () => {
+  const handleExportAll = (fmt) => {
     const params = new URLSearchParams({ limit: 500 });
     if (statusF !== "all") params.set("status", statusF);
     Api.get("/v1/actors?" + params)
       .then(data => {
-        const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+        let content, mime, ext;
+        if (fmt === "csv") {
+          const headers = "id,definitionId,state,status,updatedAt,createdAt\n";
+          const rows = (data.actors || []).map(a =>
+            [a.id, a.definitionId, a.stateValue || "", a.status, a.updatedAt || "", a.createdAt || ""]
+              .map(v => { const s = String(v ?? ""); return s.includes(",") || s.includes('"') ? '"' + s.replace(/"/g,'""') + '"' : s; })
+              .join(",")
+          ).join("\n");
+          content = headers + rows; mime = "text/csv"; ext = "csv";
+        } else {
+          content = JSON.stringify(data, null, 2); mime = "application/json"; ext = "json";
+        }
+        const blob = new Blob([content], { type: mime });
         const url = URL.createObjectURL(blob);
         const a = document.createElement("a");
-        a.href = url; a.download = "actors-export.json"; a.click();
+        a.href = url; a.download = "actors-export." + ext; a.click();
         URL.revokeObjectURL(url);
       })
       .catch(e => pushToast({ kind: "error", title: "Export failed", desc: e.message }));
@@ -393,7 +417,8 @@ function PageActors() {
       React.createElement("div", { className: "results-count" },
         loading ? "Loading…" : error ? "Error" : ("Showing " + filtered.length + " of " + actors.length)
       ),
-      React.createElement("button", { className: "btn btn-ghost", onClick: handleExportAll }, Icons.Download({ size: 12 }), " Export"),
+      React.createElement("button", { className: "btn btn-ghost", onClick: () => handleExportAll("json") }, Icons.Download({ size: 12 }), " JSON"),
+      React.createElement("button", { className: "btn btn-ghost", onClick: () => handleExportAll("csv") }, Icons.Download({ size: 12 }), " CSV"),
       React.createElement("button", { className: "btn btn-primary", onClick: () => setShowSpawn(true) }, Icons.Plus({ size: 12 }), " Spawn Actor")
     ),
     React.createElement("div", { className: "table-shell", style: { height: "calc(100vh - 70px - 56px)" } },
