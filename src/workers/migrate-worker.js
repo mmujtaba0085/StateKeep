@@ -21,7 +21,7 @@ import { fingerprintToBigInt } from '../ffi/hashUtils.js';
 import { incrementMigrated, incrementFailed, updateDeploymentStatus, findDeploymentById } from '../registry/deploymentRepo.js';
 import { migrateActor, invalidateDefinitionCache } from '../runtime/actorManager.js';
 import { getEngine, engineReady } from '../ffi/engine.js';
-import { loadChangepointsAfter, loadParChangepointsAfter } from '../registry/changepointRepo.js';
+import { loadChangepointsAfter, loadParChangepointsAfter, getWildcardChildDef } from '../registry/changepointRepo.js';
 
 const BATCH_SIZE    = 100;
 const POLL_INTERVAL = 500;   // ms
@@ -113,7 +113,10 @@ async function processJob(job) {
   // Use the same logicalTime as the server used when creating the job: if the actor has already
   // migrated at least once (currentDeployedAt > logicalStartTick), search strictly after the
   // current definition's registration tick so chained deployments are found correctly.
-  if (eng.available && actorBefore) {
+  //
+  // Skip recheck for needs_rescue actors: they cannot receive events so their fingerprint is
+  // frozen. The recheck would always cancel their jobs (wildcard prefix never matches fp≠0).
+  if (eng.available && actorBefore && actorBefore.status !== 'needs_rescue') {
     let recheck = null;
     try {
       const actorCurrentDef    = findDefinitionById(actorBefore.definitionId);
@@ -128,6 +131,16 @@ async function processJob(job) {
         recheckLogicalTime,
         BigInt(currentTick)
       );
+
+      // Wildcard fallback: the C engine performs exact prefix matching so prefix_hash=0
+      // never matches a non-zero actor fingerprint. Fall back to the DB wildcard lookup
+      // (same logic as the inline migration path in actorManager.sendEvent).
+      if (!recheck) {
+        recheck = getWildcardChildDef(
+          actorBefore.definitionId,
+          actorBefore.logicalStartTick ?? 0
+        );
+      }
     } catch {}
 
     if (!recheck || recheck !== target_def_id) {
@@ -202,6 +215,11 @@ async function processJob(job) {
       // Actor cannot be migrated — tag needs_rescue, do NOT call actorStarted
       console.warn(`[migrate-worker] Job ${id}: actor ${actor_id} needs_rescue — ${err.message}`);
       updateActorStatus(actor_id, 'needs_rescue');
+      // Advance definitionId to target so the NEXT version's deploy (child of target_def_id)
+      // includes this actor in its migration jobs. Without this the actor stays on the old
+      // definition and is invisible to future rescue deployments in the lineage.
+      db.prepare(`UPDATE actors SET definition_id = ? WHERE id = ?`).run(target_def_id, actor_id);
+      evictFromApiCache(actor_id);
 
       db.prepare(`
         INSERT INTO events (actor_id, org_id, event_type, event_payload, tick, processed_at)
