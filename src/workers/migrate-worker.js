@@ -114,9 +114,16 @@ async function processJob(job) {
   // migrated at least once (currentDeployedAt > logicalStartTick), search strictly after the
   // current definition's registration tick so chained deployments are found correctly.
   //
-  // Skip recheck for needs_rescue actors: they cannot receive events so their fingerprint is
-  // frozen. The recheck would always cancel their jobs (wildcard prefix never matches fp≠0).
-  if (eng.available && actorBefore && actorBefore.status !== 'needs_rescue') {
+  // Skip recheck when:
+  //   (a) needs_rescue — fingerprint is frozen (no events allowed), recheck always cancels.
+  //   (b) wildcard deploy — all actors are eligible by definition (target has no _historyPath),
+  //       so there is no fingerprint criterion to verify. The C engine can only do exact-prefix
+  //       matching; prefix_hash=0 never matches fp≠0, causing false cancellations for every
+  //       actor with event history — including multi-hop chains (v1→v2→v3 where only v1→v2
+  //       appears as the next wildcard hop).
+  const targetDefForRecheck = actorBefore ? findDefinitionById(target_def_id) : null;
+  const isWildcardDeploy    = !targetDefForRecheck?.definitionJson?._historyPath;
+  if (eng.available && actorBefore && actorBefore.status !== 'needs_rescue' && !isWildcardDeploy) {
     let recheck = null;
     try {
       const actorCurrentDef    = findDefinitionById(actorBefore.definitionId);
