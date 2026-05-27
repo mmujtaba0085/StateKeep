@@ -193,6 +193,7 @@ export async function webhookRoutes(fastify) {
   });
 
   // ── DELETE /v1/webhooks/:id ────────────────────────────────────────────────
+  // Hard-deletes the webhook and all its delivery history.
   fastify.delete('/v1/webhooks/:id', {
     schema: {
       params: {
@@ -202,13 +203,18 @@ export async function webhookRoutes(fastify) {
       },
     },
   }, async (request, reply) => {
-    const row = getDb().prepare(`
+    const db  = getDb();
+    const row = db.prepare(`
       SELECT id FROM webhooks WHERE id = ? AND org_id = ?
     `).get(request.params.id, request.orgId);
 
     if (!row) return reply.code(404).send({ error: `Webhook ${request.params.id} not found` });
 
-    getDb().prepare(`UPDATE webhooks SET active = 0 WHERE id = ?`).run(request.params.id);
+    db.transaction(() => {
+      db.prepare(`DELETE FROM webhook_deliveries WHERE webhook_id = ?`).run(request.params.id);
+      db.prepare(`DELETE FROM webhooks WHERE id = ?`).run(request.params.id);
+    })();
+
     return reply.code(204).send();
   });
 

@@ -194,10 +194,38 @@ function PageWebhooks() {
   const onPing = async (id, url) => {
     setSaving(id + "_ping");
     try {
-      await Api.post("/v1/webhooks/" + id + "/ping", {});
-      pushToast({ kind: "success", title: "Ping queued", desc: url });
+      const { deliveryId } = await Api.post("/v1/webhooks/" + id + "/ping", {});
+      pushToast({ kind: "info", title: "Ping queued — checking delivery…", desc: url });
+      // Webhook worker polls every 2s. Wait 2.5s then check result.
+      setTimeout(async () => {
+        try {
+          const data = await Api.get("/v1/webhooks/" + id + "/deliveries?limit=5");
+          const delivery = (data.deliveries || []).find(d => d.id === deliveryId);
+          if (delivery?.status === "delivered") {
+            pushToast({ kind: "success", title: "Ping delivered ✓", desc: `HTTP ${delivery.responseCode} — ${url}` });
+          } else if (delivery?.status === "failed") {
+            pushToast({ kind: "error", title: "Ping failed", desc: delivery.error || `HTTP ${delivery.responseCode || "?"}` });
+          } else {
+            pushToast({ kind: "info", title: "Ping in queue", desc: "Delivery pending — check the deliveries list" });
+          }
+        } catch {}
+      }, 2500);
     } catch (err) {
       pushToast({ kind: "error", title: "Ping failed", desc: err.message });
+    } finally {
+      setSaving(null);
+    }
+  };
+
+  const onRemove = async (id, url) => {
+    if (!window.confirm(`Remove webhook?\n${url}\n\nThis deletes all delivery history and cannot be undone.`)) return;
+    setSaving(id + "_remove");
+    try {
+      await Api.delete("/v1/webhooks/" + id);
+      setWebhooks(ws => ws.filter(w => w.id !== id));
+      pushToast({ kind: "success", title: "Webhook removed" });
+    } catch (err) {
+      pushToast({ kind: "error", title: "Remove failed", desc: err.message });
     } finally {
       setSaving(null);
     }
@@ -268,7 +296,7 @@ function PageWebhooks() {
                   React.createElement("th", null, "Status"),
                   React.createElement("th", { style: { width: 90 } }, "Failures"),
                   React.createElement("th", { style: { width: 120 } }, "Last delivery"),
-                  React.createElement("th", { style: { width: 200, textAlign: "right" } }, "Actions")
+                  React.createElement("th", { style: { width: 260, textAlign: "right" } }, "Actions")
                 )
               ),
               React.createElement("tbody", null,
@@ -305,7 +333,13 @@ function PageWebhooks() {
                         disabled: saving === w.id + "_toggle",
                         onClick: () => onToggle(w.id, w.active),
                         style: w.active ? {} : { color: "var(--green)", borderColor: "var(--green-bd)", background: "var(--green-bg)" }
-                      }, saving === w.id + "_toggle" ? "…" : w.active ? "Deactivate" : "Activate")
+                      }, saving === w.id + "_toggle" ? "…" : w.active ? "Deactivate" : "Activate"),
+                      React.createElement("button", {
+                        className: "btn btn-sm",
+                        disabled: saving === w.id + "_remove",
+                        onClick: () => onRemove(w.id, w.url),
+                        style: { color: "var(--red, #ef4444)", borderColor: "var(--red-bd, #fca5a5)", background: "var(--red-bg, #fef2f2)" }
+                      }, saving === w.id + "_remove" ? "…" : "Remove")
                     )
                   )
                 ))
