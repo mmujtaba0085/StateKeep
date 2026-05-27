@@ -44,8 +44,16 @@ async function evictFromApiCache(actorId) {
 console.log('[migrate-worker] Starting...');
 
 await engineReady;
-getDb();  // bootstrap DB
+const _db = getDb();  // bootstrap DB
 startHeartbeat('migrate');
+
+// On startup, reset any jobs left in 'processing' from a previous crashed run.
+// Safe to re-process: wildcard HYDRATEs are idempotent, and the recheck in
+// processJob will catch actors that already migrated.
+const _orphaned = _db.prepare(`UPDATE migration_jobs SET status='pending' WHERE status='processing'`).run();
+if (_orphaned.changes > 0) {
+  console.log(`[migrate-worker] Reset ${_orphaned.changes} orphaned processing jobs to pending`);
+}
 
 // Cursors track the highest id already registered for each changepoint type.
 let _lastChangepointId    = 0;
