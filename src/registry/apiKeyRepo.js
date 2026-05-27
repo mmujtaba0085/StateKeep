@@ -17,6 +17,12 @@ import { randomBytes } from 'crypto';
 
 const BCRYPT_ROUNDS = 10;
 
+// Short-lived cache: rawKey → { keyInfo, cachedAt }
+// Eliminates repeated bcrypt comparisons (each ~100–200ms) for the same key.
+// TTL is intentionally short so revocations propagate within 60 s.
+const KEY_CACHE     = new Map();
+const KEY_CACHE_TTL = 60_000;
+
 let stmts = null;
 
 function getStmts() {
@@ -66,29 +72,51 @@ export async function createApiKey({ label, tier = 'free', orgId }) {
 }
 
 /**
- * Validate a raw key. O(1) for new-format keys, O(n) fallback for legacy keys.
- * Returns { keyId, label, tier, orgId } or null.
+ * Validate a raw key. Returns { keyId, label, tier, orgId } or null.
+ *
+ * Results are cached for KEY_CACHE_TTL ms so bcrypt (100–200ms per call)
+ * only runs once per key per window, not on every request.
+ * Invalid keys are never cached to avoid memory exhaustion from bad-key floods.
  */
 export async function validateApiKey(rawKey) {
+  const cached = KEY_CACHE.get(rawKey);
+  if (cached && (Date.now() - cached.cachedAt) < KEY_CACHE_TTL) {
+    return cached.keyInfo;
+  }
+
   const s = getStmts();
+  let keyInfo = null;
 
   // New format: sk_<keyId>_<secret>
   const match = rawKey.match(/^sk_([0-9a-f]{8})_([0-9a-f]{40})$/);
   if (match) {
     const [, keyId, secret] = match;
     const row = s.findByKeyId.get(keyId);
-    if (!row) return null;
-    const ok = await bcrypt.compare(secret, row.key_hash);
-    return ok ? { keyId: row.key_id, label: row.label, tier: row.tier, orgId: row.org_id ?? 'default' } : null;
+    if (row) {
+      const ok = await bcrypt.compare(secret, row.key_hash);
+      if (ok) keyInfo = { keyId: row.key_id, label: row.label, tier: row.tier, orgId: row.org_id ?? 'default' };
+    }
+  } else {
+    // Legacy format: full raw key hashed — scan all (keep key count low)
+    const rows = s.findAll.all();
+    for (const row of rows) {
+      const ok = await bcrypt.compare(rawKey, row.key_hash);
+      if (ok) { keyInfo = { keyId: row.key_id ?? null, label: row.label, tier: row.tier, orgId: row.org_id ?? 'default' }; break; }
+    }
   }
 
-  // Legacy format: full raw key hashed — scan all (keep key count low)
-  const rows = s.findAll.all();
-  for (const row of rows) {
-    const ok = await bcrypt.compare(rawKey, row.key_hash);
-    if (ok) return { keyId: row.key_id ?? null, label: row.label, tier: row.tier, orgId: row.org_id ?? 'default' };
+  if (keyInfo) KEY_CACHE.set(rawKey, { keyInfo, cachedAt: Date.now() });
+  return keyInfo;
+}
+
+/**
+ * Remove any cache entry associated with a keyId.
+ * Call after revoke or rotate so the old key stops being accepted immediately.
+ */
+export function invalidateKeyCache(keyId) {
+  for (const [raw, entry] of KEY_CACHE) {
+    if (entry.keyInfo?.keyId === keyId) KEY_CACHE.delete(raw);
   }
-  return null;
 }
 
 /**
@@ -110,6 +138,7 @@ export function listApiKeys() {
  */
 export function revokeApiKey(keyId) {
   getStmts().deleteByKeyId.run(keyId);
+  invalidateKeyCache(keyId);
 }
 
 /**
@@ -126,6 +155,7 @@ export async function rotateApiKey(keyId, orgId) {
   const hash   = await bcrypt.hash(secret, BCRYPT_ROUNDS);
 
   s.updateHash.run(hash, keyId);
+  invalidateKeyCache(keyId);
   return { rawKey, keyId, label: row.label, tier: row.tier, rotatedAt: Date.now() };
 }
 
