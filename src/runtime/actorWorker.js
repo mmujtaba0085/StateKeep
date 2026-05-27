@@ -139,12 +139,23 @@ function buildDefaultGuards(definitionJson) {
   return guards;
 }
 
+// Compiled machine cache — keyed by definition ID (string).
+// XState machines are immutable once created, so per-worker caching is safe.
+const _machineCache = new Map();
+
+function getOrCacheMachine(cacheKey, definitionJson) {
+  if (cacheKey && _machineCache.has(cacheKey)) return _machineCache.get(cacheKey);
+  const machine = createMachine(definitionJson).provide({ guards: buildDefaultGuards(definitionJson) });
+  if (cacheKey) _machineCache.set(cacheKey, machine);
+  return machine;
+}
+
 // ── Handlers ──────────────────────────────────────────────────────────────────
 
-function handleSpawn({ actorId, definitionJson, stateSnapshot, initialContext }) {
+function handleSpawn({ actorId, definitionId, definitionJson, stateSnapshot, initialContext }) {
   if (actors.has(actorId)) return getSnapshot(actorId);
 
-  const machine = createMachine(definitionJson).provide({ guards: buildDefaultGuards(definitionJson) });
+  const machine = getOrCacheMachine(definitionId, definitionJson);
   let actor;
 
   if (stateSnapshot) {
@@ -249,7 +260,7 @@ export function resolveLandingState(currentStateValue, newMachineStates, stateMa
   return null;
 }
 
-function handleHydrate({ actorId, targetDefinitionJson, oldContext, currentStateValue, stateMapping, existingFingerprint, contextTransform }) {
+function handleHydrate({ actorId, targetDefinitionId, targetDefinitionJson, oldContext, currentStateValue, stateMapping, existingFingerprint, contextTransform }) {
   // Stop existing actor if present
   const existing = actors.get(actorId);
   if (existing) {
@@ -257,7 +268,7 @@ function handleHydrate({ actorId, targetDefinitionJson, oldContext, currentState
     actors.delete(actorId);
   }
 
-  const machine   = createMachine(targetDefinitionJson).provide({ guards: buildDefaultGuards(targetDefinitionJson) });
+  const machine   = getOrCacheMachine(targetDefinitionId, targetDefinitionJson);
   const newStates = targetDefinitionJson.states ?? {};
 
   // Apply context transform — errors here must abort migration (INVARIANT 3)

@@ -149,6 +149,7 @@ async function ensureInWorker(actorId, actor, priority = 'normal', orgId = '_sys
   await pool.send(actorId, {
     type:           'SPAWN',
     actorId,
+    definitionId:   actor.definitionId,
     definitionJson: def.definitionJson,
     stateSnapshot:  actor.stateValue
       ? { value: actor.stateValue, context: actor.context, status: 'active' }
@@ -188,6 +189,7 @@ export async function spawnActor({ definitionId, orgId, initialContext, logicalS
   const workerResult = await pool.send(actorId, {
     type:           'SPAWN',
     actorId,
+    definitionId:   def.id,
     definitionJson: def.definitionJson,
     initialContext: initialContext && Object.keys(initialContext).length > 0 ? initialContext : undefined,
   });
@@ -611,6 +613,7 @@ export async function migrateActor(actorId, targetDefinitionId, { priority = 'no
   const result = await pool.send(actorId, {
     type:                 'HYDRATE',
     actorId,
+    targetDefinitionId,
     targetDefinitionJson: targetDef.definitionJson,
     oldContext:           actor.context,
     currentStateValue:    actor.stateValue,

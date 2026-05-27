@@ -23,7 +23,7 @@ import { migrateActor, invalidateDefinitionCache } from '../runtime/actorManager
 import { getEngine, engineReady } from '../ffi/engine.js';
 import { loadChangepointsAfter, loadParChangepointsAfter, getWildcardChildDef } from '../registry/changepointRepo.js';
 
-const BATCH_SIZE    = 100;
+const BATCH_SIZE    = 500;
 const POLL_INTERVAL = 500;   // ms
 
 const API_PORT  = process.env.PORT ?? 3001;
