@@ -46,6 +46,7 @@ function SpawnModal({ onClose, onSpawned, pushToast }) {
   const [actorId, setActorId] = useState2("");
   const [ctx, setCtx] = useState2("{}");
   const [busy, setBusy] = useState2(false);
+  const [defsLoading, setDefsLoading] = useState2(true);
 
   useEffect2(() => {
     Api.get("/v1/definitions?limit=100")
@@ -54,7 +55,8 @@ function SpawnModal({ onClose, onSpawned, pushToast }) {
         setDefs(list);
         if (list.length > 0) setDefId(list[0].id);
       })
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => setDefsLoading(false));
   }, []);
 
   const submit = () => {
@@ -78,7 +80,9 @@ function SpawnModal({ onClose, onSpawned, pushToast }) {
       ),
       React.createElement("div", { className: "modal-body" },
         React.createElement("label", { className: "field-label" }, "Definition"),
-        defs.length > 0
+        defsLoading
+          ? React.createElement("div", { className: "muted", style: { fontSize: 11, padding: "8px 0", marginBottom: 12 } }, "Loading definitions…")
+          : defs.length > 0
           ? React.createElement("select", { className: "input mono", value: defId, onChange: e => setDefId(e.target.value), style: { marginBottom: 12 } },
               defs.map(d => React.createElement("option", { key: d.id, value: d.id }, d.id))
             )

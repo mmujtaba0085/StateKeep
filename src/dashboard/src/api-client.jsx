@@ -51,7 +51,7 @@ const Api = (() => {
     },
 
     async request(method, path, body) {
-      const headers = { 'Content-Type': 'application/json' };
+      const headers = { 'Content-Type': 'application/json', 'X-Priority': 'high' };
       if (_key) headers['X-Api-Key'] = _key;
       const res = await fetch(path, {
         method,

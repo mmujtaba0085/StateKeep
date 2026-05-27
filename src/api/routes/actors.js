@@ -133,6 +133,7 @@ export async function actorRoutes(fastify) {
     }
 
     const event = { type: eventType, ...(payload ?? {}) };
+    const priority = request.headers['x-priority'] === 'high' ? 'high' : 'normal';
 
     try {
       const encPayload = payload
@@ -142,6 +143,7 @@ export async function actorRoutes(fastify) {
       const orgId   = request.orgId;
 
       const result = await sendEvent(id, event, tickNum, {
+        priority,
         eventData: {
           actor_id:        id,
           org_id:          orgId,
@@ -307,8 +309,9 @@ export async function actorRoutes(fastify) {
     }
 
     try {
+      const priority = request.headers['x-priority'] === 'high' ? 'high' : 'normal';
       const cancelled = cancelAllPendingForActor(id, request.orgId);
-      await terminateActor(id);
+      await terminateActor(id, { priority });
       return reply.code(200).send({ cancelled });
     } catch (err) {
       const code = err.message.includes('not found') ? 404 : 500;

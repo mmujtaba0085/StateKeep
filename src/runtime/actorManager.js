@@ -141,7 +141,7 @@ function touch(id, entry) {
   hotRegistry.set(id, entry);
 }
 
-async function ensureInWorker(actorId, actor) {
+async function ensureInWorker(actorId, actor, priority = 'normal') {
   const pool = getWorkerPool();
   const def  = cachedFindDefinition(actor.definitionId);
   if (!def) throw new Error(`Definition ${actor.definitionId} not found`);
@@ -153,7 +153,7 @@ async function ensureInWorker(actorId, actor) {
     stateSnapshot:  actor.stateValue
       ? { value: actor.stateValue, context: actor.context, status: 'active' }
       : undefined,
-  });
+  }, { priority });
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -236,7 +236,7 @@ export async function spawnActor({ definitionId, orgId, initialContext, logicalS
  *   both land in the same 50ms flush transaction.
  */
 export async function sendEvent(actorId, event, tick, opts = {}) {
-  const { eventData } = opts;
+  const { eventData, priority = 'normal' } = opts;
   const pool = getWorkerPool();
 
   // Load from hot registry or SQLite.
@@ -278,9 +278,9 @@ export async function sendEvent(actorId, event, tick, opts = {}) {
       // Evict the stale machine from the worker thread so SPAWN re-initialises with the
       // new definition. This happens when the migrate-worker (separate process) migrated
       // this actor while it was resident in our worker pool.
-      await pool.send(actorId, { type: 'TERMINATE', actorId }).catch(() => {});
+      await pool.send(actorId, { type: 'TERMINATE', actorId }, { priority }).catch(() => {});
     }
-    await ensureInWorker(actorId, actor);
+    await ensureInWorker(actorId, actor, priority);
     entry = {
       definitionId:       actor.definitionId,
       orgId:              actor.orgId,
@@ -382,7 +382,7 @@ export async function sendEvent(actorId, event, tick, opts = {}) {
       // Version swap: migrate first, then process event on new definition
       const fromDefId = entry.definitionId;
       try {
-        await migrateActor(actorId, targetDefId);
+        await migrateActor(actorId, targetDefId, { priority });
         // Evict ALL cached decisions for this actor/fromDef (key now includes fingerprint)
         const _prefix = `${actorId}:${fromDefId}:`;
         for (const key of migrationCheckCache.keys()) {
@@ -435,7 +435,7 @@ export async function sendEvent(actorId, event, tick, opts = {}) {
     event,
     historyFingerprint: entry.historyFingerprint,
     regionFingerprints: entry.regionFingerprints ?? null,
-  });
+  }, { priority });
 
   const newRegionFingerprints = result.regionFingerprints ?? entry.regionFingerprints ?? null;
 
@@ -558,7 +558,7 @@ export async function getActorState(actorId) {
 /**
  * Terminate an actor.
  */
-export async function terminateActor(actorId) {
+export async function terminateActor(actorId, { priority = 'normal' } = {}) {
   const pool = getWorkerPool();
 
   // Capture before removal so actorStopped gets accurate args
@@ -568,7 +568,7 @@ export async function terminateActor(actorId) {
   const lst    = hot?.logicalStartTick   ?? fromDb?.logicalStartTick   ?? 0;
 
   try {
-    await pool.send(actorId, { type: 'TERMINATE', actorId });
+    await pool.send(actorId, { type: 'TERMINATE', actorId }, { priority });
   } catch {}
 
   hotRegistry.delete(actorId);
@@ -592,7 +592,7 @@ export async function terminateActor(actorId) {
  * Migrate an actor to a new definition (called by migrate-worker and inline).
  * Throws with code 'STATE_NOT_MAPPABLE' if the actor's state cannot be resolved.
  */
-export async function migrateActor(actorId, targetDefinitionId) {
+export async function migrateActor(actorId, targetDefinitionId, { priority = 'normal' } = {}) {
   const pool   = getWorkerPool();
   const actor  = findActorById(actorId);
   if (!actor) throw new Error(`Actor not found: ${actorId}`);
@@ -612,7 +612,7 @@ export async function migrateActor(actorId, targetDefinitionId) {
     stateMapping,
     existingFingerprint:  actor.historyFingerprint,
     contextTransform,
-  });
+  }, { priority });
 
   if (result && result.error === 'STATE_NOT_MAPPABLE') {
     throw Object.assign(
