@@ -12,6 +12,7 @@
 import { spawnActor, sendEvent, getActorState, terminateActor } from '../../runtime/actorManager.js';
 import { getWriteBuffer } from '../../runtime/writeBuffer.js';
 import { findActorById, getActorIdentity, listActors, findNeedsRescueActors, updateActorStatus, getActorCountsByStatus } from '../../registry/actorRepo.js';
+import { findDefinitionById, findLatestInFamily } from '../../registry/definitionRepo.js';
 import { findDecisionsByActor } from '../../registry/jobRepo.js';
 import { cancelAllPendingForActor } from '../../registry/scheduledEventRepo.js';
 import { getDb } from '../../registry/db.js';
@@ -45,9 +46,19 @@ export async function actorRoutes(fastify) {
     const eng = getEngine();
     const tick = eng.clockTick();
 
+    // Resolve machineId alias → latest active version in that family.
+    // If the client passes 'my-machine' (the root ID) and there are newer
+    // versions deployed, the actor spawns directly on the latest version.
+    const rawDefinitionId = request.body.definitionId;
+    let resolvedDefinitionId = rawDefinitionId;
+    if (!findDefinitionById(rawDefinitionId)) {
+      const latest = findLatestInFamily(rawDefinitionId, request.orgId);
+      if (latest) resolvedDefinitionId = latest.id;
+    }
+
     try {
       const result = await spawnActor({
-        definitionId:     request.body.definitionId,
+        definitionId:     resolvedDefinitionId,
         orgId:            request.orgId,
         initialContext:   request.body.initialContext ?? {},
         logicalStartTick: Number(tick),
@@ -65,11 +76,12 @@ export async function actorRoutes(fastify) {
 
       recordLatency(Date.now() - t0);
       return reply.code(201).send({
-        id:           result.id,
-        definitionId: request.body.definitionId,
-        stateValue:   result.stateValue,
-        context:      result.context,
-        done:         result.done ?? false,
+        id:              result.id,
+        definitionId:    resolvedDefinitionId,
+        requestedAs:     rawDefinitionId !== resolvedDefinitionId ? rawDefinitionId : undefined,
+        stateValue:      result.stateValue,
+        context:         result.context,
+        done:            result.done ?? false,
       });
     } catch (err) {
       recordLatency(Date.now() - t0);
@@ -458,6 +470,22 @@ export async function actorRoutes(fastify) {
     const tick = Number(eng.clockTick());
     const db   = getDb();
 
+    // Pre-resolve all unique definitionIds to avoid N repeated DB lookups.
+    // Supports machine alias: if the ID doesn't match an exact definition,
+    // resolve to the latest active version in that family.
+    const resolvedIdCache = new Map();
+    for (const req of requests) {
+      const raw = req.definitionId;
+      if (!resolvedIdCache.has(raw)) {
+        if (findDefinitionById(raw)) {
+          resolvedIdCache.set(raw, raw);
+        } else {
+          const latest = findLatestInFamily(raw, request.orgId);
+          resolvedIdCache.set(raw, latest ? latest.id : raw);
+        }
+      }
+    }
+
     const created = [];
     const failed  = [];
 
@@ -467,14 +495,16 @@ export async function actorRoutes(fastify) {
       const slice = requests.slice(i, i + CONCURRENCY);
       const results = await Promise.allSettled(
         slice.map(req => spawnActor({
-          definitionId:     req.definitionId,
+          definitionId:     resolvedIdCache.get(req.definitionId),
           orgId:            request.orgId,
           initialContext:   req.initialContext ?? {},
           logicalStartTick: tick,
         }))
       );
       for (let j = 0; j < results.length; j++) {
-        const r = results[j];
+        const r   = results[j];
+        const raw = slice[j].definitionId;
+        const resolved = resolvedIdCache.get(raw);
         if (r.status === 'fulfilled') {
           const v = r.value;
           try {
@@ -483,9 +513,14 @@ export async function actorRoutes(fastify) {
               VALUES (?, ?, 'SPAWN', NULL, ?, ?)
             `).run(v.id, request.orgId, tick, Date.now());
           } catch {}
-          created.push({ id: v.id, definitionId: slice[j].definitionId, stateValue: v.stateValue });
+          created.push({
+            id:          v.id,
+            definitionId: resolved,
+            requestedAs:  raw !== resolved ? raw : undefined,
+            stateValue:   v.stateValue,
+          });
         } else {
-          failed.push({ index: i + j, definitionId: slice[j].definitionId, error: r.reason?.message ?? 'spawn failed' });
+          failed.push({ index: i + j, definitionId: raw, error: r.reason?.message ?? 'spawn failed' });
         }
       }
     }

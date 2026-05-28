@@ -544,16 +544,27 @@ Spawn a new actor instance.
 }
 ```
 
+**Machine alias (recommended pattern):** Pass the **machineId** (the root definition's `id`) instead of a specific version. The server resolves it to the latest non-deprecated version in that family automatically. This means client code never needs to track which version is "current" — new deployments are picked up on the next spawn without any client change.
+
+```json
+{ "definitionId": "loan" }
+```
+
+This works because every definition has a `machineId` — the ID of the first definition in its family, inherited through the `parentId` chain. Passing that root ID triggers the alias resolution.
+
 **Response 201:**
 ```json
 {
   "id":           "actor_7f3a1b2c...",
-  "definitionId": "loan-v2",
+  "definitionId": "loan-v3",
+  "requestedAs":  "loan",
   "stateValue":   "idle",
   "context":      { "applicantId": "usr-001", "amount": 50000 },
   "done":         false
 }
 ```
+
+`requestedAs` is present only when the provided `definitionId` was resolved to a different (newer) version. When an exact version ID was given, `requestedAs` is absent.
 
 ---
 
@@ -571,18 +582,25 @@ Spawn up to 500 actors in a single request. Processed in batches of 50 internall
 }
 ```
 
+The machine alias works here too: pass the machineId root ID in any item's `definitionId` and the server resolves it to the latest version. All unique definition IDs in the batch are resolved in a single pre-pass (not N per-actor DB lookups).
+
 **Response 207** (Multi-Status):
 ```json
 {
   "created": [
-    { "id": "actor_...", "definitionId": "loan-v2", "stateValue": "idle" }
+    {
+      "id":           "actor_...",
+      "definitionId": "loan-v3",
+      "requestedAs":  "loan",
+      "stateValue":   "idle"
+    }
   ],
   "failed":  [],
   "total":   2
 }
 ```
 
-Individual items in `failed` contain `{ index, error }` for diagnostic purposes.
+`requestedAs` appears in each created item when the provided ID was resolved to a different version. Items in `failed` contain `{ index, definitionId, error }`.
 
 ---
 
@@ -1186,13 +1204,14 @@ The `POST /v1/actors/:id/event` and `DELETE /v1/actors/:id` endpoints accept an 
 
 | Value | Queue | Used by |
 |-------|-------|---------|
-| `high` | High-priority queue (3/round) | Dashboard UI requests |
+| `urgent` | Urgent queue (burst mode) | Dashboard manual actions (send event, get state, terminate) |
+| `high` | High-priority queue (3/round) | Dashboard background polling |
 | `normal` | Normal queue (2/round) | Default for all API calls |
 | *(absent)* | Normal queue | Same as `normal` |
 
 Background workers (migrate-worker) use `low` priority internally (not client-settable).
 
-**Round-robin schedule:** 3 high → 2 normal → 1 low per round, then repeat. Within each tier, requests are served in per-org round-robin so one org's burst cannot starve another org at the same priority level.
+**Round-robin schedule:** 3 high → 2 normal → 1 low per round, then repeat. `urgent` requests get exclusive access for the first 5 seconds of continuous urgent load, then 1 urgent slot per round interleaved with the normal schedule. Within each tier, requests are served in per-org round-robin so one org's burst cannot starve another.
 
 You generally do not need to set `X-Priority` — the default `normal` is appropriate for all application-tier API calls. Use `high` only if you are building a dashboard-like UI that requires lower latency for read-after-write consistency.
 

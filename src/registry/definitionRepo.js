@@ -17,8 +17,14 @@ function getStmts() {
       INSERT INTO definitions (id, parent_id, machine_id, org_id, definition_json, deployed_at, status, created_at)
       VALUES (@id, @parent_id, @machine_id, @org_id, @definition_json, @deployed_at, 'active', @created_at)
     `),
-    findById:      db.prepare(`SELECT * FROM definitions WHERE id = ?`),
-    findByMachine: db.prepare(`SELECT * FROM definitions WHERE machine_id = ? AND org_id = ? ORDER BY deployed_at ASC`),
+    findById:          db.prepare(`SELECT * FROM definitions WHERE id = ?`),
+    findByMachine:     db.prepare(`SELECT * FROM definitions WHERE machine_id = ? AND org_id = ? ORDER BY deployed_at ASC`),
+    findLatestInFamily: db.prepare(`
+      SELECT * FROM definitions
+      WHERE machine_id = ? AND org_id = ? AND status != 'deprecated' AND status != 'pruned'
+      ORDER BY deployed_at DESC, created_at DESC
+      LIMIT 1
+    `),
     findByStatus:  db.prepare(`SELECT * FROM definitions WHERE status = ?`),
     deprecate:     db.prepare(`UPDATE definitions SET status = 'deprecated' WHERE id = ?`),
     prune:         db.prepare(`UPDATE definitions SET status = 'pruned' WHERE id = ?`),
@@ -68,6 +74,16 @@ export function createDefinition({ id, parentId, orgId, definitionJson, deployed
 export function findDefinitionsByMachine(machineId, orgId) {
   if (!orgId) throw new Error('orgId is required');
   return getStmts().findByMachine.all(machineId, orgId).map(rowToDefinition);
+}
+
+/**
+ * Resolve a machineId (family root ID) to its latest active version.
+ * Used for the spawn alias: POST /v1/actors { definitionId: 'my-machine' }
+ * resolves to the newest non-deprecated definition in that family.
+ */
+export function findLatestInFamily(machineId, orgId) {
+  if (!orgId) throw new Error('orgId is required');
+  return rowToDefinition(getStmts().findLatestInFamily.get(machineId, orgId));
 }
 
 export function findDefinitionById(id) {

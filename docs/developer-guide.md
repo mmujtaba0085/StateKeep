@@ -196,19 +196,38 @@ const actor = await sk.spawn('order-v1', {
 
 The `initialContext` is any JSON object — store whatever your backend needs later. It's AES-256-GCM encrypted at rest.
 
+### Machine alias (always spawn on the latest version)
+
+Instead of hardcoding a specific version ID, pass the **machine family ID** — the `id` of your first definition. The server automatically resolves it to the latest non-deprecated version in that family.
+
+```js
+// 'order' is the ID of your first deployed definition (the family root).
+// As you deploy order-v2, order-v3, etc., this call always lands on the latest.
+const actor = await sk.spawn('order', { orderId: 'ord-001' });
+console.log(actor.definitionId); // 'order-v3'  (latest version)
+console.log(actor.requestedAs);  // 'order'     (the alias you passed)
+```
+
+This works because every definition inherits a `machineId` from the root through the `parentId` chain. The `machineId` never changes across versions, so passing it always means "give me the newest one."
+
+**Why use this pattern:** When you deploy a new version, all new actors from that point automatically land on the latest — no client code change required. Your backend just always spawns with the family ID.
+
 ### Bulk spawn
 
 ```js
-// Spawn up to 500 actors in one request
+// Spawn up to 500 actors in one request.
+// Machine alias works per-item: 'order' resolves to the latest version for each.
 const actors = [
-  { definitionId: 'order-v1', initialContext: { orderId: 'ord-001' } },
-  { definitionId: 'order-v1', initialContext: { orderId: 'ord-002' } },
+  { definitionId: 'order', initialContext: { orderId: 'ord-001' } },
+  { definitionId: 'order', initialContext: { orderId: 'ord-002' } },
 ];
 const result = await fetch(`${base}/v1/actors/bulk`, {
   method: 'POST',
   headers: { 'X-API-Key': key, 'Content-Type': 'application/json' },
   body: JSON.stringify({ actors }),
 });
+// result.created[0].definitionId === 'order-v3'
+// result.created[0].requestedAs  === 'order'
 ```
 
 ### Read state
@@ -279,7 +298,7 @@ await sk.deploy('order-v2', {
 });
 ```
 
-Actors already on `order-v1` continue there. New actors spawn on `order-v2`.
+Actors already on `order-v1` continue there. New actors spawned with the machine alias (`'order'`) automatically land on `order-v2` — no client code change needed.
 
 ### Path-based routing (surgical migration)
 
