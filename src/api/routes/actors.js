@@ -47,11 +47,12 @@ export async function actorRoutes(fastify) {
     const tick = eng.clockTick();
 
     // Resolve machineId alias → latest active version in that family.
-    // If the client passes 'my-machine' (the root ID) and there are newer
-    // versions deployed, the actor spawns directly on the latest version.
+    // Triggers when: (a) exact ID not found, OR (b) user passed the family root
+    // ID (id === machineId), meaning "always give me the newest version".
     const rawDefinitionId = request.body.definitionId;
     let resolvedDefinitionId = rawDefinitionId;
-    if (!findDefinitionById(rawDefinitionId)) {
+    const exactDef = findDefinitionById(rawDefinitionId);
+    if (!exactDef || exactDef.machineId === rawDefinitionId) {
       const latest = findLatestInFamily(rawDefinitionId, request.orgId);
       if (latest) resolvedDefinitionId = latest.id;
     }
@@ -471,15 +472,18 @@ export async function actorRoutes(fastify) {
     const db   = getDb();
 
     // Pre-resolve all unique definitionIds to avoid N repeated DB lookups.
-    // Supports machine alias: if the ID doesn't match an exact definition,
-    // resolve to the latest active version in that family.
+    // Supports machine alias: if the ID is a family root (id===machineId) or
+    // doesn't match an exact definition, resolve to the latest active version.
     const resolvedIdCache = new Map();
     for (const req of requests) {
       const raw = req.definitionId;
       if (!resolvedIdCache.has(raw)) {
-        if (findDefinitionById(raw)) {
+        const exactDef = findDefinitionById(raw);
+        if (exactDef && exactDef.machineId !== raw) {
+          // Explicit version ID (e.g. 'sim-loan-v2') — use as-is
           resolvedIdCache.set(raw, raw);
         } else {
+          // Family root ID or not found → resolve to latest active in family
           const latest = findLatestInFamily(raw, request.orgId);
           resolvedIdCache.set(raw, latest ? latest.id : raw);
         }
