@@ -32,6 +32,95 @@ function DefVersionItem({ d, selected, onClick }) {
   );
 }
 
+function DiffTab({ defId }) {
+  const [diff, setDiff]     = useState4(null);
+  const [loading, setLoading] = useState4(true);
+  const [error, setError]   = useState4(null);
+
+  useEffect4(() => {
+    setLoading(true); setError(null); setDiff(null);
+    Api.get("/v1/definitions/" + defId + "/diff")
+      .then(data => setDiff(data))
+      .catch(e => setError(e.message || "Failed to load diff"))
+      .finally(() => setLoading(false));
+  }, [defId]);
+
+  if (loading) return React.createElement("div", { style: { color: "var(--muted)", fontSize: 12, padding: 16 } }, "Loading diff…");
+  if (error)   return React.createElement("div", { style: { color: "var(--red)", fontSize: 12, padding: 16 } }, error);
+  if (!diff?.diff) return React.createElement("div", { className: "card", style: { padding: 16, fontSize: 12, color: "var(--muted)" } }, diff?.message || "No diff available.");
+
+  const d = diff.diff;
+  const hasChanges = d.statesAdded.length || d.statesRemoved.length || d.transitionsChanged.length || d.initialChanged;
+
+  return React.createElement("div", { className: "card", style: { padding: 16, display: "flex", flexDirection: "column", gap: 16 } },
+    !hasChanges && React.createElement("div", { style: { color: "var(--muted)", fontSize: 12 } }, "No structural changes from parent."),
+
+    d.statesAdded.length > 0 && React.createElement("div", null,
+      React.createElement("div", { style: { fontSize: 10, fontWeight: 700, color: "var(--green)", marginBottom: 6, textTransform: "uppercase", letterSpacing: "0.08em" } }, "Added states"),
+      React.createElement("div", { style: { display: "flex", flexWrap: "wrap", gap: 6 } },
+        d.statesAdded.map(s => React.createElement("span", { key: s, className: "pill pill-green mono", style: { fontSize: 11 } }, "+ " + s))
+      )
+    ),
+
+    d.statesRemoved.length > 0 && React.createElement("div", null,
+      React.createElement("div", { style: { fontSize: 10, fontWeight: 700, color: "var(--red)", marginBottom: 6, textTransform: "uppercase", letterSpacing: "0.08em" } }, "Removed states"),
+      React.createElement("div", { style: { display: "flex", flexWrap: "wrap", gap: 6 } },
+        d.statesRemoved.map(s => React.createElement("span", { key: s, className: "pill mono", style: { fontSize: 11, background: "rgba(231,76,60,0.12)", color: "var(--red)", border: "1px solid rgba(231,76,60,0.3)" } }, "− " + s))
+      )
+    ),
+
+    d.transitionsChanged.length > 0 && React.createElement("div", null,
+      React.createElement("div", { style: { fontSize: 10, fontWeight: 700, color: "var(--muted)", marginBottom: 8, textTransform: "uppercase", letterSpacing: "0.08em" } }, "Changed transitions"),
+      React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 6 } },
+        d.transitionsChanged.map((tc, i) =>
+          React.createElement("div", { key: i, style: { background: "var(--surface2)", borderRadius: 6, padding: "8px 12px", fontSize: 11, border: "1px solid var(--border)" } },
+            React.createElement("div", { style: { fontFamily: "JetBrains Mono, monospace", fontWeight: 700, marginBottom: 6, fontSize: 11 } }, tc.state),
+            React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 3 } },
+              [...new Set([...Object.keys(tc.from || {}), ...Object.keys(tc.to || {})])].map(evt => {
+                const fromT = tc.from?.[evt], toT = tc.to?.[evt];
+                return React.createElement("div", { key: evt, style: { display: "flex", alignItems: "center", gap: 5, color: "var(--muted)", fontFamily: "JetBrains Mono, monospace" } },
+                  React.createElement("span", { style: { color: "var(--accent)", minWidth: 120 } }, evt),
+                  React.createElement("span", null, "→"),
+                  !fromT
+                    ? React.createElement("span", { style: { color: "var(--green)" } }, "+ " + toT)
+                    : !toT
+                    ? React.createElement("span", { style: { color: "var(--red)", textDecoration: "line-through" } }, fromT)
+                    : React.createElement(React.Fragment, null,
+                        React.createElement("span", { style: { color: "var(--red)", textDecoration: "line-through", marginRight: 4 } }, fromT),
+                        React.createElement("span", { style: { color: "var(--green)" } }, toT)
+                      )
+                );
+              })
+            )
+          )
+        )
+      )
+    ),
+
+    d.initialChanged && React.createElement("div", null,
+      React.createElement("div", { style: { fontSize: 10, fontWeight: 700, color: "var(--muted)", marginBottom: 6, textTransform: "uppercase", letterSpacing: "0.08em" } }, "Initial state changed"),
+      React.createElement("div", { style: { fontSize: 11, display: "flex", alignItems: "center", gap: 6, fontFamily: "JetBrains Mono, monospace" } },
+        React.createElement("span", { style: { color: "var(--red)", textDecoration: "line-through" } }, d.initialFrom || "—"),
+        React.createElement("span", null, "→"),
+        React.createElement("span", { style: { color: "var(--green)" } }, d.initialTo || "—")
+      )
+    ),
+
+    d.stateMapping && Object.keys(d.stateMapping).length > 0 && React.createElement("div", null,
+      React.createElement("div", { style: { fontSize: 10, fontWeight: 700, color: "var(--muted)", marginBottom: 6, textTransform: "uppercase", letterSpacing: "0.08em" } }, "State mapping"),
+      React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 4 } },
+        Object.entries(d.stateMapping).map(([from, to]) =>
+          React.createElement("div", { key: from, style: { fontSize: 11, display: "flex", alignItems: "center", gap: 6, fontFamily: "JetBrains Mono, monospace", color: "var(--muted)" } },
+            React.createElement("span", null, from),
+            React.createElement("span", null, "→"),
+            React.createElement("span", { style: { color: "var(--fg)" } }, to)
+          )
+        )
+      )
+    )
+  );
+}
+
 function DefinitionDetail({ def }) {
   const [tab, setTab] = useState4("overview");
 
@@ -45,6 +134,7 @@ function DefinitionDetail({ def }) {
   const deployedAt = def.createdAt ? new Date(def.createdAt * 1000).toLocaleString() : "—";
   const deployedDate = deployedAt.split(",")[0];
   const deployedTime = (deployedAt.split(",")[1] || "").trim();
+  const tabs = def.parentId ? ["overview", "states", "diff"] : ["overview", "states"];
 
   return React.createElement("div", { className: "machine-detail" },
     React.createElement("div", { style: { display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 14 } },
@@ -56,7 +146,7 @@ function DefinitionDetail({ def }) {
       React.createElement("a", { href: "#deploy", className: "btn" }, Icons.Plus({ size: 12 }), "Deploy new version")
     ),
     React.createElement("div", { className: "tab-bar" },
-      ["overview", "states"].map(t => React.createElement("div", {
+      tabs.map(t => React.createElement("div", {
         key: t,
         className: "tab" + (tab === t ? " active" : ""),
         onClick: () => setTab(t)
@@ -94,7 +184,8 @@ function DefinitionDetail({ def }) {
               style: { fontSize: 11 }
             }, s))
           )
-    )
+    ),
+    tab === "diff" && React.createElement(DiffTab, { defId: def.id })
   );
 }
 
