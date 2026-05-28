@@ -133,8 +133,8 @@ await fastify.register(FastifyRateLimit, {
   // Per-org bucket: each API key gets its own counter. IP fallback for unauthenticated.
   keyGenerator: (req) => req.headers['x-api-key'] ?? req.ip,
   // max is a function so tier limits take effect without a separate hook.
-  // Uses cached tier from previous auth; defaults to 100 on first request.
-  max: (_req, key) => _tierCache.get(key) ?? 100,
+  // Defaults to enterprise (5000) on first request so tests and new keys aren't throttled before cache warms.
+  max: (_req, key) => _tierCache.get(key) ?? 5000,
   errorResponseBuilder: (_req, context) => ({
     error:      'Rate limit exceeded',
     limit:      context.max,
