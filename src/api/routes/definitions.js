@@ -55,6 +55,7 @@ import { computeHash, computeHistoryHash, fingerprintToBigInt, computeRegionHash
 import { analyseDefinition }          from '../lib/staticAnalysis.js';
 import { issueToken, consumeToken }   from '../../registry/confirmTokenStore.js';
 import { insertChangepoint, insertParChangepoint } from '../../registry/changepointRepo.js';
+import { normalizeHistoryRegions } from '../../runtime/statePaths.js';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -70,16 +71,16 @@ function hashDefinition(definition) {
  * machineId is the root definition's id — the same value stored as machine_id
  * on every definition in the family tree.
  *
- * When hasHistoryPath = false (wildcard deploy), all active actors are returned
+ * When hasHistoryTarget = false (wildcard deploy), all active actors are returned
  * as wouldMigrate without calling the engine (engine uses exact prefix match,
  * not wildcard, for prefix_hash=0).
  */
-function evaluateMigrationCandidates(machineId, orgId, eng, currentTick, hasHistoryPath = true) {
+function evaluateMigrationCandidates(machineId, orgId, eng, currentTick, hasHistoryTarget = true) {
   const actors     = findActorsByMachine(machineId, orgId);
   const wouldMigrate = [];
   const wouldStay    = [];
 
-  if (!hasHistoryPath) {
+  if (!hasHistoryTarget) {
     // Wildcard: every active actor on the machine is eligible
     for (const actor of actors) {
       wouldMigrate.push({
@@ -176,9 +177,37 @@ export async function definitionRoutes(fastify) {
     },
   }, async (request, reply) => {
     const { id, parentId, definition, refinement = 1, confirmToken, historyPath, stateMapping, historyRegions, contextTransform } = request.body;
-    const isDryRun       = request.query?.dryRun === 'true';
-    const eng            = getEngine();
-    const hasHistoryPath = Array.isArray(historyPath) && historyPath.length > 0;
+    const isDryRun          = request.query?.dryRun === 'true';
+    const eng               = getEngine();
+    const hasHistoryPath    = Array.isArray(historyPath) && historyPath.length > 0;
+    const hasHistoryRegions = historyRegions && typeof historyRegions === 'object' &&
+                              !Array.isArray(historyRegions) &&
+                              Object.keys(historyRegions).length > 0;
+    const hasHistoryTarget  = hasHistoryPath || hasHistoryRegions;
+    const orgId             = request.orgId;
+    const parentDefForTargeting = parentId ? findDefinitionById(parentId) : null;
+
+    if (parentDefForTargeting && parentDefForTargeting.orgId !== orgId) {
+      return reply.code(404).send({ error: `Definition ${parentId} not found` });
+    }
+
+    if (hasHistoryPath && hasHistoryRegions) {
+      return reply.code(400).send({
+        error: 'historyPath and historyRegions are mutually exclusive. Use historyPath for scalar routing or historyRegions for parallel-region routing.',
+      });
+    }
+
+    let normalizedHistoryRegions = null;
+    if (hasHistoryRegions) {
+      try {
+        normalizedHistoryRegions = normalizeHistoryRegions(
+          historyRegions,
+          parentDefForTargeting?.definitionJson ?? definition
+        );
+      } catch (err) {
+        return reply.code(400).send({ error: err.message });
+      }
+    }
 
     // ── Idempotency ──────────────────────────────────────────────────────────
     // A re-deploy of the same ID is idempotent only when historyPath AND
@@ -188,12 +217,16 @@ export async function definitionRoutes(fastify) {
     const existing = findDefinitionById(id);
     if (existing) {
       const normaliseHP  = (hp) => (Array.isArray(hp) && hp.length > 0) ? hp : null;
+      const normaliseHR  = (hr) => (hr && typeof hr === 'object' && !Array.isArray(hr) && Object.keys(hr).length > 0) ? hr : null;
       const normaliseSM  = (sm) => (sm && Object.keys(sm).length > 0) ? sm : null;
       const incomingHP   = normaliseHP(historyPath);
       const storedHP     = normaliseHP(existing.definitionJson._historyPath);
+      const incomingHR   = normaliseHR(normalizedHistoryRegions);
+      const storedHR     = normaliseHR(existing.definitionJson._historyRegions);
       const incomingSM   = normaliseSM(stateMapping);
       const storedSM     = normaliseSM(existing.definitionJson._stateMapping);
-      const historyChanged  = JSON.stringify(incomingHP) !== JSON.stringify(storedHP);
+      const historyChanged  = JSON.stringify(incomingHP) !== JSON.stringify(storedHP) ||
+                              JSON.stringify(incomingHR) !== JSON.stringify(storedHR);
       const mappingChanged  = JSON.stringify(incomingSM) !== JSON.stringify(storedSM);
 
       // Strip internal _ fields from stored JSON before comparing definition content
@@ -202,9 +235,11 @@ export async function definitionRoutes(fastify) {
 
       if (historyChanged) {
         return reply.code(409).send({
-          error:               `Definition ${id} already exists with a different historyPath. Deploy under a new version ID.`,
+          error:               `Definition ${id} already exists with different history targeting. Deploy under a new version ID.`,
           existingHistoryPath: storedHP,
           incomingHistoryPath: incomingHP,
+          existingHistoryRegions: storedHR,
+          incomingHistoryRegions: incomingHR,
         });
       }
 
@@ -240,15 +275,10 @@ export async function definitionRoutes(fastify) {
       ? [...new Set([...newStateNames, ...Object.keys(stateMapping)])]
       : newStateNames;
 
-    const orgId = request.orgId;
-
     // Resolve machineId for the full family scope (used in both dryRun and live paths)
     let machineId = id;
     if (parentId) {
-      const parentDef = findDefinitionById(parentId);
-      if (parentDef && parentDef.orgId !== orgId) {
-        return reply.code(404).send({ error: `Definition ${parentId} not found` });
-      }
+      const parentDef = parentDefForTargeting;
       machineId = parentDef?.machineId ?? parentId;
     }
 
@@ -258,7 +288,7 @@ export async function definitionRoutes(fastify) {
       let migration = { eligible: 0, wouldMigrate: [], wouldStay: [], engineAvailable: eng.available };
 
       if (parentId && eng.available) {
-        const candidates = evaluateMigrationCandidates(machineId, orgId, eng, dryRunTick, hasHistoryPath);
+        const candidates = evaluateMigrationCandidates(machineId, orgId, eng, dryRunTick, hasHistoryTarget);
         migration = { ...candidates, engineAvailable: true };
       } else if (parentId) {
         const dryActors = findActorsByMachine(machineId, orgId);
@@ -385,6 +415,7 @@ export async function definitionRoutes(fastify) {
       ...definition,
       ...(stateMapping && Object.keys(stateMapping).length > 0 ? { _stateMapping: stateMapping } : {}),
       _historyPath: hasHistoryPath ? historyPath : null,
+      _historyRegions: normalizedHistoryRegions,
       ...(hasContextTransform ? { _contextTransform: contextTransform } : {}),
     };
 
@@ -413,18 +444,15 @@ export async function definitionRoutes(fastify) {
     }
 
     try {
-      const hasRegions = historyRegions && typeof historyRegions === 'object' &&
-                         Object.keys(historyRegions).length > 0;
-      if (hasRegions) {
+      if (hasHistoryRegions) {
         // Parallel changepoint: register per-region hashes with the engine.
         // We do NOT insert into the scalar changepoints table — prefixHash would
         // be 0n (wildcard), routing every actor to this definition on restart.
-        const regionHexMap   = computeRegionHashes(historyRegions);
+        const regionHexMap   = computeRegionHashes(normalizedHistoryRegions);
         const regionArr      = regionFingerprintsToArray(regionHexMap);
-        const regionHexArr   = Object.values(regionHexMap);
         if (regionArr && regionArr.length > 0) {
           eng.registerChangepointParallel(tStar, regionArr, BigInt(refinement), id);
-          insertParChangepoint({ orgId, tStar: Number(tStar), regionHashesHexArr: regionHexArr, refinement, childDefId: id });
+          insertParChangepoint({ orgId, tStar: Number(tStar), regionHashesHexMap: regionHexMap, refinement, childDefId: id });
         }
       } else {
         eng.registerChangepoint(tStar, prefixHash, BigInt(refinement), id);
@@ -465,13 +493,14 @@ export async function definitionRoutes(fastify) {
       const actors = findActorsByMachine(machineId, orgId);
 
       if (actors.length > 0) {
-        // Build the job list: only actors whose fingerprint matches the historyPath prefix
-        // (or ALL actors for wildcard deployments where hasHistoryPath = false).
+        // Build the job list: only actors whose fingerprint matches the scalar
+        // historyPath or parallel historyRegions selector. Wildcard deployments
+        // enqueue every active actor in the machine family.
         // Limiting the count prevents checkDeploymentComplete from getting stuck when
         // actors don't match and are never migrated.
         const pendingJobs = [];
 
-        if (!hasHistoryPath) {
+        if (!hasHistoryTarget) {
           // Wildcard deploy: C engine treats prefix_hash=0 as exact match against empty
           // fingerprint, not as "match all".  Bypass the engine and enqueue every active
           // actor on the machine directly.
@@ -483,7 +512,7 @@ export async function definitionRoutes(fastify) {
             warnings.push({
               code:    'LARGE_WILDCARD_DEPLOY',
               message: `Wildcard deployment will migrate ${pendingJobs.length} actors (threshold: ${wildcardThreshold}). ` +
-                       `This may take several minutes. Use historyPath to target a subset of actors.`,
+                       `This may take several minutes. Use historyPath or historyRegions to target a subset of actors.`,
             });
           }
         } else {

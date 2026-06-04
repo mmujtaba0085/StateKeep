@@ -17,11 +17,11 @@ import { startHeartbeat } from './heartbeat.js';
 import { claimBatch, markDone, markFailed } from '../registry/jobRepo.js';
 import { findActorById, updateActorStatus } from '../registry/actorRepo.js';
 import { findDefinitionById } from '../registry/definitionRepo.js';
-import { fingerprintToBigInt } from '../ffi/hashUtils.js';
+import { fingerprintToBigInt, regionFingerprintsToArray } from '../ffi/hashUtils.js';
 import { incrementMigrated, incrementFailed, updateDeploymentStatus, findDeploymentById } from '../registry/deploymentRepo.js';
 import { migrateActor, invalidateDefinitionCache } from '../runtime/actorManager.js';
 import { getEngine, engineReady } from '../ffi/engine.js';
-import { loadChangepointsAfter, loadParChangepointsAfter, getWildcardChildDef } from '../registry/changepointRepo.js';
+import { loadChangepointsAfter, loadParChangepointsAfter } from '../registry/changepointRepo.js';
 
 const BATCH_SIZE    = 500;
 const POLL_INTERVAL = 500;   // ms
@@ -85,8 +85,14 @@ function syncRegistry() {
   const parRows = loadParChangepointsAfter(_lastParChangepointId);
   for (const row of parRows) {
     try {
-      const regionHexArr = JSON.parse(row.region_hashes);
-      const regionArr    = regionHexArr.map(h => BigInt(`0x${h.padStart(16, '0')}`));
+      const storedRegions = JSON.parse(row.region_hashes);
+      const regionArr = Array.isArray(storedRegions)
+        ? storedRegions.map(h => BigInt(`0x${String(h).padStart(16, '0')}`))
+        : regionFingerprintsToArray(storedRegions);
+      if (!regionArr || regionArr.length === 0) {
+        _lastParChangepointId = row.id;
+        continue;
+      }
       eng.registerChangepointParallel(
         BigInt(row.t_star),
         regionArr,
@@ -124,13 +130,15 @@ async function processJob(job) {
   //
   // Skip recheck when:
   //   (a) needs_rescue — fingerprint is frozen (no events allowed), recheck always cancels.
-  //   (b) wildcard deploy — all actors are eligible by definition (target has no _historyPath),
+  //   (b) wildcard deploy — all actors are eligible by definition (target has no
+  //       _historyPath or _historyRegions),
   //       so there is no fingerprint criterion to verify. The C engine can only do exact-prefix
   //       matching; prefix_hash=0 never matches fp≠0, causing false cancellations for every
   //       actor with event history — including multi-hop chains (v1→v2→v3 where only v1→v2
   //       appears as the next wildcard hop).
   const targetDefForRecheck = actorBefore ? findDefinitionById(target_def_id) : null;
-  const isWildcardDeploy    = !targetDefForRecheck?.definitionJson?._historyPath;
+  const isWildcardDeploy    = !targetDefForRecheck?.definitionJson?._historyPath &&
+                              !targetDefForRecheck?.definitionJson?._historyRegions;
   if (eng.available && actorBefore && actorBefore.status !== 'needs_rescue' && !isWildcardDeploy) {
     let recheck = null;
     try {
@@ -147,14 +155,15 @@ async function processJob(job) {
         BigInt(currentTick)
       );
 
-      // Wildcard fallback: the C engine performs exact prefix matching so prefix_hash=0
-      // never matches a non-zero actor fingerprint. Fall back to the DB wildcard lookup
-      // (same logic as the inline migration path in actorManager.sendEvent).
-      if (!recheck) {
-        recheck = getWildcardChildDef(
-          actorBefore.definitionId,
-          actorBefore.logicalStartTick ?? 0
-        );
+      if (!recheck && actorBefore.regionFingerprints) {
+        const regionArr = regionFingerprintsToArray(actorBefore.regionFingerprints);
+        if (regionArr && regionArr.length > 0) {
+          recheck = eng.computeAccessibleParallel(
+            regionArr,
+            recheckLogicalTime,
+            BigInt(currentTick)
+          );
+        }
       }
     } catch {}
 

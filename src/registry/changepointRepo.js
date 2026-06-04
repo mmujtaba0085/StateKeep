@@ -53,12 +53,13 @@ export function loadChangepointsAfter(afterId) {
 
 // ── Parallel changepoints ─────────────────────────────────────────────────────
 
-export function insertParChangepoint({ orgId, tStar, regionHashesHexArr, refinement, childDefId }) {
+export function insertParChangepoint({ orgId, tStar, regionHashesHexMap, regionHashesHexArr, refinement, childDefId }) {
   const db = getDb();
+  const payload = regionHashesHexMap ?? regionHashesHexArr;
   db.prepare(`
     INSERT INTO par_changepoints (org_id, t_star, region_hashes, refinement, child_def_id, created_at)
     VALUES (?, ?, ?, ?, ?, ?)
-  `).run(orgId, tStar, JSON.stringify(regionHashesHexArr), refinement ?? 0, childDefId, NOW());
+  `).run(orgId, tStar, JSON.stringify(payload), refinement ?? 0, childDefId, NOW());
 }
 
 export function loadParChangepointsAfter(afterId) {

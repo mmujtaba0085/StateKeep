@@ -25,3 +25,5 @@ src/dashboard-backup/
 ui/screenshots/
 ui/screenshots-new/
 test/e2e/reports/
+prv-v2/
+patches/

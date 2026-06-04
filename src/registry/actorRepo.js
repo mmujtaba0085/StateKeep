@@ -84,6 +84,7 @@ function getStmts() {
       SET definition_id = @definition_id,
           state_value   = @state_value,
           context_json  = @context_json,
+          region_fingerprints = @region_fingerprints,
           status        = 'active',
           updated_at    = @updated_at
       WHERE id = @id
@@ -199,7 +200,7 @@ export function updateActorStatus(id, status) {
   getStmts().updateStatus.run({ id, status, updated_at: now() });
 }
 
-export function migrateActorDefinition(id, { definitionId, stateValue, context }) {
+export function migrateActorDefinition(id, { definitionId, stateValue, context, regionFingerprints }) {
   const encContext = context != null
     ? encrypt(Buffer.from(JSON.stringify(context)))
     : null;
@@ -208,6 +209,7 @@ export function migrateActorDefinition(id, { definitionId, stateValue, context }
     definition_id: definitionId,
     state_value:   stateValue != null ? JSON.stringify(stateValue) : null,
     context_json:  encContext,
+    region_fingerprints: regionFingerprints ? JSON.stringify(regionFingerprints) : null,
     updated_at:    now(),
   });
 }

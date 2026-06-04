@@ -19,6 +19,10 @@
 
 import { workerData, parentPort } from 'worker_threads';
 import { createMachine, createActor } from 'xstate';
+import {
+  initializeRegionFingerprints,
+  updateRegionFingerprintsForTransition,
+} from './statePaths.js';
 
 // Local FNV-1a (mirrors fallback.js so workers don't need FFI access)
 const FNV_PRIME    = 0x00000100000001B3n;
@@ -106,7 +110,7 @@ export function applyContextTransform(context, transform) {
 
 // ── Actor store ───────────────────────────────────────────────────────────────
 
-/** Map<actorId, { actor, machine }> */
+/** Map<actorId, { actor, machine, definitionJson }> */
 const actors = new Map();
 
 // ── Guard / action stub helpers ───────────────────────────────────────────────
@@ -152,7 +156,7 @@ function getOrCacheMachine(cacheKey, definitionJson) {
 
 // ── Handlers ──────────────────────────────────────────────────────────────────
 
-function handleSpawn({ actorId, definitionId, definitionJson, stateSnapshot, initialContext }) {
+function handleSpawn({ actorId, definitionId, definitionJson, stateSnapshot, initialContext, existingRegionFingerprints }) {
   if (actors.has(actorId)) return getSnapshot(actorId);
 
   const machine = getOrCacheMachine(definitionId, definitionJson);
@@ -182,16 +186,24 @@ function handleSpawn({ actorId, definitionId, definitionJson, stateSnapshot, ini
   }
 
   actor.start();
-  actors.set(actorId, { actor, machine });
+  actors.set(actorId, { actor, machine, definitionJson });
 
-  return serializeSnapshot(actor.getSnapshot(), actorId);
+  const snapshot = actor.getSnapshot();
+  return {
+    ...serializeSnapshot(snapshot, actorId),
+    regionFingerprints: initializeRegionFingerprints(
+      definitionJson,
+      snapshot.value,
+      existingRegionFingerprints ?? null
+    ),
+  };
 }
 
 function handleEvent({ actorId, event, historyFingerprint, regionFingerprints }) {
   const entry = actors.get(actorId);
   if (!entry) throw new Error(`Actor ${actorId} not in worker`);
 
-  const { actor } = entry;
+  const { actor, definitionJson } = entry;
 
   // Capture pre-event state for per-region diff (parallel machines only)
   const preSV = actor.getSnapshot().value;
@@ -201,18 +213,13 @@ function handleEvent({ actorId, event, historyFingerprint, regionFingerprints })
   const snapshot       = actor.getSnapshot();
   const newFingerprint = updateFingerprint(historyFingerprint, event.type);
 
-  // Update per-region fingerprints when actor is on a parallel machine
-  let newRegionFingerprints = regionFingerprints ?? null;
-  if (preSV && typeof preSV === 'object' && !Array.isArray(preSV)) {
-    const postSV = snapshot.value;
-    const rfp    = regionFingerprints ? { ...regionFingerprints } : {};
-    for (const region of Object.keys(preSV)) {
-      if (JSON.stringify(preSV[region]) !== JSON.stringify(postSV?.[region])) {
-        rfp[region] = updateFingerprint(rfp[region] ?? '0', event.type);
-      }
-    }
-    newRegionFingerprints = rfp;
-  }
+  const newRegionFingerprints = updateRegionFingerprintsForTransition(
+    definitionJson,
+    preSV,
+    snapshot.value,
+    event.type,
+    regionFingerprints ?? null
+  );
 
   return {
     ...serializeSnapshot(snapshot, actorId),
@@ -260,7 +267,17 @@ export function resolveLandingState(currentStateValue, newMachineStates, stateMa
   return null;
 }
 
-function handleHydrate({ actorId, targetDefinitionId, targetDefinitionJson, oldContext, currentStateValue, stateMapping, existingFingerprint, contextTransform }) {
+function handleHydrate({
+  actorId,
+  targetDefinitionId,
+  targetDefinitionJson,
+  oldContext,
+  currentStateValue,
+  stateMapping,
+  existingFingerprint,
+  existingRegionFingerprints,
+  contextTransform,
+}) {
   // Stop existing actor if present
   const existing = actors.get(actorId);
   if (existing) {
@@ -299,10 +316,18 @@ function handleHydrate({ actorId, targetDefinitionId, targetDefinitionJson, oldC
     }
 
     actor.start();
-    actors.set(actorId, { actor, machine });
+    actors.set(actorId, { actor, machine, definitionJson: targetDefinitionJson });
     const snap = serializeSnapshot(actor.getSnapshot(), actorId);
     // INVARIANT 1: fingerprint passes through unchanged — never recomputed from context
-    return { ...snap, historyFingerprint: existingFingerprint ?? null };
+    return {
+      ...snap,
+      historyFingerprint: existingFingerprint ?? null,
+      regionFingerprints: initializeRegionFingerprints(
+        targetDefinitionJson,
+        snap.stateValue,
+        existingRegionFingerprints ?? null
+      ),
+    };
   }
 
   // Fallback: no current state provided, land at initial (legacy path)
@@ -319,9 +344,17 @@ function handleHydrate({ actorId, targetDefinitionId, targetDefinitionJson, oldC
   }
 
   actor.start();
-  actors.set(actorId, { actor, machine });
+  actors.set(actorId, { actor, machine, definitionJson: targetDefinitionJson });
   const snap = serializeSnapshot(actor.getSnapshot(), actorId);
-  return { ...snap, historyFingerprint: existingFingerprint ?? null };
+  return {
+    ...snap,
+    historyFingerprint: existingFingerprint ?? null,
+    regionFingerprints: initializeRegionFingerprints(
+      targetDefinitionJson,
+      snap.stateValue,
+      existingRegionFingerprints ?? null
+    ),
+  };
 }
 
 function handleSnapshot({ actorId }) {

@@ -144,20 +144,40 @@ export function fingerprintToBigInt(hex) {
  */
 export function computeRegionHashes(eventsByRegion) {
   const result = {};
-  for (const [region, events] of Object.entries(eventsByRegion)) {
+  for (const [region, events] of Object.entries(eventsByRegion).sort(([a], [b]) => a.localeCompare(b))) {
     result[region] = computeHistoryHash(events);
   }
   return result;
 }
 
+function normalizeRegionFingerprintHex(hex) {
+  if (!hex || hex === '0') return bigIntToHex(FNV_OFFSET);
+  return String(hex).padStart(16, '0').toLowerCase();
+}
+
 /**
- * Convert a regionFingerprints map ({ regionName: hexFp }) to an array of BigInts
+ * Encode a full region path plus that region's event fingerprint into one
+ * uint64. The C ABI still receives uint64_t values, but the value now carries
+ * both region identity and region event history.
+ */
+export function encodeRegionFingerprint(regionPath, regionFingerprintHex) {
+  return computeHash([
+    'statekeep.region.v1',
+    '\0',
+    regionPath,
+    '\0',
+    normalizeRegionFingerprintHex(regionFingerprintHex),
+  ]);
+}
+
+/**
+ * Convert a regionFingerprints map ({ regionPath: hexFp }) to an array of BigInts
  * suitable for passing to eng.registerChangepointParallel / eng.computeAccessibleParallel.
  * Returns null if the map is empty or null.
  */
 export function regionFingerprintsToArray(regionFingerprintsHex) {
   if (!regionFingerprintsHex) return null;
-  const entries = Object.values(regionFingerprintsHex);
+  const entries = Object.entries(regionFingerprintsHex).sort(([a], [b]) => a.localeCompare(b));
   if (entries.length === 0) return null;
-  return entries.map(hex => hexToBigInt(hex));
+  return entries.map(([regionPath, hex]) => hexToBigInt(encodeRegionFingerprint(regionPath, hex)));
 }

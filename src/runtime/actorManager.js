@@ -6,7 +6,7 @@
  */
 
 import { LRUCache } from './lruCache.js';
-import { FNV_OFFSET, fingerprintToBigInt, regionFingerprintsToArray } from '../ffi/hashUtils.js';
+import { fingerprintToBigInt, regionFingerprintsToArray } from '../ffi/hashUtils.js';
 import { getEngine } from '../ffi/engine.js';
 import { getWorkerPool } from './workerPool.js';
 import { getWriteBuffer } from './writeBuffer.js';
@@ -30,7 +30,7 @@ const IDLE_TIMEOUT_MS    = parseInt(process.env.IDLE_TIMEOUT_SECONDS  ?? '300', 
 
 // ── Hot registry ──────────────────────────────────────────────────────────────
 // Each entry: { definitionId, stateValue, context, historyFingerprint,
-//               lastEventTick, lastAccess, logicalStartTick }
+//               regionFingerprints, lastEventTick, lastAccess, logicalStartTick }
 
 const hotRegistry = new LRUCache(HOT_REGISTRY_SIZE, async (actorId, entry) => {
   try {
@@ -38,6 +38,7 @@ const hotRegistry = new LRUCache(HOT_REGISTRY_SIZE, async (actorId, entry) => {
       stateValue:          entry.stateValue,
       context:             entry.context,
       historyFingerprint:  entry.historyFingerprint,
+      regionFingerprints:  entry.regionFingerprints ?? null,
       lastEventTick:       entry.lastEventTick,
       status:              'active',
     });
@@ -151,6 +152,7 @@ async function ensureInWorker(actorId, actor, priority = 'normal', orgId = '_sys
     actorId,
     definitionId:   actor.definitionId,
     definitionJson: def.definitionJson,
+    existingRegionFingerprints: actor.regionFingerprints ?? null,
     stateSnapshot:  actor.stateValue
       ? { value: actor.stateValue, context: actor.context, status: 'active' }
       : undefined,
@@ -202,6 +204,7 @@ export async function spawnActor({ definitionId, orgId, initialContext, logicalS
     stateValue:         workerResult.stateValue,
     context:            effectiveContext,
     historyFingerprint: '0',
+    regionFingerprints: workerResult.regionFingerprints ?? null,
     lastEventTick:      null,
     status:             'active',
   });
@@ -212,6 +215,7 @@ export async function spawnActor({ definitionId, orgId, initialContext, logicalS
     stateValue:         workerResult.stateValue,
     context:            effectiveContext,
     historyFingerprint: '0',
+    regionFingerprints: workerResult.regionFingerprints ?? null,
     lastEventTick:      null,
     logicalStartTick:   actorLogicalTick,   // persisted in hot registry
     lastAccess:         Date.now(),
@@ -521,6 +525,7 @@ export async function getActorState(actorId, { priority = 'normal' } = {}) {
       definitionId: actor.definitionId,
       stateValue:   actor.stateValue,
       context:      actor.context,
+      regionFingerprints: actor.regionFingerprints ?? null,
       status:       actor.status,
     };
   }
@@ -537,6 +542,7 @@ export async function getActorState(actorId, { priority = 'normal' } = {}) {
           ...snap,
           definitionId:       hot.definitionId,
           historyFingerprint: hot.historyFingerprint,
+          regionFingerprints: hot.regionFingerprints ?? null,
           status:             hot.status ?? actor.status ?? 'active',
         };
       }
@@ -547,6 +553,7 @@ export async function getActorState(actorId, { priority = 'normal' } = {}) {
       context:            hot.context,
       definitionId:       hot.definitionId,
       historyFingerprint: hot.historyFingerprint,
+      regionFingerprints: hot.regionFingerprints ?? null,
       status:             hot.status ?? actor.status ?? 'active',
     };
   }
@@ -557,6 +564,7 @@ export async function getActorState(actorId, { priority = 'normal' } = {}) {
     stateValue:         actor.stateValue,
     context:            actor.context,
     historyFingerprint: actor.historyFingerprint,
+    regionFingerprints: actor.regionFingerprints ?? null,
     status:             actor.status,
   };
 }
@@ -619,6 +627,7 @@ export async function migrateActor(actorId, targetDefinitionId, { priority = 'no
     currentStateValue:    actor.stateValue,
     stateMapping,
     existingFingerprint:  actor.historyFingerprint,
+    existingRegionFingerprints: actor.regionFingerprints ?? null,
     contextTransform,
   }, { priority, orgId: _orgId });
 
@@ -640,6 +649,7 @@ export async function migrateActor(actorId, targetDefinitionId, { priority = 'no
     definitionId: targetDefinitionId,
     stateValue:   result.stateValue,
     context:      result.context,
+    regionFingerprints: result.regionFingerprints ?? null,
   });
 
   // Set logicalStartTick to deployedAt + 1 so lower_bound on the next event starts
@@ -657,6 +667,7 @@ export async function migrateActor(actorId, targetDefinitionId, { priority = 'no
       stateValue:         result.stateValue,
       context:            result.context,
       historyFingerprint: actor.historyFingerprint,
+      regionFingerprints: result.regionFingerprints ?? null,
       lastEventTick:      actor.lastEventTick,
       logicalStartTick:   newLogicalStartTick,
       lastAccess:         Date.now(),
