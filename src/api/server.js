@@ -23,6 +23,7 @@ import { randomUUID } from 'crypto';
 import { engineReady, getEngine } from '../ffi/engine.js';
 import { getDb } from '../registry/db.js';
 import { getMaxTStar } from '../registry/changepointRepo.js';
+import { seedEngineRegistry } from '../runtime/actorManager.js';
 import './adminKey.js';                                  // fails fast if STATEKEEP_ADMIN_KEY unset
 import { authMiddleware } from './middleware/auth.js';
 import { healthRoutes } from './routes/health.js';
@@ -283,6 +284,8 @@ if (!process.env.STATEKEEP_MULTI_INSTANCE_WARNED) {
     'Set STATEKEEP_MULTI_INSTANCE_WARNED=true to suppress this warning.'
   );
 }
+
+seedEngineRegistry();
 
 try {
   await fastify.listen({ port: PORT, host: '0.0.0.0' });

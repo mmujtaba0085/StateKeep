@@ -18,12 +18,11 @@ import {
   migrateActorDefinition,
   findIdleActors,
   getActorDefinitionId,
-  updateActorLogicalStartTick,
 } from '../registry/actorRepo.js';
 import { findDefinitionById } from '../registry/definitionRepo.js';
 import { getDb } from '../registry/db.js';
 import { emitWebhookEvent } from '../api/lib/webhookEmitter.js';
-import { getWildcardChildDef } from '../registry/changepointRepo.js';
+import { getWildcardChildDef, loadChangepointsAfter, loadParChangepointsAfter } from '../registry/changepointRepo.js';
 
 const HOT_REGISTRY_SIZE  = parseInt(process.env.HOT_REGISTRY_SIZE    ?? '10000',  10);
 const IDLE_TIMEOUT_MS    = parseInt(process.env.IDLE_TIMEOUT_SECONDS  ?? '300',    10) * 1000;
@@ -645,19 +644,21 @@ export async function migrateActor(actorId, targetDefinitionId, { priority = 'no
     );
   }
 
+  const newLogicalStartTick = Number(targetDef.deployedAt) + 1;
   migrateActorDefinition(actorId, {
-    definitionId: targetDefinitionId,
-    stateValue:   result.stateValue,
-    context:      result.context,
+    definitionId:       targetDefinitionId,
+    stateValue:         result.stateValue,
+    context:            result.context,
     regionFingerprints: result.regionFingerprints ?? null,
+    logicalStartTick:   newLogicalStartTick,
   });
 
-  // Set logicalStartTick to deployedAt + 1 so lower_bound on the next event starts
-  // strictly AFTER the changepoint that just fired. Without +1, the same changepoint
-  // (t_star == deployedAt) is found again on the very next event, causing an immediate
-  // false re-migration back to the same target.
-  const newLogicalStartTick = Number(targetDef.deployedAt) + 1;
-  updateActorLogicalStartTick(actorId, newLogicalStartTick);
+  try {
+    const eng = getEngine();
+    eng.actorStarted(BigInt(targetDef.deployedAt), fingerprintToBigInt(actor.historyFingerprint));
+  } catch (e) {
+    console.warn(`[actorManager] actorStarted notification failed for ${actorId}: ${e.message}`);
+  }
 
   if (hotRegistry.has(actorId)) {
     const existing = hotRegistry.get(actorId);
@@ -675,6 +676,53 @@ export async function migrateActor(actorId, targetDefinitionId, { priority = 'no
   }
 
   return result;
+}
+
+/**
+ * Seed the in-process APV engine registry from all changepoints persisted in the DB.
+ * Call once at API server startup — the engine starts with an empty registry after
+ * every process restart, so changepoints deployed before the restart must be re-registered.
+ */
+export function seedEngineRegistry() {
+  const eng = getEngine();
+  if (!eng.available) return;
+
+  const scalars = loadChangepointsAfter(0);
+  for (const row of scalars) {
+    try {
+      eng.registerChangepoint(
+        BigInt(row.t_star),
+        BigInt(row.prefix_hash),
+        BigInt(row.refinement),
+        row.child_def_id
+      );
+    } catch (e) {
+      console.warn(`[actorManager] seedEngineRegistry skip ${row.child_def_id}: ${e.message}`);
+    }
+  }
+
+  const parallels = loadParChangepointsAfter(0);
+  for (const row of parallels) {
+    try {
+      const storedRegions = JSON.parse(row.region_hashes);
+      const regionArr = Array.isArray(storedRegions)
+        ? storedRegions.map(h => BigInt(`0x${String(h).padStart(16, '0')}`))
+        : regionFingerprintsToArray(storedRegions);
+      if (!regionArr || regionArr.length === 0) continue;
+      eng.registerChangepointParallel(
+        BigInt(row.t_star),
+        regionArr,
+        BigInt(row.refinement),
+        row.child_def_id
+      );
+    } catch (e) {
+      console.warn(`[actorManager] seedEngineRegistry skip parallel ${row.child_def_id}: ${e.message}`);
+    }
+  }
+
+  if (scalars.length + parallels.length > 0) {
+    console.log(`[actorManager] Engine registry seeded: ${scalars.length} scalar + ${parallels.length} parallel changepoints`);
+  }
 }
 
 export { hotRegistry };

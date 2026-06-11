@@ -82,12 +82,13 @@ function getStmts() {
     `),
     updateDefinition: db.prepare(`
       UPDATE actors
-      SET definition_id = @definition_id,
-          state_value   = @state_value,
-          context_json  = @context_json,
+      SET definition_id       = @definition_id,
+          state_value         = @state_value,
+          context_json        = @context_json,
           region_fingerprints = @region_fingerprints,
-          status        = 'active',
-          updated_at    = @updated_at
+          logical_start_tick  = @logical_start_tick,
+          status              = 'active',
+          updated_at          = @updated_at
       WHERE id = @id
     `),
     findByDefinitionAndOrg: db.prepare(`
@@ -201,17 +202,18 @@ export function updateActorStatus(id, status) {
   getStmts().updateStatus.run({ id, status, updated_at: now() });
 }
 
-export function migrateActorDefinition(id, { definitionId, stateValue, context, regionFingerprints }) {
+export function migrateActorDefinition(id, { definitionId, stateValue, context, regionFingerprints, logicalStartTick }) {
   const encContext = context != null
     ? encrypt(Buffer.from(JSON.stringify(context)))
     : null;
   getStmts().updateDefinition.run({
     id,
-    definition_id: definitionId,
-    state_value:   stateValue != null ? JSON.stringify(stateValue) : null,
-    context_json:  encContext,
+    definition_id:       definitionId,
+    state_value:         stateValue != null ? JSON.stringify(stateValue) : null,
+    context_json:        encContext,
     region_fingerprints: serializeRegionFingerprints(regionFingerprints),
-    updated_at:    now(),
+    logical_start_tick:  logicalStartTick ?? 0,
+    updated_at:          now(),
   });
 }
 

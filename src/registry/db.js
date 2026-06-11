@@ -510,6 +510,25 @@ export function getDb() {
     console.log(`[db] Migration v17 applied: versioned region_fingerprints enforced (${cleared} legacy rows cleared)`);
   }
 
+  // v18 — UNIQUE index on changepoints to prevent duplicate registration
+  if (!appliedVersions.has(18)) {
+    try {
+      _db.exec(`
+        BEGIN;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_changepoints_unique
+          ON changepoints(org_id, t_star, prefix_hash, refinement);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_par_changepoints_unique
+          ON par_changepoints(org_id, child_def_id);
+        INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (18, unixepoch());
+        COMMIT;
+      `);
+      console.log('[db] Migration v18 applied: unique indexes on changepoints tables');
+    } catch (e) {
+      _db.exec(`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (18, unixepoch());`);
+      console.warn('[db] Migration v18: unique index skipped (existing duplicates):', e.message);
+    }
+  }
+
   // Graceful shutdown
   process.on('exit',    () => { try { _db.close(); } catch {} });
   process.on('SIGINT',  () => { process.exit(0); });

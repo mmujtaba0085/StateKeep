@@ -191,6 +191,10 @@ export async function definitionRoutes(fastify) {
       return reply.code(404).send({ error: `Definition ${parentId} not found` });
     }
 
+    if (parentId === id) {
+      return reply.code(400).send({ error: 'A definition cannot be its own parent' });
+    }
+
     if (hasHistoryPath && hasHistoryRegions) {
       return reply.code(400).send({
         error: 'historyPath and historyRegions are mutually exclusive. Use historyPath for scalar routing or historyRegions for parallel-region routing.',
