@@ -17,6 +17,7 @@
  */
 
 import { getDb, encrypt } from '../registry/db.js';
+import { serializeRegionFingerprints } from '../registry/regionFingerprintCodec.js';
 
 const FLUSH_MS      = 50;
 const HIGH_WATER    = 200;   // flush immediately when pending items reach this
@@ -130,7 +131,7 @@ class WriteBuffer {
       state_value:          d.stateValue != null ? JSON.stringify(d.stateValue) : null,
       context_json:         d.context    != null ? encrypt(Buffer.from(JSON.stringify(d.context))) : null,
       history_fingerprint:  String(d.historyFingerprint ?? '0'),
-      region_fingerprints:  d.regionFingerprints ? JSON.stringify(d.regionFingerprints) : null,
+      region_fingerprints:  serializeRegionFingerprints(d.regionFingerprints),
       last_event_tick:      d.lastEventTick ?? null,
       status:               d.status ?? 'active',
       updated_at:           Date.now(),

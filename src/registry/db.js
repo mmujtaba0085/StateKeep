@@ -12,6 +12,7 @@ import { createCipheriv, createDecipheriv, randomBytes } from 'crypto';
 import { mkdirSync, readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
+import { isVersionedRegionFingerprintsPayload } from './regionFingerprintCodec.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -478,6 +479,35 @@ export function getDb() {
     }
     _db.exec(`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (16, unixepoch());`);
     console.log('[db] Migration v16 applied: created_at added to definitions');
+  }
+
+  // v17 - Require versioned parallel region_fingerprints payloads.
+  // Legacy unversioned maps used raw region hashes and cannot be safely
+  // reinterpreted under keyed path+fingerprint semantics.
+  if (!appliedVersions.has(17)) {
+    const rows = _db.prepare(`
+      SELECT id, region_fingerprints
+      FROM actors
+      WHERE region_fingerprints IS NOT NULL
+    `).all();
+    const clear = _db.prepare(`
+      UPDATE actors
+      SET region_fingerprints = NULL, updated_at = ?
+      WHERE id = ?
+    `);
+    let cleared = 0;
+
+    _db.transaction(() => {
+      const ts = Date.now();
+      for (const row of rows) {
+        if (!isVersionedRegionFingerprintsPayload(row.region_fingerprints)) {
+          cleared += clear.run(ts, row.id).changes;
+        }
+      }
+    })();
+
+    _db.exec(`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (17, unixepoch());`);
+    console.log(`[db] Migration v17 applied: versioned region_fingerprints enforced (${cleared} legacy rows cleared)`);
   }
 
   // Graceful shutdown

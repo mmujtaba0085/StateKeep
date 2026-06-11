@@ -29,9 +29,14 @@
  */
 
 import { getEngine } from './engine.js';
+import {
+  FNV_OFFSET,
+  bigIntToHex64,
+  computeHistoryFingerprint,
+  updateFingerprint as updateFingerprintPure,
+} from './fingerprintChain.js';
 
-export const FNV_OFFSET   = 0xcbf29ce484222325n;
-const UINT64_MAX = 0xFFFFFFFFFFFFFFFFn;
+export { FNV_OFFSET };
 
 // ── computeHash — generic one-shot hash ──────────────────────────────────────
 
@@ -68,20 +73,7 @@ export function computeHash(items) {
  * with actor.historyFingerprint.
  */
 export function computeHistoryHash(eventTypes) {
-  if (!eventTypes || eventTypes.length === 0) {
-    // No events → fingerprint is still the initial sentinel '0'
-    // Return bigIntToHex(FNV_OFFSET) so callers can convert to BigInt correctly.
-    return bigIntToHex(FNV_OFFSET);
-  }
-  const eng = getEngine();
-  let h = eng.fnv1aInit();          // = FNV_OFFSET
-  for (const eventType of eventTypes) {
-    const buf = Buffer.from(String(eventType), 'utf8');
-    h = eng.fnv1aUpdate(h, buf);   // accumulate — no fnv1aFinal, ever
-  }
-  // NO fnv1aFinal: the worker's incremental updateFingerprint never calls it.
-  // The deploy-time prefix hash must be computed identically to the worker's chain.
-  return bigIntToHex(h);
+  return computeHistoryFingerprint(eventTypes);
 }
 
 // ── updateFingerprint — incremental, for non-worker callers ──────────────────
@@ -95,21 +87,13 @@ export function computeHistoryHash(eventTypes) {
 // The fingerprint identifies which transitions an actor took, not what data it carried.
 // Including payload would make historyPath declarations impossible to write.
 export function updateFingerprint(currentHex, eventType) {
-  const eng = getEngine();
-  // '0' sentinel → start from FNV_OFFSET, not from 0n
-  let h = (currentHex && currentHex !== '0')
-    ? BigInt(`0x${currentHex.padStart(16, '0')}`)
-    : FNV_OFFSET;
-  const buf = Buffer.from(String(eventType), 'utf8');
-  h = eng.fnv1aUpdate(h, buf);
-  // NO fnv1aFinal: must match actorWorker.js incremental accumulation exactly.
-  return bigIntToHex(h);
+  return updateFingerprintPure(currentHex, eventType);
 }
 
 // ── Conversion helpers ────────────────────────────────────────────────────────
 
 export function bigIntToHex(bi) {
-  return (BigInt(bi) & UINT64_MAX).toString(16).padStart(16, '0');
+  return bigIntToHex64(bi);
 }
 
 /**

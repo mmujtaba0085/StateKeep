@@ -1,6 +1,4 @@
-const FNV_PRIME = 0x00000100000001B3n;
-const FNV_OFFSET = 0xcbf29ce484222325n;
-const UINT64_MAX = 0xFFFFFFFFFFFFFFFFn;
+import { updateFingerprint } from '../ffi/fingerprintChain.js';
 
 function isPlainObject(value) {
   return value && typeof value === 'object' && !Array.isArray(value);
@@ -10,19 +8,24 @@ function dotPath(parts) {
   return parts.filter(Boolean).join('.');
 }
 
-function updateFingerprint(currentHex, eventType) {
-  let h = (!currentHex || currentHex === '0')
-    ? FNV_OFFSET
-    : BigInt(`0x${String(currentHex).padStart(16, '0')}`);
-  const buf = Buffer.from(String(eventType), 'utf8');
-  for (const byte of buf) {
-    h = ((h ^ BigInt(byte)) * FNV_PRIME) & UINT64_MAX;
-  }
-  return h.toString(16).padStart(16, '0');
-}
-
 function stateValuesEqual(a, b) {
-  return JSON.stringify(a) === JSON.stringify(b);
+  if (a === b) return true;
+  if (Array.isArray(a) || Array.isArray(b)) {
+    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+    return a.every((item, index) => stateValuesEqual(item, b[index]));
+  }
+  if (isPlainObject(a) || isPlainObject(b)) {
+    if (!isPlainObject(a) || !isPlainObject(b)) return false;
+    const aKeys = Object.keys(a).sort();
+    const bKeys = Object.keys(b).sort();
+    if (aKeys.length !== bKeys.length) return false;
+    for (let i = 0; i < aKeys.length; i += 1) {
+      if (aKeys[i] !== bKeys[i]) return false;
+      if (!stateValuesEqual(a[aKeys[i]], b[bKeys[i]])) return false;
+    }
+    return true;
+  }
+  return false;
 }
 
 export function flattenStateValue(value, prefix = []) {

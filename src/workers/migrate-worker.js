@@ -21,7 +21,7 @@ import { fingerprintToBigInt, regionFingerprintsToArray } from '../ffi/hashUtils
 import { incrementMigrated, incrementFailed, updateDeploymentStatus, findDeploymentById } from '../registry/deploymentRepo.js';
 import { migrateActor, invalidateDefinitionCache } from '../runtime/actorManager.js';
 import { getEngine, engineReady } from '../ffi/engine.js';
-import { loadChangepointsAfter, loadParChangepointsAfter } from '../registry/changepointRepo.js';
+import { getWildcardChildDef, loadChangepointsAfter, loadParChangepointsAfter } from '../registry/changepointRepo.js';
 
 const BATCH_SIZE    = 500;
 const POLL_INTERVAL = 500;   // ms
@@ -145,6 +145,9 @@ async function processJob(job) {
       const actorCurrentDef    = findDefinitionById(actorBefore.definitionId);
       const currentDeployedAt  = actorCurrentDef?.deployedAt ?? 0;
       const logicalStartTick   = actorBefore.logicalStartTick ?? 0;
+      const wildcardLowerBound = currentDeployedAt > logicalStartTick
+        ? currentDeployedAt
+        : logicalStartTick;
       const recheckLogicalTime = currentDeployedAt > logicalStartTick
         ? BigInt(currentDeployedAt) + 1n
         : BigInt(logicalStartTick);
@@ -154,6 +157,13 @@ async function processJob(job) {
         recheckLogicalTime,
         BigInt(currentTick)
       );
+
+      if (!recheck) {
+        recheck = getWildcardChildDef(
+          actorBefore.definitionId,
+          wildcardLowerBound
+        );
+      }
 
       if (!recheck && actorBefore.regionFingerprints) {
         const regionArr = regionFingerprintsToArray(actorBefore.regionFingerprints);

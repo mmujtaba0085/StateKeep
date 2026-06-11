@@ -22,6 +22,12 @@ import {
   normalizeHistoryRegions,
   updateRegionFingerprintsForTransition,
 } from '../../src/runtime/statePaths.js';
+import {
+  REGION_FINGERPRINTS_VERSION,
+  deserializeRegionFingerprints,
+  isVersionedRegionFingerprintsPayload,
+  serializeRegionFingerprints,
+} from '../../src/registry/regionFingerprintCodec.js';
 
 const nestedParallelMachine = {
   id: 'checkout',
@@ -175,6 +181,40 @@ describe('SC13-P4: region fingerprint updates', () => {
     assert.equal(next['active.shipping'], '0');
   });
 
+  test('does not update when compound region value only changes object key order', () => {
+    const machine = {
+      id: 'compound-region',
+      initial: 'active',
+      states: {
+        active: {
+          type: 'parallel',
+          states: {
+            editor: {
+              initial: 'main',
+              states: {
+                main: {
+                  type: 'parallel',
+                  states: {
+                    panel: { initial: 'open', states: { open: {} } },
+                    cursor: { initial: 'idle', states: { idle: {} } },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    };
+    const next = updateRegionFingerprintsForTransition(
+      machine,
+      { active: { editor: { panel: 'open', cursor: 'idle' } } },
+      { active: { editor: { cursor: 'idle', panel: 'open' } } },
+      'NOOP',
+      { 'active.editor': computeHistoryHash(['OPEN_EDITOR']) }
+    );
+    assert.equal(next['active.editor'], computeHistoryHash(['OPEN_EDITOR']));
+  });
+
   test('requires active before and after before updating a region', () => {
     const next = updateRegionFingerprintsForTransition(
       nestedParallelMachine,
@@ -195,5 +235,34 @@ describe('SC13-P5: keyed region hashing', () => {
 
     assert.notEqual(payment, shipping);
     assert.equal(payment, BigInt(`0x${encodeRegionFingerprint('active.payment', raw)}`));
+  });
+});
+
+describe('SC13-P6: region fingerprint persistence codec', () => {
+  test('stores versioned region fingerprint payloads and round-trips maps', () => {
+    const regions = {
+      'active.shipping': '0',
+      'active.payment': computeHistoryHash(['PAY']),
+    };
+    const stored = serializeRegionFingerprints(regions);
+    const parsed = JSON.parse(stored);
+
+    assert.equal(parsed._v, REGION_FINGERPRINTS_VERSION);
+    assert.deepEqual(parsed.regions, {
+      'active.payment': computeHistoryHash(['PAY']),
+      'active.shipping': '0',
+    });
+    assert.deepEqual(deserializeRegionFingerprints(stored), parsed.regions);
+    assert.equal(isVersionedRegionFingerprintsPayload(stored), true);
+  });
+
+  test('rejects legacy unversioned maps instead of silently reusing old hashes', () => {
+    const legacy = JSON.stringify({
+      'active.payment': computeHistoryHash(['PAY']),
+    });
+
+    assert.equal(deserializeRegionFingerprints(legacy), null);
+    assert.equal(isVersionedRegionFingerprintsPayload(legacy), false);
+    assert.equal(isVersionedRegionFingerprintsPayload(JSON.stringify({ _v: 2, regions: {} })), false);
   });
 });

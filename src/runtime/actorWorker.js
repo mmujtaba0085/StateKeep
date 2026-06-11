@@ -23,30 +23,7 @@ import {
   initializeRegionFingerprints,
   updateRegionFingerprintsForTransition,
 } from './statePaths.js';
-
-// Local FNV-1a (mirrors fallback.js so workers don't need FFI access)
-const FNV_PRIME    = 0x00000100000001B3n;
-const FNV_OFFSET   = 0xcbf29ce484222325n;
-const UINT64_MAX   = 0xFFFFFFFFFFFFFFFFn;
-
-function fnv1aUpdate(hash, str) {
-  const buf = Buffer.from(String(str), 'utf8');
-  for (const byte of buf) {
-    hash = ((hash ^ BigInt(byte)) * FNV_PRIME) & UINT64_MAX;
-  }
-  return hash;
-}
-
-function updateFingerprint(hexFp, eventType) {
-  // '0' is the initial sentinel meaning "no events yet" — must start from
-  // FNV_OFFSET, not from 0n.  '0' is truthy in JS so the old conditional
-  // was silently computing BigInt('0x0000000000000000') = 0n (wrong).
-  const current = (!hexFp || hexFp === '0')
-    ? FNV_OFFSET
-    : BigInt(`0x${hexFp.padStart(16, '0')}`);
-  const updated = fnv1aUpdate(current, eventType);
-  return updated.toString(16).padStart(16, '0');
-}
+import { updateFingerprint } from '../ffi/fingerprintChain.js';
 
 // ── Context transform helpers ─────────────────────────────────────────────────
 
@@ -110,7 +87,7 @@ export function applyContextTransform(context, transform) {
 
 // ── Actor store ───────────────────────────────────────────────────────────────
 
-/** Map<actorId, { actor, machine, definitionJson }> */
+/** Map<actorId, { actor, machine, definitionId }> */
 const actors = new Map();
 
 // ── Guard / action stub helpers ───────────────────────────────────────────────
@@ -145,12 +122,64 @@ function buildDefaultGuards(definitionJson) {
 
 // Compiled machine cache — keyed by definition ID (string).
 // XState machines are immutable once created, so per-worker caching is safe.
+const MACHINE_CACHE_MAX = 512;
 const _machineCache = new Map();
+const _definitionJsonCache = new Map();
+const _definitionRefCounts = new Map();
+
+function evictOldestCacheEntry() {
+  for (const definitionId of _machineCache.keys()) {
+    if ((_definitionRefCounts.get(definitionId) ?? 0) > 0) continue;
+    _machineCache.delete(definitionId);
+    _definitionJsonCache.delete(definitionId);
+    return true;
+  }
+  return false;
+}
+
+function trimMachineCache() {
+  while (_machineCache.size >= MACHINE_CACHE_MAX) {
+    if (!evictOldestCacheEntry()) return;
+  }
+}
+
+function retainDefinition(definitionId) {
+  if (!definitionId) return;
+  _definitionRefCounts.set(definitionId, (_definitionRefCounts.get(definitionId) ?? 0) + 1);
+}
+
+function releaseDefinition(definitionId) {
+  if (!definitionId) return;
+  const next = (_definitionRefCounts.get(definitionId) ?? 0) - 1;
+  if (next > 0) _definitionRefCounts.set(definitionId, next);
+  else _definitionRefCounts.delete(definitionId);
+}
+
+function setActorEntry(actorId, entry) {
+  const previous = actors.get(actorId);
+  if (previous?.definitionId !== entry.definitionId) {
+    releaseDefinition(previous?.definitionId);
+    retainDefinition(entry.definitionId);
+  }
+  actors.set(actorId, entry);
+}
+
+function removeActorEntry(actorId) {
+  const previous = actors.get(actorId);
+  if (!previous) return null;
+  actors.delete(actorId);
+  releaseDefinition(previous.definitionId);
+  return previous;
+}
 
 function getOrCacheMachine(cacheKey, definitionJson) {
   if (cacheKey && _machineCache.has(cacheKey)) return _machineCache.get(cacheKey);
   const machine = createMachine(definitionJson).provide({ guards: buildDefaultGuards(definitionJson) });
-  if (cacheKey) _machineCache.set(cacheKey, machine);
+  if (cacheKey) {
+    trimMachineCache();
+    _machineCache.set(cacheKey, machine);
+    _definitionJsonCache.set(cacheKey, definitionJson);
+  }
   return machine;
 }
 
@@ -186,7 +215,7 @@ function handleSpawn({ actorId, definitionId, definitionJson, stateSnapshot, ini
   }
 
   actor.start();
-  actors.set(actorId, { actor, machine, definitionJson });
+  setActorEntry(actorId, { actor, machine, definitionId });
 
   const snapshot = actor.getSnapshot();
   return {
@@ -203,7 +232,9 @@ function handleEvent({ actorId, event, historyFingerprint, regionFingerprints })
   const entry = actors.get(actorId);
   if (!entry) throw new Error(`Actor ${actorId} not in worker`);
 
-  const { actor, definitionJson } = entry;
+  const { actor, definitionId } = entry;
+  const definitionJson = _definitionJsonCache.get(definitionId);
+  if (!definitionJson) throw new Error(`Definition ${definitionId} not in worker cache`);
 
   // Capture pre-event state for per-region diff (parallel machines only)
   const preSV = actor.getSnapshot().value;
@@ -282,7 +313,7 @@ function handleHydrate({
   const existing = actors.get(actorId);
   if (existing) {
     try { existing.actor.stop(); } catch {}
-    actors.delete(actorId);
+    removeActorEntry(actorId);
   }
 
   const machine   = getOrCacheMachine(targetDefinitionId, targetDefinitionJson);
@@ -316,7 +347,7 @@ function handleHydrate({
     }
 
     actor.start();
-    actors.set(actorId, { actor, machine, definitionJson: targetDefinitionJson });
+    setActorEntry(actorId, { actor, machine, definitionId: targetDefinitionId });
     const snap = serializeSnapshot(actor.getSnapshot(), actorId);
     // INVARIANT 1: fingerprint passes through unchanged — never recomputed from context
     return {
@@ -344,7 +375,7 @@ function handleHydrate({
   }
 
   actor.start();
-  actors.set(actorId, { actor, machine, definitionJson: targetDefinitionJson });
+  setActorEntry(actorId, { actor, machine, definitionId: targetDefinitionId });
   const snap = serializeSnapshot(actor.getSnapshot(), actorId);
   return {
     ...snap,
@@ -368,7 +399,7 @@ function handleTerminate({ actorId }) {
   if (!entry) return null;
   const snap = serializeSnapshot(entry.actor.getSnapshot(), actorId);
   try { entry.actor.stop(); } catch {}
-  actors.delete(actorId);
+  removeActorEntry(actorId);
   return snap;
 }
 

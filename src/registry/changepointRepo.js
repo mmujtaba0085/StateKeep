@@ -55,7 +55,13 @@ export function loadChangepointsAfter(afterId) {
 
 export function insertParChangepoint({ orgId, tStar, regionHashesHexMap, regionHashesHexArr, refinement, childDefId }) {
   const db = getDb();
+  if (regionHashesHexMap && regionHashesHexArr) {
+    throw new Error('insertParChangepoint accepts either regionHashesHexMap or deprecated regionHashesHexArr, not both');
+  }
+  // regionHashesHexArr is retained for legacy callers/rows. New callers should
+  // pass regionHashesHexMap so the stored selector keeps full region paths.
   const payload = regionHashesHexMap ?? regionHashesHexArr;
+  if (!payload) throw new Error('insertParChangepoint requires region hashes');
   db.prepare(`
     INSERT INTO par_changepoints (org_id, t_star, region_hashes, refinement, child_def_id, created_at)
     VALUES (?, ?, ?, ?, ?, ?)

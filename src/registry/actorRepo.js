@@ -8,6 +8,10 @@
  */
 
 import { getDb, encrypt, decrypt } from './db.js';
+import {
+  deserializeRegionFingerprints,
+  serializeRegionFingerprints,
+} from './regionFingerprintCodec.js';
 import { randomUUID } from 'crypto';
 
 function now() { return Date.now(); }
@@ -24,10 +28,7 @@ function rowToActor(row) {
       context = JSON.parse(decrypt(buf).toString('utf8'));
     } catch { context = null; }
   }
-  let regionFingerprints = null;
-  if (row.region_fingerprints) {
-    try { regionFingerprints = JSON.parse(row.region_fingerprints); } catch {}
-  }
+  const regionFingerprints = deserializeRegionFingerprints(row.region_fingerprints);
   return {
     id:                  row.id,
     definitionId:        row.definition_id,
@@ -189,7 +190,7 @@ export function updateActorState(id, {
     state_value:          stateValue != null ? JSON.stringify(stateValue) : null,
     context_json:         encContext,
     history_fingerprint:  String(historyFingerprint),
-    region_fingerprints:  regionFingerprints ? JSON.stringify(regionFingerprints) : null,
+    region_fingerprints:  serializeRegionFingerprints(regionFingerprints),
     last_event_tick:      lastEventTick ?? null,
     status,
     updated_at:           now(),
@@ -209,7 +210,7 @@ export function migrateActorDefinition(id, { definitionId, stateValue, context, 
     definition_id: definitionId,
     state_value:   stateValue != null ? JSON.stringify(stateValue) : null,
     context_json:  encContext,
-    region_fingerprints: regionFingerprints ? JSON.stringify(regionFingerprints) : null,
+    region_fingerprints: serializeRegionFingerprints(regionFingerprints),
     updated_at:    now(),
   });
 }

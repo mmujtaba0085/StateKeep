@@ -187,7 +187,7 @@ export async function definitionRoutes(fastify) {
     const orgId             = request.orgId;
     const parentDefForTargeting = parentId ? findDefinitionById(parentId) : null;
 
-    if (parentDefForTargeting && parentDefForTargeting.orgId !== orgId) {
+    if (parentId && (!parentDefForTargeting || parentDefForTargeting.orgId !== orgId)) {
       return reply.code(404).send({ error: `Definition ${parentId} not found` });
     }
 
@@ -197,12 +197,18 @@ export async function definitionRoutes(fastify) {
       });
     }
 
+    if (hasHistoryTarget && !parentId) {
+      return reply.code(400).send({
+        error: 'historyPath/historyRegions require parentId because history targeting selects actors from an existing parent definition.',
+      });
+    }
+
     let normalizedHistoryRegions = null;
     if (hasHistoryRegions) {
       try {
         normalizedHistoryRegions = normalizeHistoryRegions(
           historyRegions,
-          parentDefForTargeting?.definitionJson ?? definition
+          parentDefForTargeting.definitionJson
         );
       } catch (err) {
         return reply.code(400).send({ error: err.message });
