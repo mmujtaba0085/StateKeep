@@ -358,6 +358,7 @@ describe('SC6-H: Snapshot consistency — 100 events, state always matches', () 
       `After 20 error/retry cycles should be running, got ${snap2.stateValue}`);
 
     // Verify event count
+    await new Promise(r => setTimeout(r, 100)); // wait for event writes to flush
     const events = (await get(`/v1/actors/${id2}/events`)).body;
     // 1 SPAWN + 1 PICK_UP + 40 (20 ERROR + 20 RETRY) = 42 minimum
     assert.ok(events.total >= 41, `Expected >= 41 events, got ${events.total}`);
