@@ -82,7 +82,7 @@ export function getDb() {
 
   // WAL mode, recommended pragmas
   _db.pragma('journal_mode = WAL');
-  _db.pragma('busy_timeout = 5000');   // wait up to 5s before SQLITE_BUSY
+  _db.pragma('busy_timeout = 15000');  // wait up to 15s before SQLITE_BUSY
   _db.pragma('synchronous  = NORMAL');
   _db.pragma('foreign_keys = ON');
   _db.pragma('cache_size   = -32000');   // 32 MB

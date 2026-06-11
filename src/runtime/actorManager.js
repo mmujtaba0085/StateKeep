@@ -42,7 +42,21 @@ const hotRegistry = new LRUCache(HOT_REGISTRY_SIZE, async (actorId, entry) => {
       status:              'active',
     });
   } catch (e) {
-    console.error(`[actorManager] Spill failed for ${actorId}:`, e);
+    if (e.code === 'SQLITE_BUSY') {
+      // DB write lock held by another process (typically migrate-worker batch).
+      // Defer into the write buffer so the state is retried on the next 50ms flush
+      // rather than discarded. Prevents silent data loss on LRU eviction under load.
+      getWriteBuffer().queueState(actorId, {
+        stateValue:         entry.stateValue,
+        context:            entry.context,
+        historyFingerprint: entry.historyFingerprint,
+        regionFingerprints: entry.regionFingerprints ?? null,
+        lastEventTick:      entry.lastEventTick,
+        status:             'active',
+      });
+    } else {
+      console.error(`[actorManager] Spill failed for ${actorId}:`, e);
+    }
   }
 });
 
