@@ -95,13 +95,13 @@ function WorkerFleetTable() {
     ),
     React.createElement("tbody", null,
       workers.map(w => {
-        const lastBeat = w.lastBeat ? new Date(w.lastBeat).toLocaleTimeString() : "—";
+        const lastBeat = w.lastBeat ? new Date(w.lastBeat).toLocaleString() : "—";
         const uptimeSec = w.startedAt ? Math.floor((Date.now() - w.startedAt) / 1000) : null;
         const recentlyRestarted = w.startedAt && (Date.now() - w.startedAt) < RECENT_MS;
         const startedLabel = !w.startedAt ? "—"
           : recentlyRestarted
             ? (uptimeSec < 60 ? uptimeSec + "s ago" : Math.floor(uptimeSec / 60) + "m ago")
-          : new Date(w.startedAt).toLocaleTimeString();
+          : new Date(w.startedAt).toLocaleString();
         return React.createElement("tr", { key: w.workerId },
           React.createElement("td", { className: "mono" }, w.workerType),
           React.createElement("td", { className: "mono muted", style: { fontSize: 11 } }, w.pid || "—"),
