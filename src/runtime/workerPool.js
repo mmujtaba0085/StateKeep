@@ -33,6 +33,7 @@ import { Worker } from 'worker_threads';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { randomUUID } from 'crypto';
+import os from 'os';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const WORKER_PATH = join(__dirname, 'actorWorker.js');
@@ -363,6 +364,30 @@ export class WorkerPool {
   }
 
   /**
+   * Send a message directly to a specific worker slot, bypassing the actorId hash.
+   * Used for broadcast operations like PRECOMPILE where every worker must receive the message.
+   */
+  sendToSlot(slotIndex, message) {
+    const slot = this.workers[slotIndex];
+    if (!slot) return Promise.resolve(null);
+    const id = randomUUID();
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        slot.pending.delete(id);
+        reject(new Error(`Worker timeout for ${message.type} on slot ${slotIndex}`));
+      }, TIMEOUT_MS);
+      if (!slot.inFlight) {
+        slot.inFlight = true;
+        slot.pending.set(id, { resolve, reject, timer });
+        slot.worker.postMessage({ ...message, id });
+      } else {
+        const item = { id, message, resolve, reject, timer, queuedAt: Date.now(), orgId: '_system' };
+        enqueueItem(slot.normalQueues, slot.normalOrgs, '_system', item);
+      }
+    });
+  }
+
+  /**
    * Send a message to the worker responsible for actorId.
    * @param {string}  actorId
    * @param {object}  message
@@ -508,10 +533,13 @@ let _pool = null;
 
 export function getWorkerPool() {
   if (!_pool) {
-    const maxActors = parseInt(process.env.HOT_REGISTRY_SIZE ?? '10000', 10);
-    const count     = Math.max(1, Math.ceil(maxActors / ACTORS_PER_WORKER));
+    const explicitCount = parseInt(process.env.STATEKEEP_WORKER_COUNT ?? '0', 10);
+    const cpuDefault    = Math.max(4, Math.min(32, os.cpus().length));
+    const maxActors     = parseInt(process.env.HOT_REGISTRY_SIZE ?? '10000', 10);
+    const legacyCount   = (maxActors > 0 && ACTORS_PER_WORKER > 0) ? Math.ceil(maxActors / ACTORS_PER_WORKER) : 0;
+    const count         = explicitCount || Math.max(cpuDefault, legacyCount);
     _pool = new WorkerPool(count);
-    console.log(`[workerPool] Started ${count} actor workers (${ACTORS_PER_WORKER} actors/worker, 1U(burst 5s):${HIGH_PER_ROUND}H:${NORMAL_PER_ROUND}N:1L per-org round-robin)`);
+    console.log(`[workerPool] Started ${count} actor workers (cpu=${os.cpus().length}, 1U(burst 5s):${HIGH_PER_ROUND}H:${NORMAL_PER_ROUND}N:1L per-org round-robin)`);
   }
   return _pool;
 }

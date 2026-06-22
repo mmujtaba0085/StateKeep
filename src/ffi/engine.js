@@ -14,9 +14,11 @@
 import { existsSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
+import { createRequire } from 'module';
 import fallback from './fallback.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+const _require   = createRequire(import.meta.url);
 
 const ENGINE_PATHS = [
   process.env.STATEKEEP_ENGINE_PATH,
@@ -171,12 +173,86 @@ async function tryLoad(libPath) {
   }
 }
 
+// ── N-API addon loader ────────────────────────────────────────────────────────
+
+function tryLoadAddon() {
+  const addonPath = join(__dirname, 'build', 'Release', 'apv-addon.node');
+  if (!existsSync(addonPath)) return null;
+  try {
+    const addon = _require(addonPath);
+    if (!addon || typeof addon.clockTick !== 'function') return null;
+
+    console.log(`[ffi/engine] Loaded N-API addon from: ${addonPath}`);
+    return {
+      available: true,
+
+      clockTick() {
+        return addon.clockTick();
+      },
+
+      registerChangepoint(tStar, prefixHash, refinement, childDefId) {
+        return addon.registerChangepoint(BigInt(tStar), BigInt(prefixHash), BigInt(refinement), childDefId);
+      },
+
+      computeAccessible(currentPrefixHash, actorLogicalTime, currentTime) {
+        return addon.computeAccessible(BigInt(currentPrefixHash), BigInt(actorLogicalTime), BigInt(currentTime));
+      },
+
+      actorStarted(tStar, prefixHash) {
+        addon.actorStarted(BigInt(tStar), BigInt(prefixHash));
+      },
+
+      actorStopped(tStar, prefixHash) {
+        addon.actorStopped(BigInt(tStar), BigInt(prefixHash));
+      },
+
+      vacatePrefix(tStar, prefixHash) {
+        addon.vacatePrefix(BigInt(tStar), BigInt(prefixHash));
+      },
+
+      fnv1aInit() {
+        return addon.fnv1aInit();
+      },
+
+      fnv1aUpdate(hash, data) {
+        const buf = Buffer.isBuffer(data) ? data : Buffer.from(String(data), 'utf8');
+        return addon.fnv1aUpdate(BigInt(hash), buf);
+      },
+
+      fnv1aFinal(hash) {
+        return addon.fnv1aFinal(BigInt(hash));
+      },
+
+      registerChangepointParallel(tStar, regionHashBigInts, refinement, childDefId) {
+        return addon.registerChangepointParallel(
+          BigInt(tStar), regionHashBigInts, BigInt(refinement), childDefId
+        );
+      },
+
+      computeAccessibleParallel(regionHashBigInts, actorLogicalTime, currentTime) {
+        return addon.computeAccessibleParallel(
+          regionHashBigInts, BigInt(actorLogicalTime), BigInt(currentTime)
+        );
+      },
+
+      destroy() {},
+    };
+  } catch (err) {
+    console.debug(`[ffi/engine] N-API addon not available: ${err.message}`);
+    return null;
+  }
+}
+
 // ── Module-level singleton ────────────────────────────────────────────────────
-// koffi.load is synchronous; we need top-level await inside an async IIFE.
 
 let engineSingleton = null;
 
 async function loadEngine() {
+  // Try N-API addon first (zero koffi overhead)
+  const addonEngine = tryLoadAddon();
+  if (addonEngine) { engineSingleton = addonEngine; return; }
+
+  // Fall back to koffi .so loading
   for (const p of ENGINE_PATHS) {
     const e = await tryLoad(p);
     if (e) { engineSingleton = e; return; }

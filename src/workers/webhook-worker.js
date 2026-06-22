@@ -16,7 +16,7 @@
  */
 
 import { createHmac } from 'crypto';
-import { getDb, decrypt } from '../registry/db.js';
+import { getDb, decrypt, isPostgres } from '../registry/db.js';
 import { startHeartbeat } from './heartbeat.js';
 import { engineReady } from '../ffi/engine.js';
 
@@ -25,26 +25,37 @@ const MAX_CONCURRENT         = 20;
 const REQUEST_TIMEOUT_MS     = 10_000;
 const MAX_RETRIES            = 3;
 const AUTO_DISABLE_THRESHOLD = 10;
-const BACKOFF_MS             = [30_000, 60_000, 120_000];   // 30s, 60s, 120s
+const BACKOFF_MS             = [30_000, 60_000, 120_000];
 
 console.log('[webhook-worker] Starting...');
 await engineReady;
-getDb();
+
+if (isPostgres) {
+  const { bootstrapSchema } = await import('../registry/db-postgres.js');
+  await bootstrapSchema();
+} else {
+  getDb();
+}
+
 startHeartbeat('webhook');
 
 async function deliverOne(delivery) {
-  const db = getDb();
+  let webhook;
+  if (isPostgres) {
+    const { queryOne } = await import('../registry/db-postgres.js');
+    webhook = await queryOne(`SELECT id, url, secret, active FROM webhooks WHERE id=$1`, [delivery.webhook_id]);
+  } else {
+    webhook = getDb().prepare(`SELECT id, url, secret, active FROM webhooks WHERE id = ?`).get(delivery.webhook_id);
+  }
 
-  const webhook = db.prepare(`
-    SELECT id, url, secret, active FROM webhooks WHERE id = ?
-  `).get(delivery.webhook_id);
-
-  if (!webhook || webhook.active === 0) {
-    db.prepare(`
-      UPDATE webhook_deliveries
-      SET status = 'failed', error = 'Webhook deactivated', last_attempt = ?
-      WHERE id = ?
-    `).run(Date.now(), delivery.id);
+  const isActive = webhook?.active === 1 || webhook?.active === true;
+  if (!webhook || !isActive) {
+    if (isPostgres) {
+      const { query } = await import('../registry/db-postgres.js');
+      await query(`UPDATE webhook_deliveries SET status='failed', error='Webhook deactivated', last_attempt=$1 WHERE id=$2`, [Date.now(), delivery.id]);
+    } else {
+      getDb().prepare(`UPDATE webhook_deliveries SET status='failed', error='Webhook deactivated', last_attempt=? WHERE id=?`).run(Date.now(), delivery.id);
+    }
     return;
   }
 
@@ -53,17 +64,19 @@ async function deliverOne(delivery) {
     const raw = Buffer.isBuffer(webhook.secret) ? webhook.secret : Buffer.from(webhook.secret);
     secret    = decrypt(raw).toString('utf8');
   } catch (err) {
-    db.prepare(`
-      UPDATE webhook_deliveries
-      SET status = 'failed', error = 'Secret decryption failed', last_attempt = ?
-      WHERE id = ?
-    `).run(Date.now(), delivery.id);
+    if (isPostgres) {
+      const { query } = await import('../registry/db-postgres.js');
+      await query(`UPDATE webhook_deliveries SET status='failed', error='Secret decryption failed', last_attempt=$1 WHERE id=$2`, [Date.now(), delivery.id]);
+    } else {
+      getDb().prepare(`UPDATE webhook_deliveries SET status='failed', error='Secret decryption failed', last_attempt=? WHERE id=?`).run(Date.now(), delivery.id);
+    }
     return;
   }
 
-  // Build the outgoing JSON body (full envelope)
   let parsedPayload;
-  try { parsedPayload = JSON.parse(delivery.payload); } catch { parsedPayload = {}; }
+  try {
+    parsedPayload = typeof delivery.payload === 'string' ? JSON.parse(delivery.payload) : delivery.payload;
+  } catch { parsedPayload = {}; }
 
   const outbound = JSON.stringify({
     id:        delivery.id,
@@ -104,58 +117,68 @@ async function deliverOne(delivery) {
   const attempts = delivery.attempts + 1;
   const now      = Date.now();
 
-  if (success) {
-    db.prepare(`
-      UPDATE webhook_deliveries
-      SET status = 'delivered', attempts = ?, response_code = ?, last_attempt = ?
-      WHERE id = ?
-    `).run(attempts, responseCode, now, delivery.id);
-
-    db.prepare(`
-      UPDATE webhooks SET last_fired_at = ? WHERE id = ?
-    `).run(now, webhook.id);
-
-  } else if (attempts >= MAX_RETRIES) {
-    db.prepare(`
-      UPDATE webhook_deliveries
-      SET status = 'failed', attempts = ?, response_code = ?, error = ?, last_attempt = ?
-      WHERE id = ?
-    `).run(attempts, responseCode, errorMsg ?? `HTTP ${responseCode}`, now, delivery.id);
-
-    const updated = db.prepare(`
-      UPDATE webhooks SET failure_count = failure_count + 1
-      WHERE id = ?
-      RETURNING failure_count
-    `).get(webhook.id);
-
-    const newCount = updated?.failure_count ?? 0;
-    if (newCount >= AUTO_DISABLE_THRESHOLD) {
-      db.prepare(`UPDATE webhooks SET active = 0 WHERE id = ?`).run(webhook.id);
-      console.warn(`[webhook-worker] Auto-disabled webhook ${webhook.id} (failure_count=${newCount})`);
+  if (isPostgres) {
+    const { query, queryOne } = await import('../registry/db-postgres.js');
+    if (success) {
+      await query(`UPDATE webhook_deliveries SET status='delivered', attempts=$1, response_code=$2, last_attempt=$3 WHERE id=$4`, [attempts, responseCode, now, delivery.id]);
+      await query(`UPDATE webhooks SET last_fired_at=$1 WHERE id=$2`, [now, webhook.id]);
+    } else if (attempts >= MAX_RETRIES) {
+      await query(`UPDATE webhook_deliveries SET status='failed', attempts=$1, response_code=$2, error=$3, last_attempt=$4 WHERE id=$5`,
+        [attempts, responseCode, errorMsg ?? `HTTP ${responseCode}`, now, delivery.id]);
+      const updated = await queryOne(`UPDATE webhooks SET failure_count=failure_count+1 WHERE id=$1 RETURNING failure_count`, [webhook.id]);
+      const newCount = updated?.failure_count ?? 0;
+      if (newCount >= AUTO_DISABLE_THRESHOLD) {
+        await query(`UPDATE webhooks SET active=false WHERE id=$1`, [webhook.id]);
+        console.warn(`[webhook-worker] Auto-disabled webhook ${webhook.id} (failure_count=${newCount})`);
+      }
+    } else {
+      const nextRetryAt = now + (BACKOFF_MS[attempts - 1] ?? 120_000);
+      await query(`UPDATE webhook_deliveries SET attempts=$1, response_code=$2, error=$3, last_attempt=$4, next_retry_at=$5 WHERE id=$6`,
+        [attempts, responseCode, errorMsg ?? `HTTP ${responseCode}`, now, nextRetryAt, delivery.id]);
     }
-
   } else {
-    const nextRetryAt = now + (BACKOFF_MS[attempts - 1] ?? 120_000);
-    db.prepare(`
-      UPDATE webhook_deliveries
-      SET attempts = ?, response_code = ?, error = ?, last_attempt = ?, next_retry_at = ?
-      WHERE id = ?
-    `).run(attempts, responseCode, errorMsg ?? `HTTP ${responseCode}`, now, nextRetryAt, delivery.id);
+    const db = getDb();
+    if (success) {
+      db.prepare(`UPDATE webhook_deliveries SET status='delivered', attempts=?, response_code=?, last_attempt=? WHERE id=?`)
+        .run(attempts, responseCode, now, delivery.id);
+      db.prepare(`UPDATE webhooks SET last_fired_at=? WHERE id=?`).run(now, webhook.id);
+    } else if (attempts >= MAX_RETRIES) {
+      db.prepare(`UPDATE webhook_deliveries SET status='failed', attempts=?, response_code=?, error=?, last_attempt=? WHERE id=?`)
+        .run(attempts, responseCode, errorMsg ?? `HTTP ${responseCode}`, now, delivery.id);
+      const updated = db.prepare(`UPDATE webhooks SET failure_count=failure_count+1 WHERE id=? RETURNING failure_count`).get(webhook.id);
+      const newCount = updated?.failure_count ?? 0;
+      if (newCount >= AUTO_DISABLE_THRESHOLD) {
+        db.prepare(`UPDATE webhooks SET active=0 WHERE id=?`).run(webhook.id);
+        console.warn(`[webhook-worker] Auto-disabled webhook ${webhook.id} (failure_count=${newCount})`);
+      }
+    } else {
+      const nextRetryAt = now + (BACKOFF_MS[attempts - 1] ?? 120_000);
+      db.prepare(`UPDATE webhook_deliveries SET attempts=?, response_code=?, error=?, last_attempt=?, next_retry_at=? WHERE id=?`)
+        .run(attempts, responseCode, errorMsg ?? `HTTP ${responseCode}`, now, nextRetryAt, delivery.id);
+    }
   }
 }
 
 async function pollAndDeliver() {
-  const db  = getDb();
   const now = Date.now();
+  let pending;
 
-  const pending = db.prepare(`
-    SELECT id, webhook_id, org_id, event_type, payload, attempts
-    FROM webhook_deliveries
-    WHERE status = 'pending'
-      AND (next_retry_at IS NULL OR next_retry_at <= ?)
-    ORDER BY created_at ASC
-    LIMIT ?
-  `).all(now, MAX_CONCURRENT);
+  if (isPostgres) {
+    const { queryAll } = await import('../registry/db-postgres.js');
+    pending = await queryAll(
+      `SELECT id, webhook_id, org_id, event_type, payload, attempts FROM webhook_deliveries WHERE status='pending' AND (next_retry_at IS NULL OR next_retry_at<=$1) ORDER BY created_at ASC LIMIT $2`,
+      [now, MAX_CONCURRENT]
+    );
+  } else {
+    pending = getDb().prepare(`
+      SELECT id, webhook_id, org_id, event_type, payload, attempts
+      FROM webhook_deliveries
+      WHERE status = 'pending'
+        AND (next_retry_at IS NULL OR next_retry_at <= ?)
+      ORDER BY created_at ASC
+      LIMIT ?
+    `).all(now, MAX_CONCURRENT);
+  }
 
   if (pending.length === 0) return;
 

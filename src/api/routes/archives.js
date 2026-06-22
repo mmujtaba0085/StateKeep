@@ -8,7 +8,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from 'fs';
 import { gunzipSync, gzipSync } from 'zlib';
 import { join } from 'path';
-import { getDb, encrypt } from '../../registry/db.js';
+import { getDb, encrypt, isPostgres } from '../../registry/db.js';
 import { findActorById, createActor, updateActorStatus } from '../../registry/actorRepo.js';
 import { cancelAllPendingForActor } from '../../registry/scheduledEventRepo.js';
 import { adminMiddleware } from '../middleware/auth.js';
@@ -32,25 +32,40 @@ export async function archiveRoutes(fastify) {
     },
   }, async (request, reply) => {
     const { machineId, limit, offset } = request.query;
-    const db = getDb();
-
     let rows;
-    if (machineId) {
-      rows = db.prepare(`
-        SELECT actor_id, org_id, machine_id, archived_at, state_value, definition_id
-        FROM actor_archives
-        WHERE org_id = ? AND machine_id = ?
-        ORDER BY archived_at DESC
-        LIMIT ? OFFSET ?
-      `).all(request.orgId, machineId, limit, offset);
+
+    if (isPostgres) {
+      const { queryAll } = await import('../../registry/db-postgres.js');
+      if (machineId) {
+        rows = await queryAll(
+          `SELECT actor_id, org_id, machine_id, archived_at, state_value, definition_id FROM actor_archives WHERE org_id=$1 AND machine_id=$2 ORDER BY archived_at DESC LIMIT $3 OFFSET $4`,
+          [request.orgId, machineId, limit, offset]
+        );
+      } else {
+        rows = await queryAll(
+          `SELECT actor_id, org_id, machine_id, archived_at, state_value, definition_id FROM actor_archives WHERE org_id=$1 ORDER BY archived_at DESC LIMIT $2 OFFSET $3`,
+          [request.orgId, limit, offset]
+        );
+      }
     } else {
-      rows = db.prepare(`
-        SELECT actor_id, org_id, machine_id, archived_at, state_value, definition_id
-        FROM actor_archives
-        WHERE org_id = ?
-        ORDER BY archived_at DESC
-        LIMIT ? OFFSET ?
-      `).all(request.orgId, limit, offset);
+      const db = getDb();
+      if (machineId) {
+        rows = db.prepare(`
+          SELECT actor_id, org_id, machine_id, archived_at, state_value, definition_id
+          FROM actor_archives
+          WHERE org_id = ? AND machine_id = ?
+          ORDER BY archived_at DESC
+          LIMIT ? OFFSET ?
+        `).all(request.orgId, machineId, limit, offset);
+      } else {
+        rows = db.prepare(`
+          SELECT actor_id, org_id, machine_id, archived_at, state_value, definition_id
+          FROM actor_archives
+          WHERE org_id = ?
+          ORDER BY archived_at DESC
+          LIMIT ? OFFSET ?
+        `).all(request.orgId, limit, offset);
+      }
     }
 
     const archives = rows.map(r => ({
@@ -72,11 +87,14 @@ export async function archiveRoutes(fastify) {
     },
   }, async (request, reply) => {
     const { id } = request.params;
-    const db     = getDb();
 
-    const archiveRow = db.prepare(`
-      SELECT * FROM actor_archives WHERE actor_id = ? AND org_id = ?
-    `).get(id, request.orgId);
+    let archiveRow;
+    if (isPostgres) {
+      const { queryOne } = await import('../../registry/db-postgres.js');
+      archiveRow = await queryOne(`SELECT * FROM actor_archives WHERE actor_id=$1 AND org_id=$2`, [id, request.orgId]);
+    } else {
+      archiveRow = getDb().prepare(`SELECT * FROM actor_archives WHERE actor_id = ? AND org_id = ?`).get(id, request.orgId);
+    }
 
     if (!archiveRow) {
       return reply.code(404).send({ error: `No archive found for actor ${id}` });
@@ -92,13 +110,13 @@ export async function archiveRoutes(fastify) {
     }
 
     // Re-insert actor as active (re-encrypts context with current key)
-    const actor = findActorById(id);
+    const actor = await findActorById(id);
     if (actor && actor.status === 'archived') {
       // Actor row exists but is archived — restore in-place
-      updateActorStatus(id, 'active');
+      await updateActorStatus(id, 'active');
     } else if (!actor) {
       // Actor row was deleted — re-create from archive
-      createActor({
+      await createActor({
         id:                 archiveData.id,
         definitionId:       archiveData.definitionId,
         orgId:              archiveData.orgId,
@@ -112,9 +130,14 @@ export async function archiveRoutes(fastify) {
     }
 
     // Remove archive record
-    db.prepare(`DELETE FROM actor_archives WHERE actor_id = ?`).run(id);
+    if (isPostgres) {
+      const { query } = await import('../../registry/db-postgres.js');
+      await query(`DELETE FROM actor_archives WHERE actor_id=$1`, [id]);
+    } else {
+      getDb().prepare(`DELETE FROM actor_archives WHERE actor_id = ?`).run(id);
+    }
 
-    const restored = findActorById(id);
+    const restored = await findActorById(id);
     return reply.code(201).send(restored);
   });
 
@@ -129,15 +152,22 @@ export async function archiveRoutes(fastify) {
       },
     }, async (request, reply) => {
       const { id } = request.params;
-      const db     = getDb();
 
-      const actor = findActorById(id);
+      const actor = await findActorById(id);
       if (!actor)                    return reply.code(404).send({ error: `Actor ${id} not found` });
       if (actor.status === 'archived') return reply.code(409).send({ error: 'Actor is already archived' });
 
-      const def       = db.prepare('SELECT machine_id FROM definitions WHERE id = ?').get(actor.definitionId);
-      const machineId = def?.machine_id ?? actor.definitionId;
-      const now       = Date.now();
+      let machineId;
+      if (isPostgres) {
+        const { queryOne } = await import('../../registry/db-postgres.js');
+        const def = await queryOne(`SELECT machine_id FROM definitions WHERE id=$1`, [actor.definitionId]);
+        machineId = def?.machine_id ?? actor.definitionId;
+      } else {
+        const def = getDb().prepare('SELECT machine_id FROM definitions WHERE id = ?').get(actor.definitionId);
+        machineId = def?.machine_id ?? actor.definitionId;
+      }
+
+      const now = Date.now();
 
       mkdirSync(ARCHIVE_DIR, { recursive: true });
 
@@ -155,23 +185,32 @@ export async function archiveRoutes(fastify) {
       const filename = join(ARCHIVE_DIR, `${actor.orgId}_${actor.id}.json.gz`);
       writeFileSync(filename, gzipSync(JSON.stringify(archiveData)));
 
-      cancelAllPendingForActor(id, actor.orgId);
-      updateActorStatus(id, 'archived');
+      await cancelAllPendingForActor(id, actor.orgId);
+      await updateActorStatus(id, 'archived');
       evictFromHotRegistry(id);
 
-      db.prepare(`
-        INSERT OR REPLACE INTO actor_archives
-          (actor_id, org_id, machine_id, archived_at, file_path, state_value, definition_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-      `).run(
-        actor.id,
-        actor.orgId,
-        machineId,
-        now,
-        filename,
-        actor.stateValue ? JSON.stringify(actor.stateValue) : null,
-        actor.definitionId,
-      );
+      if (isPostgres) {
+        const { query } = await import('../../registry/db-postgres.js');
+        await query(
+          `INSERT INTO actor_archives (actor_id, org_id, machine_id, archived_at, file_path, state_value, definition_id)
+           VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (actor_id) DO UPDATE SET archived_at=EXCLUDED.archived_at, file_path=EXCLUDED.file_path, state_value=EXCLUDED.state_value`,
+          [actor.id, actor.orgId, machineId, now, filename, actor.stateValue ? JSON.stringify(actor.stateValue) : null, actor.definitionId]
+        );
+      } else {
+        getDb().prepare(`
+          INSERT OR REPLACE INTO actor_archives
+            (actor_id, org_id, machine_id, archived_at, file_path, state_value, definition_id)
+          VALUES (?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          actor.id,
+          actor.orgId,
+          machineId,
+          now,
+          filename,
+          actor.stateValue ? JSON.stringify(actor.stateValue) : null,
+          actor.definitionId,
+        );
+      }
 
       return reply.code(200).send({ archivedAt: now, filePath: filename });
     });

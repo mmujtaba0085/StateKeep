@@ -10,7 +10,7 @@
  *  - CSV stateValue fields are properly escaped (compound states = JSON object strings)
  */
 
-import { getDb, decrypt }              from '../../registry/db.js';
+import { getDb, decrypt, isPostgres }              from '../../registry/db.js';
 import { findActorById, getActorIdentity } from '../../registry/actorRepo.js';
 import { findDefinitionsByMachine }    from '../../registry/definitionRepo.js';
 
@@ -114,19 +114,28 @@ export async function exportRoutes(fastify) {
     const { id }             = request.params;
     const { limit, format }  = request.query;
 
-    const identity = getActorIdentity(id);
+    const identity = await getActorIdentity(id);
     if (!identity || identity.orgId !== request.orgId) {
       return reply.code(404).send({ error: `Actor ${id} not found` });
     }
 
-    const db   = getDb();
-    const rows = db.prepare(`
-      SELECT id, event_type, event_payload, tick, processed_at
-      FROM events
-      WHERE actor_id = ?
-      ORDER BY id DESC
-      LIMIT ?
-    `).all(id, limit ?? 1000);
+    const effectiveLimit = limit ?? 1000;
+    let rows;
+    if (isPostgres) {
+      const { queryAll } = await import('../../registry/db-postgres.js');
+      rows = await queryAll(
+        `SELECT id, event_type, event_payload, tick, processed_at FROM events WHERE actor_id=$1 ORDER BY id DESC LIMIT $2`,
+        [id, effectiveLimit]
+      );
+    } else {
+      rows = getDb().prepare(`
+        SELECT id, event_type, event_payload, tick, processed_at
+        FROM events
+        WHERE actor_id = ?
+        ORDER BY id DESC
+        LIMIT ?
+      `).all(id, effectiveLimit);
+    }
 
     rows.reverse(); // return in chronological order
 
@@ -141,7 +150,7 @@ export async function exportRoutes(fastify) {
         .send(csvHeader + csvRows);
     }
 
-    const actor = findActorById(id);
+    const actor = await findActorById(id);
     return reply.send({
       actor: {
         id:                 identity.id,
@@ -156,7 +165,7 @@ export async function exportRoutes(fastify) {
       },
       events:     decodeEvents(rows),
       eventCount: rows.length,
-      limited:    rows.length === (limit ?? 1000),
+      limited:    rows.length === effectiveLimit,
       exportedAt: new Date().toISOString(),
     });
   });
@@ -180,23 +189,30 @@ export async function exportRoutes(fastify) {
     const { machineId } = request.params;
     const format        = request.query.format ?? 'json';
     const orgId         = request.orgId;
-    const db            = getDb();
 
     // Verify the machine exists for this org (at least one definition)
-    const defs = findDefinitionsByMachine(machineId, orgId);
+    const defs = await findDefinitionsByMachine(machineId, orgId);
     if (!defs || defs.length === 0) {
       return reply.code(404).send({ error: `Machine ${machineId} not found` });
     }
 
-    // Fetch actors across all versions of the machine, capped at MACHINE_EXPORT_LIMIT
-    const actorRows = db.prepare(`
-      SELECT a.*
-      FROM actors a
-      JOIN definitions d ON a.definition_id = d.id
-      WHERE d.machine_id = ? AND a.org_id = ?
-      ORDER BY a.created_at ASC
-      LIMIT ?
-    `).all(machineId, orgId, MACHINE_EXPORT_LIMIT);
+    let actorRows;
+    if (isPostgres) {
+      const { queryAll } = await import('../../registry/db-postgres.js');
+      actorRows = await queryAll(
+        `SELECT a.* FROM actors a JOIN definitions d ON a.definition_id=d.id WHERE d.machine_id=$1 AND a.org_id=$2 ORDER BY a.created_at ASC LIMIT $3`,
+        [machineId, orgId, MACHINE_EXPORT_LIMIT]
+      );
+    } else {
+      actorRows = getDb().prepare(`
+        SELECT a.*
+        FROM actors a
+        JOIN definitions d ON a.definition_id = d.id
+        WHERE d.machine_id = ? AND a.org_id = ?
+        ORDER BY a.created_at ASC
+        LIMIT ?
+      `).all(machineId, orgId, MACHINE_EXPORT_LIMIT);
+    }
 
     const actors = actorRows.map(rowToActorRaw);
 
@@ -215,14 +231,23 @@ export async function exportRoutes(fastify) {
     let eventsByActor = new Map();
 
     if (actorIds.length > 0) {
-      // Batch query — SQLite binds are positional; build placeholders dynamically
-      const placeholders = actorIds.map(() => '?').join(',');
-      const evRows = db.prepare(`
-        SELECT actor_id, id, event_type, event_payload, tick, processed_at
-        FROM events
-        WHERE actor_id IN (${placeholders})
-        ORDER BY actor_id, id ASC
-      `).all(...actorIds);
+      let evRows;
+      if (isPostgres) {
+        const { queryAll } = await import('../../registry/db-postgres.js');
+        const placeholders = actorIds.map((_, i) => `$${i + 1}`).join(',');
+        evRows = await queryAll(
+          `SELECT actor_id, id, event_type, event_payload, tick, processed_at FROM events WHERE actor_id IN (${placeholders}) ORDER BY actor_id, id ASC`,
+          actorIds
+        );
+      } else {
+        const placeholders = actorIds.map(() => '?').join(',');
+        evRows = getDb().prepare(`
+          SELECT actor_id, id, event_type, event_payload, tick, processed_at
+          FROM events
+          WHERE actor_id IN (${placeholders})
+          ORDER BY actor_id, id ASC
+        `).all(...actorIds);
+      }
 
       for (const row of evRows) {
         if (!eventsByActor.has(row.actor_id)) eventsByActor.set(row.actor_id, []);

@@ -439,6 +439,12 @@ if (parentPort) parentPort.on('message', (msg) => {
       case 'SNAPSHOT':  result = handleSnapshot(msg);  break;
       case 'TERMINATE': result = handleTerminate(msg); break;
       case 'PING':      result = { alive: true, actorCount: actors.size }; break;
+      case 'PRECOMPILE':
+        // Pre-compile an XState machine into the worker cache so the first
+        // real SPAWN or HYDRATE call for this definition has zero compile cost.
+        getOrCacheMachine(msg.definitionId, msg.definitionJson);
+        result = { ok: true };
+        break;
       case 'BATCH_EVENTS': {
         // Chain fingerprints across events so each one builds on the previous result.
         // Ignore the per-event historyFingerprint sent by the pool (may be stale when

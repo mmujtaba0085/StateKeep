@@ -1,7 +1,7 @@
 /**
  * src/ffi/hashUtils.js
  *
- * FNV-1a 64-bit hash helpers that wrap the engine's apv_fnv1a_* functions
+ * FNV-1a hash helpers that wrap the engine's apv_fnv1a_* functions
  * (or the JS fallback equivalents).
  *
  * Two hashing surfaces exist here and must NOT be confused:
@@ -9,7 +9,7 @@
  *   computeHash(items)
  *     Generic multi-item hash (calls fnv1aFinal once at the end).
  *     Used for computing prefix_hash when historyPath is absent
- *     and for other one-shot hash needs.
+ *     and for other one-shot hash needs (region fingerprints).
  *
  *   computeHistoryHash(eventTypes)
  *     Mirrors exactly what actorWorker.js produces when processing a
@@ -20,30 +20,36 @@
  *
  * Actor fingerprints in the DB are produced by the worker's incremental
  * updateFingerprint (which chains fnv1aUpdate calls without per-step
- * finalization, starting from FNV_OFFSET for the '0' sentinel).
+ * finalization, starting from FNV32_OFFSET for the '0' sentinel).
  * computeHistoryHash replicates this so that:
  *
  *   actor.historyFingerprint === computeHistoryHash([evt1, evt2, ...evtN])
  *
  * for an actor that processed exactly evt1…evtN in that order.
+ *
+ * Type note: when the real C engine is loaded, fnv1aUpdate/fnv1aFinal return
+ * BigInt (64-bit). In fallback mode they return plain numbers (32-bit).
+ * bigIntToHex() handles both paths so callers are type-agnostic.
  */
 
 import { getEngine } from './engine.js';
 import {
-  FNV_OFFSET,
+  FNV32_OFFSET,
   bigIntToHex64,
   computeHistoryFingerprint,
   updateFingerprint as updateFingerprintPure,
 } from './fingerprintChain.js';
 
-export { FNV_OFFSET };
+// Re-export as FNV_OFFSET for callers that import the old name
+export { FNV32_OFFSET as FNV_OFFSET };
+export { FNV32_OFFSET };
 
 // ── computeHash — generic one-shot hash ──────────────────────────────────────
 
 /**
- * Compute a FNV-1a 64-bit hash over an array of string/Buffer items.
+ * Compute a FNV-1a hash over an array of string/Buffer items.
  * Calls fnv1aFinal once at the end.
- * Returns a 16-char lowercase hex string.
+ * Returns a lowercase hex string (16 chars when C engine; 8 chars in fallback).
  */
 export function computeHash(items) {
   const eng = getEngine();
@@ -60,17 +66,8 @@ export function computeHash(items) {
 
 /**
  * Compute the fingerprint that an actor would have after processing
- * `eventTypes` in sequence, starting from the '0' initial sentinel
- * (i.e. from FNV_OFFSET).
- *
- * This mirrors actorWorker.js updateFingerprint exactly:
- *   - Starts from FNV_OFFSET (the '0' sentinel maps to this)
- *   - Chains fnv1aUpdate for each event type string
- *   - Does NOT call fnv1aFinal between steps
- *   - Does NOT call fnv1aFinal at the end (matches actorWorker chain exactly)
- *
- * Returns a 16-char lowercase hex string suitable for direct comparison
- * with actor.historyFingerprint.
+ * `eventTypes` in sequence, starting from the '0' initial sentinel.
+ * Returns an 8-char lowercase hex string (FNV-1a 32-bit).
  */
 export function computeHistoryHash(eventTypes) {
   return computeHistoryFingerprint(eventTypes);
@@ -78,35 +75,35 @@ export function computeHistoryHash(eventTypes) {
 
 // ── updateFingerprint — incremental, for non-worker callers ──────────────────
 
-/**
- * Update an existing fingerprint (hex string or '0' sentinel) with one
- * new event type.  Mirrors the worker's chain exactly.
- * Returns the new fingerprint as a 16-char hex string.
- */
-// Only event.type contributes to the fingerprint, not payload.
-// The fingerprint identifies which transitions an actor took, not what data it carried.
-// Including payload would make historyPath declarations impossible to write.
+/** Update an existing fingerprint hex string with one new event type. */
 export function updateFingerprint(currentHex, eventType) {
   return updateFingerprintPure(currentHex, eventType);
 }
 
 // ── Conversion helpers ────────────────────────────────────────────────────────
 
+/**
+ * Convert a hash value (BigInt from C engine, or number from fallback) to hex.
+ * C engine → 16-char hex; fallback → 16-char hex (zero-padded).
+ * Always returns 16 chars so region fingerprint consumers get a consistent width.
+ */
 export function bigIntToHex(bi) {
-  return bigIntToHex64(bi);
+  if (typeof bi === 'bigint') {
+    return (bi & 0xFFFFFFFFFFFFFFFFn).toString(16).padStart(16, '0');
+  }
+  return (bi >>> 0).toString(16).padStart(16, '0');
 }
 
 /**
  * Convert a stored fingerprint hex string to BigInt for engine calls.
- * The '0' sentinel means "no events processed".
+ * The '0' sentinel means "no events processed" and maps to FNV32_OFFSET.
  *
  * Use hexToBigInt when you want 0n as an explicit wildcard (e.g. for
  * apv_register_changepoint when no historyPath is provided).
  *
  * Use fingerprintToBigInt when passing an actor's historyFingerprint
  * to apv_compute_accessible or apv_actor_started — '0' must map to
- * FNV_OFFSET because in the new engine 0n == APV_PREFIX_WILDCARD and
- * would incorrectly match every wildcard changepoint.
+ * FNV32_OFFSET because 0n == APV_PREFIX_WILDCARD.
  */
 export function hexToBigInt(hex) {
   if (!hex || hex === '0') return 0n;
@@ -115,7 +112,7 @@ export function hexToBigInt(hex) {
 
 /** Convert actor historyFingerprint hex to BigInt for engine calls. */
 export function fingerprintToBigInt(hex) {
-  if (!hex || hex === '0') return FNV_OFFSET;
+  if (!hex || hex === '0') return BigInt(FNV32_OFFSET);
   return BigInt(`0x${hex.padStart(16, '0')}`);
 }
 
@@ -134,7 +131,7 @@ export function computeRegionHashes(eventsByRegion) {
 }
 
 function normalizeRegionFingerprintHex(hex) {
-  if (!hex || hex === '0') return bigIntToHex(FNV_OFFSET);
+  if (!hex || hex === '0') return bigIntToHex(BigInt(FNV32_OFFSET));
   return String(hex).padStart(16, '0').toLowerCase();
 }
 

@@ -42,7 +42,7 @@ export async function websocketRoutes(fastify) {
     const actorId = request.params.id;
 
     // Verify actor exists and belongs to requesting org
-    const actor = findActorById(actorId);
+    const actor = await findActorById(actorId);
     if (!actor || actor.orgId !== request.orgId) {
       socket.send(JSON.stringify({ type: 'ERROR', message: `Actor ${actorId} not found` }));
       socket.close(4004, 'Actor not found');

@@ -16,7 +16,7 @@ import {
   findDueEvents,
   findDeadLetter,
 } from '../../registry/scheduledEventRepo.js';
-import { getDb } from '../../registry/db.js';
+import { getDb, isPostgres } from '../../registry/db.js';
 
 export async function scheduledRoutes(fastify) {
 
@@ -43,7 +43,7 @@ export async function scheduledRoutes(fastify) {
     const { id }             = request.params;
     const { type, payload, fireAt } = request.body;
 
-    const actor = findActorById(id);
+    const actor = await findActorById(id);
     if (!actor || actor.orgId !== request.orgId) {
       return reply.code(404).send({ error: `Actor ${id} not found` });
     }
@@ -51,7 +51,7 @@ export async function scheduledRoutes(fastify) {
       return reply.code(409).send({ error: `Actor ${id} is ${actor.status}` });
     }
 
-    const schedId = createScheduledEvent({
+    const schedId = await createScheduledEvent({
       actorId:   id,
       orgId:     request.orgId,
       eventType: type,
@@ -85,12 +85,12 @@ export async function scheduledRoutes(fastify) {
     const { id } = request.params;
     const status  = request.query.status ?? 'all';
 
-    const actor = findActorById(id);
+    const actor = await findActorById(id);
     if (!actor || actor.orgId !== request.orgId) {
       return reply.code(404).send({ error: `Actor ${id} not found` });
     }
 
-    const events = findByActor(id, request.orgId, status);
+    const events = await findByActor(id, request.orgId, status);
     return reply.send({ actorId: id, scheduledEvents: events });
   });
 
@@ -109,7 +109,7 @@ export async function scheduledRoutes(fastify) {
   }, async (request, reply) => {
     const { id, sid } = request.params;
 
-    const actor = findActorById(id);
+    const actor = await findActorById(id);
     if (!actor || actor.orgId !== request.orgId) {
       return reply.code(404).send({ error: `Actor ${id} not found` });
     }
@@ -119,7 +119,7 @@ export async function scheduledRoutes(fastify) {
       return reply.code(400).send({ error: 'Invalid scheduled event id' });
     }
 
-    const changed = cancelScheduledEvent(sidNum, id, request.orgId);
+    const changed = await cancelScheduledEvent(sidNum, id, request.orgId);
     if (!changed) {
       return reply.code(404).send({ error: `Scheduled event ${sid} not found or already finished` });
     }
@@ -138,14 +138,22 @@ export async function scheduledRoutes(fastify) {
       },
     },
   }, async (request, reply) => {
-    const db    = getDb();
     const limit = request.query.limit ?? 100;
-    const rows  = db.prepare(`
-      SELECT * FROM scheduled_events
-      WHERE status = 'pending' AND org_id = ?
-      ORDER BY fire_at ASC
-      LIMIT ?
-    `).all(request.orgId, limit);
+    let rows;
+    if (isPostgres) {
+      const { queryAll } = await import('../../registry/db-postgres.js');
+      rows = await queryAll(
+        `SELECT * FROM scheduled_events WHERE status='pending' AND org_id=$1 ORDER BY fire_at ASC LIMIT $2`,
+        [request.orgId, limit]
+      );
+    } else {
+      rows = getDb().prepare(`
+        SELECT * FROM scheduled_events
+        WHERE status = 'pending' AND org_id = ?
+        ORDER BY fire_at ASC
+        LIMIT ?
+      `).all(request.orgId, limit);
+    }
 
     const scheduled = rows.map(r => ({
       id:        r.id,

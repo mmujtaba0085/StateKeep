@@ -7,45 +7,70 @@
  * crash a worker.
  */
 
-import { getDb } from '../registry/db.js';
+import { getDb, isPostgres } from '../registry/db.js';
 
 export function startHeartbeat(workerType, intervalMs = 30_000) {
   const workerId  = `${workerType}-${process.pid}`;
   const startedAt = Date.now();
-  const db        = getDb();
 
-  // On startup, remove all existing rows for this worker type that belong to
-  // other PIDs. PM2 restarts happen in seconds — the old row is still "fresh"
-  // (last_beat < 2 min old) when the new process starts, so a time-based prune
-  // misses it and ghost records accumulate. Deleting by worker_id mismatch
-  // clears all prior instances regardless of how recently they ran.
-  try {
-    db.prepare(`
-      DELETE FROM worker_heartbeats
-      WHERE worker_type = ? AND worker_id != ?
-    `).run(workerType, workerId);
-  } catch {}
+  async function upsertBeat() {
+    if (isPostgres) {
+      const { query } = await import('../registry/db-postgres.js');
+      await query(
+        `INSERT INTO worker_heartbeats (worker_id, worker_type, last_beat, started_at, pid)
+         VALUES ($1,$2,$3,$4,$5)
+         ON CONFLICT(worker_id) DO UPDATE SET last_beat=EXCLUDED.last_beat`,
+        [workerId, workerType, Date.now(), startedAt, process.pid]
+      );
+    } else {
+      const db = getDb();
+      db.prepare(`
+        INSERT INTO worker_heartbeats (worker_id, worker_type, last_beat, started_at, pid)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(worker_id) DO UPDATE SET last_beat = excluded.last_beat
+      `).run(workerId, workerType, Date.now(), startedAt, process.pid);
+    }
+  }
 
-  const upsert = db.prepare(`
-    INSERT INTO worker_heartbeats (worker_id, worker_type, last_beat, started_at, pid)
-    VALUES (?, ?, ?, ?, ?)
-    ON CONFLICT(worker_id) DO UPDATE SET last_beat = excluded.last_beat
-  `);
+  async function pruneOtherInstances() {
+    if (isPostgres) {
+      const { query } = await import('../registry/db-postgres.js');
+      await query(
+        `DELETE FROM worker_heartbeats WHERE worker_type=$1 AND worker_id!=$2`,
+        [workerType, workerId]
+      );
+    } else {
+      try {
+        getDb().prepare(`
+          DELETE FROM worker_heartbeats WHERE worker_type = ? AND worker_id != ?
+        `).run(workerType, workerId);
+      } catch {}
+    }
+  }
 
-  // Cached DELETE — prepared once, reused in both SIGTERM and SIGINT handlers.
-  const del = db.prepare(`DELETE FROM worker_heartbeats WHERE worker_id = ?`);
+  async function deleteBeat() {
+    if (isPostgres) {
+      const { query } = await import('../registry/db-postgres.js');
+      await query(`DELETE FROM worker_heartbeats WHERE worker_id=$1`, [workerId]);
+    } else {
+      try { getDb().prepare(`DELETE FROM worker_heartbeats WHERE worker_id = ?`).run(workerId); } catch {}
+    }
+  }
+
+  // Remove stale records from prior runs of this worker type
+  pruneOtherInstances().catch(() => {});
 
   // Write immediately on startup
-  try { upsert.run(workerId, workerType, Date.now(), startedAt, process.pid); } catch {}
+  upsertBeat().catch(() => {});
 
   const interval = setInterval(() => {
-    try { upsert.run(workerId, workerType, Date.now(), startedAt, process.pid); } catch {}
+    upsertBeat().catch(() => {});
   }, intervalMs);
 
   interval.unref();
 
-  process.on('SIGTERM', () => { try { del.run(workerId); } catch {} });
-  process.on('SIGINT',  () => { try { del.run(workerId); } catch {} });
+  process.on('SIGTERM', () => { deleteBeat().catch(() => {}); });
+  process.on('SIGINT',  () => { deleteBeat().catch(() => {}); });
 
   return { workerId, stop: () => clearInterval(interval) };
 }

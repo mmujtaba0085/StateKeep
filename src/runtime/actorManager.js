@@ -20,7 +20,7 @@ import {
   getActorDefinitionId,
 } from '../registry/actorRepo.js';
 import { findDefinitionById } from '../registry/definitionRepo.js';
-import { getDb } from '../registry/db.js';
+import { isPostgres } from '../registry/db.js';
 import { emitWebhookEvent } from '../api/lib/webhookEmitter.js';
 import { getWildcardChildDef, loadChangepointsAfter, loadParChangepointsAfter } from '../registry/changepointRepo.js';
 
@@ -33,7 +33,7 @@ const IDLE_TIMEOUT_MS    = parseInt(process.env.IDLE_TIMEOUT_SECONDS  ?? '300', 
 
 const hotRegistry = new LRUCache(HOT_REGISTRY_SIZE, async (actorId, entry) => {
   try {
-    updateActorState(actorId, {
+    await updateActorState(actorId, {
       stateValue:          entry.stateValue,
       context:             entry.context,
       historyFingerprint:  entry.historyFingerprint,
@@ -76,10 +76,10 @@ setInterval(() => {
 const _defCache    = new Map();   // definitionId → { def, expiresAt }
 const DEF_CACHE_TTL_MS = 60_000;
 
-function cachedFindDefinition(definitionId) {
+async function cachedFindDefinition(definitionId) {
   const cached = _defCache.get(definitionId);
   if (cached && cached.expiresAt > Date.now()) return cached.def;
-  const def = findDefinitionById(definitionId);
+  const def = await findDefinitionById(definitionId);
   if (def) _defCache.set(definitionId, { def, expiresAt: Date.now() + DEF_CACHE_TTL_MS });
   return def;
 }
@@ -157,7 +157,7 @@ function touch(id, entry) {
 
 async function ensureInWorker(actorId, actor, priority = 'normal', orgId = '_system') {
   const pool = getWorkerPool();
-  const def  = cachedFindDefinition(actor.definitionId);
+  const def  = await cachedFindDefinition(actor.definitionId);
   if (!def) throw new Error(`Definition ${actor.definitionId} not found`);
 
   await pool.send(actorId, {
@@ -178,7 +178,7 @@ async function ensureInWorker(actorId, actor, priority = 'normal', orgId = '_sys
  * Spawn a new actor from a definition.
  */
 export async function spawnActor({ definitionId, orgId, initialContext, logicalStartTick }) {
-  const def = cachedFindDefinition(definitionId);
+  const def = await cachedFindDefinition(definitionId);
   if (!def) throw new Error(`Definition not found: ${definitionId}`);
   if (!orgId) throw new Error('orgId is required to spawn an actor');
   if (def.orgId && def.orgId !== orgId) throw Object.assign(
@@ -191,7 +191,7 @@ export async function spawnActor({ definitionId, orgId, initialContext, logicalS
 
   const actorLogicalTick = logicalStartTick ?? def.deployedAt ?? 0;
 
-  dbCreateActor({
+  await dbCreateActor({
     id: actorId,
     definitionId,
     orgId,
@@ -213,7 +213,7 @@ export async function spawnActor({ definitionId, orgId, initialContext, logicalS
   // fall back to the caller-supplied initialContext so it persists in DB + hot registry.
   const effectiveContext = workerResult.context ?? initialContext ?? {};
 
-  updateActorState(actorId, {
+  await updateActorState(actorId, {
     stateValue:         workerResult.stateValue,
     context:            effectiveContext,
     historyFingerprint: '0',
@@ -264,7 +264,7 @@ export async function sendEvent(actorId, event, tick, opts = {}) {
   let entry = hotRegistry.get(actorId);
   let workerNeedsReset = false;
   if (entry) {
-    const dbRow = getActorDefinitionId(actorId);
+    const dbRow = await getActorDefinitionId(actorId);
     if (dbRow && dbRow.definitionId !== entry.definitionId) {
       hotRegistry.delete(actorId);   // delete, not evict, to avoid overwriting DB status
       entry = null;
@@ -275,7 +275,7 @@ export async function sendEvent(actorId, event, tick, opts = {}) {
     }
   }
   if (!entry) {
-    const actor = findActorById(actorId);
+    const actor = await findActorById(actorId);
     if (!actor) throw new Error(`Actor not found: ${actorId}`);
     if (actor.status === 'terminated' || actor.status === 'archived') {
       throw new Error(`Actor ${actorId} is ${actor.status}`);
@@ -332,7 +332,7 @@ export async function sendEvent(actorId, event, tick, opts = {}) {
         // Use the same logicalTime correction as definitions.js step-5:
         // if the actor has already migrated once, search strictly after the current
         // definition's t_star to avoid routing backward to an older version.
-        const currentDef        = cachedFindDefinition(entry.definitionId);
+        const currentDef        = await cachedFindDefinition(entry.definitionId);
         const currentDeployedAt = currentDef?.deployedAt ?? 0;
         const logicalTime = currentDeployedAt > (entry.logicalStartTick ?? 0)
           ? BigInt(currentDeployedAt) + 1n
@@ -349,7 +349,7 @@ export async function sendEvent(actorId, event, tick, opts = {}) {
         // never matches an actor whose fingerprint is non-zero. If the engine found
         // nothing, check the DB for a wildcard (prefix_hash='0') changepoint.
         if (!targetDefId) {
-          targetDefId = getWildcardChildDef(
+          targetDefId = await getWildcardChildDef(
             entry.definitionId,
             entry.logicalStartTick ?? 0
           );
@@ -372,7 +372,7 @@ export async function sendEvent(actorId, event, tick, opts = {}) {
         // family can match actors in another family. Only allow migration to a definition
         // in the SAME machine family as the actor's current definition.
         if (targetDefId && targetDefId !== entry.definitionId) {
-          const targetDef = cachedFindDefinition(targetDefId);
+          const targetDef = await cachedFindDefinition(targetDefId);
           if (targetDef && currentDef && targetDef.machineId !== currentDef.machineId) {
             targetDefId = null;
           }
@@ -382,7 +382,7 @@ export async function sendEvent(actorId, event, tick, opts = {}) {
         // before the actor's current definition (engine can return stale routes when
         // logicalStartTick pre-dates multiple changepoints).
         if (targetDefId && targetDefId !== entry.definitionId) {
-          const targetDef = cachedFindDefinition(targetDefId);
+          const targetDef = await cachedFindDefinition(targetDefId);
           if (targetDef && currentDef && Number(targetDef.deployedAt) <= Number(currentDef.deployedAt)) {
             logDecision({
               actorId, orgId: entry.orgId, trigger: 'inline_event', evaluatedAt: currentTick,
@@ -527,7 +527,7 @@ export async function sendEvent(actorId, event, tick, opts = {}) {
  * Get current actor state snapshot.
  */
 export async function getActorState(actorId, { priority = 'normal' } = {}) {
-  const actor = findActorById(actorId);
+  const actor = await findActorById(actorId);
   if (!actor) throw new Error(`Actor not found: ${actorId}`);
 
   // If DB says terminated or archived, return DB state — do not consult hot registry.
@@ -590,7 +590,7 @@ export async function terminateActor(actorId, { priority = 'normal', orgId } = {
 
   // Capture before removal so actorStopped gets accurate args
   const hot    = hotRegistry.get(actorId);
-  const fromDb = hot ? null : findActorById(actorId);
+  const fromDb = hot ? null : await findActorById(actorId);
   const fp     = hot?.historyFingerprint ?? fromDb?.historyFingerprint ?? '0';
   const lst    = hot?.logicalStartTick   ?? fromDb?.logicalStartTick   ?? 0;
   const _orgId = orgId ?? hot?.orgId ?? fromDb?.orgId ?? '_system';
@@ -605,7 +605,7 @@ export async function terminateActor(actorId, { priority = 'normal', orgId } = {
     if (key.startsWith(_prefix)) migrationCheckCache.delete(key);
   }
   getWriteBuffer().flushActor(actorId);  // persist latest state before marking terminal
-  updateActorStatus(actorId, 'terminated');
+  await updateActorStatus(actorId, 'terminated');
 
   try {
     const eng = getEngine();
@@ -621,10 +621,10 @@ export async function terminateActor(actorId, { priority = 'normal', orgId } = {
  */
 export async function migrateActor(actorId, targetDefinitionId, { priority = 'normal', orgId } = {}) {
   const pool   = getWorkerPool();
-  const actor  = findActorById(actorId);
+  const actor  = await findActorById(actorId);
   if (!actor) throw new Error(`Actor not found: ${actorId}`);
 
-  const targetDef = cachedFindDefinition(targetDefinitionId);
+  const targetDef = await cachedFindDefinition(targetDefinitionId);
   if (!targetDef) throw new Error(`Target definition not found: ${targetDefinitionId}`);
 
   const stateMapping     = targetDef.definitionJson._stateMapping    ?? {};
@@ -659,7 +659,7 @@ export async function migrateActor(actorId, targetDefinitionId, { priority = 'no
   }
 
   const newLogicalStartTick = Number(targetDef.deployedAt) + 1;
-  migrateActorDefinition(actorId, {
+  await migrateActorDefinition(actorId, {
     definitionId:       targetDefinitionId,
     stateValue:         result.stateValue,
     context:            result.context,
@@ -696,46 +696,85 @@ export async function migrateActor(actorId, targetDefinitionId, { priority = 'no
  * Seed the in-process APV engine registry from all changepoints persisted in the DB.
  * Call once at API server startup — the engine starts with an empty registry after
  * every process restart, so changepoints deployed before the restart must be re-registered.
+ *
+ * Also pre-warms the XState machine cache in every worker thread so the first
+ * real SPAWN/HYDRATE for an active definition has zero compile cost.
  */
-export function seedEngineRegistry() {
+export async function seedEngineRegistry() {
   const eng = getEngine();
-  if (!eng.available) return;
+  if (eng.available) {
+    const scalars = await loadChangepointsAfter(0);
+    for (const row of scalars) {
+      try {
+        eng.registerChangepoint(
+          BigInt(row.t_star),
+          BigInt(row.prefix_hash),
+          BigInt(row.refinement),
+          row.child_def_id
+        );
+      } catch (e) {
+        console.warn(`[actorManager] seedEngineRegistry skip ${row.child_def_id}: ${e.message}`);
+      }
+    }
 
-  const scalars = loadChangepointsAfter(0);
-  for (const row of scalars) {
-    try {
-      eng.registerChangepoint(
-        BigInt(row.t_star),
-        BigInt(row.prefix_hash),
-        BigInt(row.refinement),
-        row.child_def_id
-      );
-    } catch (e) {
-      console.warn(`[actorManager] seedEngineRegistry skip ${row.child_def_id}: ${e.message}`);
+    const parallels = await loadParChangepointsAfter(0);
+    for (const row of parallels) {
+      try {
+        const storedRegions = JSON.parse(row.region_hashes);
+        const regionArr = Array.isArray(storedRegions)
+          ? storedRegions.map(h => BigInt(`0x${String(h).padStart(16, '0')}`))
+          : regionFingerprintsToArray(storedRegions);
+        if (!regionArr || regionArr.length === 0) continue;
+        eng.registerChangepointParallel(
+          BigInt(row.t_star),
+          regionArr,
+          BigInt(row.refinement),
+          row.child_def_id
+        );
+      } catch (e) {
+        console.warn(`[actorManager] seedEngineRegistry skip parallel ${row.child_def_id}: ${e.message}`);
+      }
+    }
+
+    if (scalars.length + parallels.length > 0) {
+      console.log(`[actorManager] Engine registry seeded: ${scalars.length} scalar + ${parallels.length} parallel changepoints`);
     }
   }
 
-  const parallels = loadParChangepointsAfter(0);
-  for (const row of parallels) {
-    try {
-      const storedRegions = JSON.parse(row.region_hashes);
-      const regionArr = Array.isArray(storedRegions)
-        ? storedRegions.map(h => BigInt(`0x${String(h).padStart(16, '0')}`))
-        : regionFingerprintsToArray(storedRegions);
-      if (!regionArr || regionArr.length === 0) continue;
-      eng.registerChangepointParallel(
-        BigInt(row.t_star),
-        regionArr,
-        BigInt(row.refinement),
-        row.child_def_id
-      );
-    } catch (e) {
-      console.warn(`[actorManager] seedEngineRegistry skip parallel ${row.child_def_id}: ${e.message}`);
+  await preWarmMachines();
+}
+
+async function preWarmMachines() {
+  const sql = `SELECT DISTINCT d.id, d.definition_json
+               FROM actors a
+               JOIN definitions d ON d.id = a.definition_id
+               WHERE a.status IN ('active','needs_rescue')`;
+  let defs;
+  try {
+    if (isPostgres) {
+      const { queryAll } = await import('../registry/db-postgres.js');
+      defs = await queryAll(sql);
+    } else {
+      const { getDb } = await import('../registry/db.js');
+      defs = getDb().prepare(sql).all();
+    }
+  } catch {
+    return;
+  }
+  if (!defs || defs.length === 0) return;
+
+  const pool  = getWorkerPool();
+  const tasks = [];
+  for (const row of defs) {
+    let definitionJson;
+    try { definitionJson = JSON.parse(row.definition_json); } catch { continue; }
+    for (let i = 0; i < pool.workerCount; i++) {
+      tasks.push(pool.sendToSlot(i, { type: 'PRECOMPILE', definitionId: row.id, definitionJson }));
     }
   }
-
-  if (scalars.length + parallels.length > 0) {
-    console.log(`[actorManager] Engine registry seeded: ${scalars.length} scalar + ${parallels.length} parallel changepoints`);
+  await Promise.allSettled(tasks);
+  if (defs.length > 0) {
+    console.log(`[actorManager] Pre-warmed ${defs.length} definitions across ${getWorkerPool().workerCount} workers`);
   }
 }
 

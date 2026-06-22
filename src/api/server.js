@@ -21,7 +21,7 @@ import { mkdirSync } from 'fs';
 import { randomUUID } from 'crypto';
 
 import { engineReady, getEngine } from '../ffi/engine.js';
-import { getDb } from '../registry/db.js';
+import { getDb, isPostgres } from '../registry/db.js';
 import { getMaxTStar } from '../registry/changepointRepo.js';
 import { seedEngineRegistry } from '../runtime/actorManager.js';
 import { authMiddleware } from './middleware/auth.js';
@@ -36,6 +36,8 @@ import { archiveRoutes } from './routes/archives.js';
 import { webhookRoutes } from './routes/webhooks.js';
 import { adminRoutes } from './routes/admin.js';
 import { internalRoutes } from './routes/internal.js';
+import { keysRoutes } from './routes/keys.js';
+import { orgsRoutes } from './routes/orgs.js';
 import { websocketRoutes } from './websocket.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -142,6 +144,8 @@ await fastify.register(archiveRoutes);
 await fastify.register(webhookRoutes);
 await fastify.register(adminRoutes);
 await fastify.register(internalRoutes);
+await fastify.register(keysRoutes);
+await fastify.register(orgsRoutes);
 await fastify.register(websocketRoutes);
 
 // ── OpenAPI JSON alias (/openapi.json → /docs/json) ──────────────────────────
@@ -187,7 +191,7 @@ async function shutdown(signal) {
   fastify.log.info(`Received ${signal} — shutting down gracefully`);
   try {
     await fastify.close();
-    getDb().close();
+    if (!isPostgres) getDb().close();
   } catch {}
   process.exit(0);
 }
@@ -197,14 +201,21 @@ process.on('SIGINT',  () => shutdown('SIGINT'));
 
 // ── Startup ───────────────────────────────────────────────────────────────────
 await engineReady;
-getDb();
+
+if (isPostgres) {
+  const { bootstrapSchema } = await import('../registry/db-postgres.js');
+  await bootstrapSchema();
+  console.log('[server] Postgres mode — SQLite single-writer warning suppressed');
+} else {
+  getDb();
+}
 
 // Seed APV clock from DB so new deployments get t_star values strictly greater
 // than all historical changepoints.  Without this, a server restart resets the
 // in-memory counter to 1, causing new definitions to get deployedAt=1 which
 // pre-dates all existing actors and breaks the engine's ordering logic.
 try {
-  const maxTStar = getMaxTStar();
+  const maxTStar = await getMaxTStar();
   if (maxTStar > 0) {
     const eng = getEngine();
     if (!eng.available) {
@@ -222,14 +233,14 @@ try {
   console.warn(`[server] Tick seeding failed (non-fatal): ${e.message}`);
 }
 
-if (!process.env.STATEKEEP_MULTI_INSTANCE_WARNED) {
+if (!isPostgres && !process.env.STATEKEEP_MULTI_INSTANCE_WARNED) {
   fastify.log.warn(
     'StateKeep uses SQLite — only one writer process should be running at a time. ' +
     'Set STATEKEEP_MULTI_INSTANCE_WARNED=true to suppress this warning.'
   );
 }
 
-seedEngineRegistry();
+await seedEngineRegistry();
 
 try {
   await fastify.listen({ port: PORT, host: '0.0.0.0' });

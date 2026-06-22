@@ -69,11 +69,21 @@ export function decrypt(ciphertext) {
   return Buffer.concat([decipher.update(enc), decipher.final()]);
 }
 
+// ── Postgres flag ─────────────────────────────────────────────────────────────
+// When STATEKEEP_DB_URL starts with "postgres", repo files switch to the async
+// Postgres path and getDb() is never called (it throws a clear error instead).
+export const isPostgres = (process.env.STATEKEEP_DB_URL ?? '').startsWith('postgres');
+
 // ── Database singleton ────────────────────────────────────────────────────────
 
 let _db = null;
 
 export function getDb() {
+  if (isPostgres) {
+    throw new Error(
+      '[db] STATEKEEP_DB_URL is a Postgres URL — use db-postgres.js (query/queryOne/transaction) instead of getDb().'
+    );
+  }
   if (_db) return _db;
 
   _db = new Database(DB_PATH, {

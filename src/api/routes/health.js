@@ -4,7 +4,7 @@
  * GET /v1/health/workers — no auth required; reports worker heartbeat status.
  */
 
-import { getDb } from '../../registry/db.js';
+import { getDb, isPostgres } from '../../registry/db.js';
 import { getEngine } from '../../ffi/engine.js';
 import { adminMiddleware } from '../middleware/auth.js';
 import { getWorkerPool } from '../../runtime/workerPool.js';
@@ -30,7 +30,12 @@ export async function healthRoutes(fastify) {
   }, async (_req, reply) => {
     let dbStatus = 'ok';
     try {
-      getDb().prepare('SELECT 1').get();
+      if (isPostgres) {
+        const { query } = await import('../../registry/db-postgres.js');
+        await query('SELECT 1', []);
+      } else {
+        getDb().prepare('SELECT 1').get();
+      }
     } catch (e) {
       dbStatus = 'error';
     }
@@ -47,20 +52,28 @@ export async function healthRoutes(fastify) {
   });
 
   fastify.get('/v1/health/workers', async (_req, reply) => {
-    const now  = Date.now();
-    // GROUP BY worker_type keeps only the most-recent heartbeat per type.
-    // This prevents ghost records from crashed/restarted processes from
-    // making the endpoint report unhealthy when the current worker is fine.
-    const rows = getDb().prepare(`
-      SELECT worker_type,
-             MAX(last_beat) AS last_beat,
-             pid,
-             started_at,
-             worker_id
-      FROM worker_heartbeats
-      GROUP BY worker_type
-      ORDER BY worker_type
-    `).all();
+    const now = Date.now();
+    let rows;
+    if (isPostgres) {
+      const { queryAll } = await import('../../registry/db-postgres.js');
+      rows = await queryAll(`
+        SELECT worker_type, MAX(last_beat) AS last_beat, pid, started_at, worker_id
+        FROM worker_heartbeats
+        GROUP BY worker_type
+        ORDER BY worker_type
+      `, []);
+    } else {
+      rows = getDb().prepare(`
+        SELECT worker_type,
+               MAX(last_beat) AS last_beat,
+               pid,
+               started_at,
+               worker_id
+        FROM worker_heartbeats
+        GROUP BY worker_type
+        ORDER BY worker_type
+      `).all();
+    }
 
     const workers = rows.map(r => ({
       workerId:   r.worker_id,
@@ -99,9 +112,15 @@ export async function healthRoutes(fastify) {
       },
     },
   }, async (request, reply) => {
-    const deleted = getDb()
-      .prepare(`DELETE FROM worker_heartbeats WHERE worker_id = ?`)
-      .run(request.params.workerId).changes;
+    const { workerId } = request.params;
+    let deleted;
+    if (isPostgres) {
+      const { query } = await import('../../registry/db-postgres.js');
+      const r = await query(`DELETE FROM worker_heartbeats WHERE worker_id=$1`, [workerId]);
+      deleted = r.rowCount;
+    } else {
+      deleted = getDb().prepare(`DELETE FROM worker_heartbeats WHERE worker_id = ?`).run(workerId).changes;
+    }
     return reply.code(deleted ? 204 : 404).send();
   });
 }

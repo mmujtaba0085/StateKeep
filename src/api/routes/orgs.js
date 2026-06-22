@@ -16,7 +16,7 @@ import { adminMiddleware } from '../middleware/auth.js';
 import { createOrg, findOrgById, listOrgs, deleteOrg } from '../../registry/orgRepo.js';
 import { createApiKey, listApiKeysByOrg, revokeApiKey } from '../../registry/apiKeyRepo.js';
 import { getActorCountsByStatus, countActiveActors } from '../../registry/actorRepo.js';
-import { getDb } from '../../registry/db.js';
+import { getDb, isPostgres } from '../../registry/db.js';
 
 export async function orgsRoutes(fastify) {
 
@@ -33,7 +33,7 @@ export async function orgsRoutes(fastify) {
       },
     },
   }, async (request, reply) => {
-    const org = createOrg({ name: request.body.name });
+    const org = await createOrg({ name: request.body.name });
     return reply.code(201).send(org);
   });
 
@@ -41,7 +41,7 @@ export async function orgsRoutes(fastify) {
   fastify.get('/v1/orgs', {
     preHandler: adminMiddleware,
   }, async (_request, reply) => {
-    return reply.send({ orgs: listOrgs() });
+    return reply.send({ orgs: await listOrgs() });
   });
 
   // ── DELETE /v1/orgs/:orgId ─────────────────────────────────────────────────
@@ -56,10 +56,10 @@ export async function orgsRoutes(fastify) {
     },
   }, async (request, reply) => {
     const { orgId } = request.params;
-    const org = findOrgById(orgId);
+    const org = await findOrgById(orgId);
     if (!org) return reply.code(404).send({ error: `Org ${orgId} not found` });
 
-    const activeCount = countActiveActors(orgId);
+    const activeCount = await countActiveActors(orgId);
     if (activeCount > 0) {
       return reply.code(409).send({
         error:        `Cannot delete org with active actors`,
@@ -69,9 +69,13 @@ export async function orgsRoutes(fastify) {
 
     // Delete all keys for the org, then delete the org record.
     // Actor/definition/event history is retained for audit.
-    const db = getDb();
-    db.prepare(`DELETE FROM api_keys WHERE org_id = ?`).run(orgId);
-    deleteOrg(orgId);
+    if (isPostgres) {
+      const { query } = await import('../../registry/db-postgres.js');
+      await query(`DELETE FROM api_keys WHERE org_id=$1`, [orgId]);
+    } else {
+      getDb().prepare(`DELETE FROM api_keys WHERE org_id = ?`).run(orgId);
+    }
+    await deleteOrg(orgId);
 
     return reply.code(204).send();
   });
@@ -96,7 +100,7 @@ export async function orgsRoutes(fastify) {
     },
   }, async (request, reply) => {
     const { orgId } = request.params;
-    const org = findOrgById(orgId);
+    const org = await findOrgById(orgId);
     if (!org) return reply.code(404).send({ error: `Org ${orgId} not found` });
 
     const { label, tier = 'free' } = request.body;
@@ -123,10 +127,10 @@ export async function orgsRoutes(fastify) {
     },
   }, async (request, reply) => {
     const { orgId } = request.params;
-    const org = findOrgById(orgId);
+    const org = await findOrgById(orgId);
     if (!org) return reply.code(404).send({ error: `Org ${orgId} not found` });
 
-    return reply.send({ keys: listApiKeysByOrg(orgId) });
+    return reply.send({ keys: await listApiKeysByOrg(orgId) });
   });
 
   // ── DELETE /v1/orgs/:orgId/keys/:keyId ────────────────────────────────────
@@ -146,13 +150,13 @@ export async function orgsRoutes(fastify) {
     const { orgId, keyId } = request.params;
 
     // Verify the key belongs to the specified org
-    const keys = listApiKeysByOrg(orgId);
+    const keys = await listApiKeysByOrg(orgId);
     const key  = keys.find(k => k.key_id === keyId);
     if (!key) {
       return reply.code(404).send({ error: `Key ${keyId} not found in org ${orgId}` });
     }
 
-    revokeApiKey(keyId);
+    await revokeApiKey(keyId);
     return reply.code(204).send();
   });
 
@@ -176,37 +180,54 @@ export async function orgsRoutes(fastify) {
       return reply.code(403).send({ error: 'Access denied' });
     }
 
-    const org = findOrgById(orgId);
+    const org = await findOrgById(orgId);
     if (!org) return reply.code(404).send({ error: `Org ${orgId} not found` });
 
-    const db  = getDb();
-    const now = new Date();
-
-    // Start of current calendar month (UTC)
+    const now        = new Date();
     const monthStart = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1);
 
-    const actors      = getActorCountsByStatus(orgId);
-    const definitions = db.prepare(`
-      SELECT COUNT(*) as cnt FROM definitions WHERE org_id = ?
-    `).get(orgId)?.cnt ?? 0;
-
-    const eventCounts = db.prepare(`
-      SELECT
-        COUNT(*) as total,
-        SUM(CASE WHEN event_type = 'SPAWN'                 THEN 1 ELSE 0 END) as spawns,
-        SUM(CASE WHEN event_type = 'SCHEDULED_EVENT_FIRED' THEN 1 ELSE 0 END) as scheduled
-      FROM events
-      WHERE org_id = ? AND processed_at >= ?
-    `).get(orgId, monthStart);
-
-    const schedCounts = db.prepare(`
-      SELECT
-        SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending,
-        SUM(CASE WHEN status = 'fired'   AND fired_at >= ? THEN 1 ELSE 0 END) as fired,
-        SUM(CASE WHEN status = 'failed'  THEN 1 ELSE 0 END) as failed
-      FROM scheduled_events
-      WHERE org_id = ?
-    `).get(monthStart, orgId);
+    const [actors, definitions, eventCounts, schedCounts] = await Promise.all([
+      getActorCountsByStatus(orgId),
+      (async () => {
+        if (isPostgres) {
+          const { queryOne } = await import('../../registry/db-postgres.js');
+          const r = await queryOne(`SELECT COUNT(*) as cnt FROM definitions WHERE org_id=$1`, [orgId]);
+          return Number(r?.cnt ?? 0);
+        }
+        return getDb().prepare(`SELECT COUNT(*) as cnt FROM definitions WHERE org_id = ?`).get(orgId)?.cnt ?? 0;
+      })(),
+      (async () => {
+        if (isPostgres) {
+          const { queryOne } = await import('../../registry/db-postgres.js');
+          return await queryOne(
+            `SELECT COUNT(*) as total, SUM(CASE WHEN event_type='SPAWN' THEN 1 ELSE 0 END) as spawns, SUM(CASE WHEN event_type='SCHEDULED_EVENT_FIRED' THEN 1 ELSE 0 END) as scheduled FROM events WHERE org_id=$1 AND processed_at>=$2`,
+            [orgId, monthStart]
+          );
+        }
+        return getDb().prepare(`
+          SELECT COUNT(*) as total,
+            SUM(CASE WHEN event_type = 'SPAWN'                 THEN 1 ELSE 0 END) as spawns,
+            SUM(CASE WHEN event_type = 'SCHEDULED_EVENT_FIRED' THEN 1 ELSE 0 END) as scheduled
+          FROM events WHERE org_id = ? AND processed_at >= ?
+        `).get(orgId, monthStart);
+      })(),
+      (async () => {
+        if (isPostgres) {
+          const { queryOne } = await import('../../registry/db-postgres.js');
+          return await queryOne(
+            `SELECT SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) as pending, SUM(CASE WHEN status='fired' AND fired_at>=$1 THEN 1 ELSE 0 END) as fired, SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) as failed FROM scheduled_events WHERE org_id=$2`,
+            [monthStart, orgId]
+          );
+        }
+        return getDb().prepare(`
+          SELECT
+            SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending,
+            SUM(CASE WHEN status = 'fired'   AND fired_at >= ? THEN 1 ELSE 0 END) as fired,
+            SUM(CASE WHEN status = 'failed'  THEN 1 ELSE 0 END) as failed
+          FROM scheduled_events WHERE org_id = ?
+        `).get(monthStart, orgId);
+      })(),
+    ]);
 
     return reply.send({
       orgId,
@@ -221,15 +242,15 @@ export async function orgsRoutes(fastify) {
         needs_rescue: actors.needs_rescue,
       },
       events: {
-        total:     eventCounts?.total     ?? 0,
-        spawns:    eventCounts?.spawns    ?? 0,
-        scheduled: eventCounts?.scheduled ?? 0,
+        total:     Number(eventCounts?.total     ?? 0),
+        spawns:    Number(eventCounts?.spawns    ?? 0),
+        scheduled: Number(eventCounts?.scheduled ?? 0),
       },
       definitions,
       scheduledEvents: {
-        pending: schedCounts?.pending ?? 0,
-        fired:   schedCounts?.fired   ?? 0,
-        failed:  schedCounts?.failed  ?? 0,
+        pending: Number(schedCounts?.pending ?? 0),
+        fired:   Number(schedCounts?.fired   ?? 0),
+        failed:  Number(schedCounts?.failed  ?? 0),
       },
     });
   });

@@ -53,7 +53,7 @@ export async function keysRoutes(fastify) {
   fastify.get('/v1/keys', {
     preHandler: requireEnterprise,
   }, async (request, reply) => {
-    const keys = listApiKeysByOrg(request.orgId);
+    const keys = await listApiKeysByOrg(request.orgId);
     return reply.send({ keys });
   });
 
@@ -99,7 +99,7 @@ export async function keysRoutes(fastify) {
     if (request.apiKey.keyId === request.params.keyId) {
       return reply.code(400).send({ error: 'Cannot revoke your own active key' });
     }
-    revokeApiKey(request.params.keyId);
+    await revokeApiKey(request.params.keyId);
     return reply.code(204).send();
   });
 }
