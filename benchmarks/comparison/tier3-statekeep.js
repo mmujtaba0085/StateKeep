@@ -1,18 +1,16 @@
 /**
- * Tier 3: StateKeep — full HTTP API + SQLite + worker pool.
+ * Tier 3: StateKeep (embedded) — in-process, SQLite + APV + worker pool.
  *
- * Measures end-to-end event throughput through the entire StateKeep stack:
- *   HTTP request → Fastify → authMiddleware → workerPool (priority queue)
- *   → actorWorker (XState + APV + write buffer) → SQLite → HTTP response
- *
- * Run sequentially (one request at a time) to measure single-actor latency.
- * Run concurrently (N parallel requests) to measure server throughput.
+ * Uses createStateKeep() directly — no HTTP server, no API key.
+ * Full stack: APV fingerprinting, SQLite write buffer, worker pool, encryption.
  */
 
-const BASE = process.env.STATEKEEP_URL ?? 'http://localhost:3001';
-const KEY  = process.env.STATEKEEP_API_KEY ?? '';
+import { createStateKeep } from '../../src/lib/index.js';
+import { randomBytes } from 'crypto';
+import { mkdtempSync, rmSync } from 'fs';
+import { join } from 'path';
+import { tmpdir } from 'os';
 
-const DEF_ID = `bench-order-${Date.now()}`;
 const MACHINE_DEF = {
   id: 'order',
   initial: 'idle',
@@ -23,100 +21,85 @@ const MACHINE_DEF = {
   },
 };
 
-const HEADERS = {
-  'Content-Type': 'application/json',
-  ...(KEY ? { 'x-api-key': KEY } : {}),
-};
+const CYCLE = ['PROCESS', 'COMPLETE', 'RESET'];
 
-async function api(method, path, body) {
-  const res = await fetch(`${BASE}${path}`, {
-    method,
-    headers: HEADERS,
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  const text = await res.text();
-  let json;
-  try { json = JSON.parse(text); } catch { json = { raw: text }; }
-  if (res.status >= 400) throw new Error(`${method} ${path} → ${res.status}: ${text}`);
-  return json;
+let _sk          = null;
+let _definitionId = null;
+let _tmpDir      = null;
+
+async function getOrInit() {
+  if (_sk) return { sk: _sk, definitionId: _definitionId };
+
+  _tmpDir = mkdtempSync(join(tmpdir(), 'sk-bench-'));
+  const dbPath        = join(_tmpDir, 'bench.db');
+  const encryptionKey = randomBytes(32).toString('hex');
+
+  _sk = await createStateKeep({ dbPath, encryptionKey });
+  const { id } = await _sk.deployDefinition(MACHINE_DEF);
+  _definitionId = id;
+  return { sk: _sk, definitionId: _definitionId };
 }
 
-export async function checkServer() {
-  try {
-    const h = await fetch(`${BASE}/v1/health`, { signal: AbortSignal.timeout(3000) });
-    if (!h.ok) return null;
-    return await h.json();
-  } catch {
-    return null;
-  }
+export async function cleanup() {
+  if (_sk)     { try { await _sk.close(); } catch {} _sk = null; }
+  if (_tmpDir) { try { rmSync(_tmpDir, { recursive: true }); } catch {} _tmpDir = null; }
 }
-
-async function setup() {
-  // Deploy definition
-  await api('PUT', '/v1/definitions', { id: DEF_ID, definition: MACHINE_DEF });
-  // Spawn a single actor for sequential benchmark
-  const actor = await api('POST', '/v1/actors', { definitionId: DEF_ID });
-  return actor.id;
-}
-
-const CYCLE_EVENTS = ['PROCESS', 'COMPLETE', 'RESET'];
 
 export async function run({ warmupCycles = 10, measureCycles = 200 } = {}) {
-  const actorId = await setup();
+  const { sk, definitionId } = await getOrInit();
 
-  // Warm up
+  const actor   = await sk.spawnActor({ definitionId });
+  const actorId = actor.id;
+
   for (let i = 0; i < warmupCycles; i++) {
-    for (const type of CYCLE_EVENTS) {
-      await api('POST', `/v1/actors/${actorId}/event`, { type });
-    }
+    for (const type of CYCLE) await sk.sendEvent(actorId, { type });
   }
 
-  const latencies = new Float64Array(measureCycles * CYCLE_EVENTS.length);
+  const latencies = new Float64Array(measureCycles * CYCLE.length);
   let idx = 0;
 
   const t0 = performance.now();
   for (let i = 0; i < measureCycles; i++) {
-    for (const type of CYCLE_EVENTS) {
+    for (const type of CYCLE) {
       const s = performance.now();
-      await api('POST', `/v1/actors/${actorId}/event`, { type });
+      await sk.sendEvent(actorId, { type });
       latencies[idx++] = performance.now() - s;
     }
   }
   const elapsed = performance.now() - t0;
 
-  return buildResult('StateKeep', `HTTP+SQLite+workers @ ${BASE}`, elapsed, latencies);
+  return buildResult('StateKeep (embedded)', 'in-process SQLite+workers+APV, no HTTP', elapsed, latencies);
 }
 
 export async function runConcurrent({ concurrency = 10, eventsPerActor = 30 } = {}) {
-  // Spawn N actors
-  const actorIds = await Promise.all(
-    Array.from({ length: concurrency }, () => api('POST', '/v1/actors', { definitionId: DEF_ID }).then(r => r.id))
+  const { sk, definitionId } = await getOrInit();
+
+  const actors = await Promise.all(
+    Array.from({ length: concurrency }, () => sk.spawnActor({ definitionId }))
   );
 
-  // Warm up all actors through one cycle
-  await Promise.all(actorIds.map(id =>
-    (async () => {
-      for (const type of CYCLE_EVENTS) await api('POST', `/v1/actors/${id}/event`, { type });
-    })()
-  ));
+  await Promise.all(actors.map(async a => {
+    for (const type of CYCLE) await sk.sendEvent(a.id, { type });
+  }));
 
   const totalEvents = concurrency * eventsPerActor;
-  const t0 = performance.now();
+  const t0          = performance.now();
 
-  await Promise.all(actorIds.map(id =>
-    (async () => {
-      const cycles = Math.floor(eventsPerActor / CYCLE_EVENTS.length);
-      for (let i = 0; i < cycles; i++) {
-        for (const type of CYCLE_EVENTS) {
-          await api('POST', `/v1/actors/${id}/event`, { type });
-        }
-      }
-    })()
-  ));
+  await Promise.all(actors.map(async a => {
+    const cycles = Math.floor(eventsPerActor / CYCLE.length);
+    for (let i = 0; i < cycles; i++) {
+      for (const type of CYCLE) await sk.sendEvent(a.id, { type });
+    }
+  }));
 
   const elapsed  = performance.now() - t0;
   const evPerSec = Math.round(totalEvents / (elapsed / 1000));
-  return { label: `StateKeep (${concurrency} concurrent actors)`, evPerSec, elapsedMs: elapsed, totalEvents };
+  return {
+    label:      `StateKeep embedded (${concurrency} concurrent actors)`,
+    evPerSec,
+    elapsedMs:  elapsed,
+    totalEvents,
+  };
 }
 
 function buildResult(label, note, elapsedMs, latencies) {
