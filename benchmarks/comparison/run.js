@@ -1,20 +1,32 @@
 /**
  * benchmarks/comparison/run.js
  *
- * Five-tier throughput comparison:
- *   Tier 1 — Pure XState                          (in-process, no persistence)
- *   Tier 2 — XState + APV                         (in-process, Math.imul FNV-32 per event)
- *   Tier 3 — StateKeep embedded, buffered         (50ms write window, default)
- *   Tier 4 — StateKeep embedded, sync             (flush per event, zero crash window)
- *   Tier 5 — StateKeep embedded, async            (hot registry only, no write buffer)
+ * Eight-tier throughput comparison:
+ *   Tier 1 — Pure XState                            (in-process, no persistence)
+ *   Tier 2 — XState + APV                           (in-process, Math.imul FNV-32 per event)
+ *   Tier 3 — StateKeep SQLite, buffered             (50ms write window, default)
+ *   Tier 4 — StateKeep SQLite, sync                 (flush per event, zero crash window)
+ *   Tier 5 — StateKeep SQLite, async                (hot registry only, no write buffer)
+ *   Tier 6 — StateKeep Postgres, buffered           (50ms write window, Postgres backend)
+ *   Tier 7 — StateKeep Postgres, sync               (flush per event, Postgres backend)
+ *   Tier 8 — StateKeep Postgres, async              (hot registry only, Postgres backend)
+ *
+ * Postgres tiers run in a child process to avoid module singleton conflicts
+ * (isPostgres is determined by STATEKEEP_DB_URL at first import).
  *
  * Usage:
  *   node benchmarks/comparison/run.js
+ *   STATEKEEP_PG_URL=postgresql:///mydb?host=/run/postgresql node benchmarks/comparison/run.js
  */
 
 import { run as runXState }    from './tier1-xstate.js';
 import { run as runXStateApv } from './tier2-xstate-apv.js';
 import { runDurability, runConcurrent, cleanup } from './tier3-statekeep.js';
+import { spawn } from 'child_process';
+import { fileURLToPath } from 'url';
+import { dirname, join } from 'path';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const fmt = {
   num: (n) => n.toLocaleString('en-US'),
@@ -33,7 +45,7 @@ function printResult(r, baseline) {
 
   console.log(`\n  ${r.label}`);
   console.log(`  ${hr('·', 62)}`);
-  console.log(`  Note      : ${r.note}`);
+  if (r.note) console.log(`  Note      : ${r.note}`);
   console.log(`  Events    : ${fmt.num(r.totalEvents)} total  |  ${fmt.num(r.evPerSec)} events/sec`);
   if (r.p50 !== undefined) {
     console.log(`  Latency   : p50=${fmt.µs(r.p50)}  p95=${fmt.µs(r.p95)}  p99=${fmt.µs(r.p99)}`);
@@ -65,8 +77,52 @@ function printSummary(results) {
   console.log(hr('═'));
 }
 
+/**
+ * Run tier4-postgres.js in a child process and return parsed results.
+ * Returns [] if Postgres is unavailable or the child exits non-zero.
+ */
+function runPostgresTier() {
+  return new Promise((resolve) => {
+    const pgUrl  = process.env.STATEKEEP_PG_URL
+      ?? 'postgresql:///statekeep_bench?host=/var/run/postgresql';
+
+    const child = spawn(process.execPath, [join(__dirname, 'tier4-postgres.js')], {
+      env:   { ...process.env, STATEKEEP_PG_URL: pgUrl },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+
+    let out = '';
+    let err = '';
+    child.stdout.on('data', (d) => { out += d.toString(); });
+    child.stderr.on('data', (d) => { err += d.toString(); });
+
+    child.on('close', (code) => {
+      if (code !== 0) {
+        console.error(`\n  [Postgres tier] child exited with code ${code}`);
+        if (err) console.error('  ' + err.trim().split('\n').join('\n  '));
+        resolve([]);
+        return;
+      }
+      const m = out.match(/__PG_RESULTS__(.+?)__PG_END__/s);
+      if (!m) {
+        console.error('\n  [Postgres tier] Could not parse results from child output.');
+        resolve([]);
+        return;
+      }
+      try {
+        resolve(JSON.parse(m[1]));
+      } catch {
+        console.error('\n  [Postgres tier] JSON parse error.');
+        resolve([]);
+      }
+    });
+  });
+}
+
+// ── Main ─────────────────────────────────────────────────────────────────────
+
 console.log(`\n${hr('═')}`);
-console.log('  StateKeep Benchmark — XState vs XState+APV vs StateKeep (3 durability modes)');
+console.log('  StateKeep Benchmark — XState vs XState+APV vs StateKeep (SQLite + Postgres)');
 console.log(hr('═'));
 console.log('  Machine: 3-state order flow  idle → processing → done → idle');
 console.log('  Cycle  : PROCESS → COMPLETE → RESET  (3 events/cycle)');
@@ -74,42 +130,68 @@ console.log(hr('─'));
 
 const results = [];
 
-process.stdout.write('\n  [1/5] Pure XState ... ');
+process.stdout.write('\n  [1/8] Pure XState ... ');
 const r1 = await runXState({ warmupCycles: 5_000, measureCycles: 100_000 });
 console.log('done');
 printResult(r1, null);
 results.push(r1);
 
-process.stdout.write('\n  [2/5] XState + APV fingerprinting ... ');
+process.stdout.write('\n  [2/8] XState + APV fingerprinting ... ');
 const r2 = await runXStateApv({ warmupCycles: 5_000, measureCycles: 100_000 });
 console.log('done');
 printResult(r2, null);
 results.push(r2);
 
-process.stdout.write('\n  [3/5] StateKeep embedded — buffered (default) ... ');
+process.stdout.write('\n  [3/8] StateKeep SQLite — buffered (default) ... ');
 const r3 = await runDurability('buffered', { warmupCycles: 10, measureCycles: 200 });
 console.log('done');
 printResult(r3, r1.evPerSec);
 results.push(r3);
 
-process.stdout.write('\n  [4/5] StateKeep embedded — sync (zero loss) ... ');
+process.stdout.write('\n  [4/8] StateKeep SQLite — sync (zero loss) ... ');
 const r4 = await runDurability('sync', { warmupCycles: 10, measureCycles: 200 });
 console.log('done');
 printResult(r4, r1.evPerSec);
 results.push(r4);
 
-process.stdout.write('\n  [5/5] StateKeep embedded — async (hot registry only) ... ');
+process.stdout.write('\n  [5/8] StateKeep SQLite — async (hot registry only) ... ');
 const r5 = await runDurability('async', { warmupCycles: 10, measureCycles: 200 });
 console.log('done');
 printResult(r5, r1.evPerSec);
 results.push(r5);
 
-process.stdout.write('\n  Concurrent benchmark (10 actors, buffered) ... ');
+process.stdout.write('\n  SQLite concurrent benchmark (10 actors, buffered) ... ');
 const r3c = await runConcurrent({ concurrency: 10, eventsPerActor: 30 });
 console.log('done');
 console.log(`\n  ${r3c.label}`);
 console.log(`  Events/sec: ${fmt.num(r3c.evPerSec)}  (${fmt.num(r3c.totalEvents)} total in ${r3c.elapsedMs.toFixed(0)}ms)`);
 
-printSummary(results);
-
 await cleanup();
+
+// ── Postgres tiers (separate process) ────────────────────────────────────────
+
+console.log(`\n${hr('─')}`);
+console.log('  Running Postgres tiers (child process — avoids singleton conflict) …');
+console.log(hr('─'));
+
+process.stdout.write('\n  [6–8/8] StateKeep Postgres (all durability modes + concurrent) … ');
+const pgResults = await runPostgresTier();
+if (pgResults.length > 0) {
+  console.log('done');
+  for (const r of pgResults) {
+    if (r.concurrent) {
+      console.log(`\n  ${r.label}`);
+      console.log(`  Events/sec: ${fmt.num(r.evPerSec)}  (${fmt.num(r.totalEvents)} total in ${r.elapsedMs.toFixed(0)}ms)`);
+      console.log(`  Note      : ${r.note}`);
+    } else {
+      printResult(r, r1.evPerSec);
+      results.push(r);
+    }
+  }
+} else {
+  console.log('skipped (Postgres unavailable)');
+  console.log('  To enable: ensure PostgreSQL is running and set STATEKEEP_PG_URL');
+  console.log('  Example  : postgresql:///mydb?host=/var/run/postgresql');
+}
+
+printSummary(results);

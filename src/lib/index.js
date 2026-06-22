@@ -107,7 +107,11 @@ export async function createStateKeep({
       await new Promise(r => setTimeout(r, 100)); // let flush settle
       try { getWorkerPool().terminate(); } catch {}
       await new Promise(r => setTimeout(r, 200)); // let workers drain
-      try { if (!isPostgres) getDb().close(); } catch {}
+      if (isPostgres) {
+        try { const { closePool } = await import('../registry/db-postgres.js'); await closePool(); } catch {}
+      } else {
+        try { getDb().close(); } catch {}
+      }
     },
   };
 }

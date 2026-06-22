@@ -41,6 +41,10 @@ export function getPool() {
   return _pool;
 }
 
+export async function closePool() {
+  if (_pool) { try { await _pool.end(); } catch {} _pool = null; }
+}
+
 export async function query(sql, params = []) {
   return getPool().query(sql, params);
 }
