@@ -21,12 +21,6 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const DB_PATH = process.env.STATEKEEP_DB_PATH || './statekeep.db';
 
 const ENC_KEY_HEX = process.env.STATEKEEP_ENCRYPTION_KEY;
-if (!ENC_KEY_HEX || ENC_KEY_HEX.length !== 64) {
-  console.error(
-    '[db] WARNING: STATEKEEP_ENCRYPTION_KEY is not set or not 64 hex chars. ' +
-    'Data at rest will NOT be encrypted.'
-  );
-}
 const ENCRYPTION_KEY = ENC_KEY_HEX
   ? Buffer.from(ENC_KEY_HEX, 'hex')
   : null;

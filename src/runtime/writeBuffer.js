@@ -17,7 +17,7 @@
 import { getDb, encrypt, isPostgres } from '../registry/db.js';
 import { serializeRegionFingerprints } from '../registry/regionFingerprintCodec.js';
 
-const FLUSH_MS   = 50;
+const FLUSH_MS   = parseInt(process.env.STATEKEEP_WRITE_BUFFER_MS ?? '50', 10);
 const HIGH_WATER = 200;
 
 class WriteBuffer {
@@ -28,7 +28,7 @@ class WriteBuffer {
     this._pending   = new Set();
     this._stmts     = null;
     this._flushing  = false;   // Postgres-mode concurrent-flush guard
-    this._timer     = setInterval(() => this.flush(), FLUSH_MS).unref();
+    this._timer     = setInterval(() => { this.flush().catch(() => {}); }, FLUSH_MS).unref();
   }
 
   queueState(actorId, data) {
@@ -74,7 +74,9 @@ class WriteBuffer {
   }
 
   flush() {
-    if (this._states.size === 0 && this._events.length === 0 && this._decisions.length === 0) return;
+    if (this._states.size === 0 && this._events.length === 0 && this._decisions.length === 0) {
+      return Promise.resolve();
+    }
 
     const rows      = [...this._states.values()];
     const events    = this._events.splice(0);
@@ -85,11 +87,10 @@ class WriteBuffer {
       if (ev.idempotency_key) this._pending.delete(`${ev.actor_id}:${ev.idempotency_key}`);
     }
 
-    if (rows.length === 0 && events.length === 0 && decisions.length === 0) return;
+    if (rows.length === 0 && events.length === 0 && decisions.length === 0) return Promise.resolve();
 
     if (isPostgres) {
-      this._flushPostgres(rows, events, decisions);
-      return;
+      return this._flushPostgres(rows, events, decisions);
     }
 
     try {
@@ -102,6 +103,7 @@ class WriteBuffer {
     } catch (err) {
       console.error('[writeBuffer] flush error:', err.message);
     }
+    return Promise.resolve();
   }
 
   async _flushPostgres(rows, events, decisions) {

@@ -1,10 +1,12 @@
 /**
  * benchmarks/comparison/run.js
  *
- * Three-tier throughput comparison:
- *   Tier 1 — Pure XState          (in-process, no persistence)
- *   Tier 2 — XState + APV         (in-process, Math.imul FNV-32 per event)
- *   Tier 3 — StateKeep (embedded) (in-process, SQLite + worker pool + APV, no HTTP)
+ * Five-tier throughput comparison:
+ *   Tier 1 — Pure XState                          (in-process, no persistence)
+ *   Tier 2 — XState + APV                         (in-process, Math.imul FNV-32 per event)
+ *   Tier 3 — StateKeep embedded, buffered         (50ms write window, default)
+ *   Tier 4 — StateKeep embedded, sync             (flush per event, zero crash window)
+ *   Tier 5 — StateKeep embedded, async            (hot registry only, no write buffer)
  *
  * Usage:
  *   node benchmarks/comparison/run.js
@@ -12,7 +14,7 @@
 
 import { run as runXState }    from './tier1-xstate.js';
 import { run as runXStateApv } from './tier2-xstate-apv.js';
-import { run as runStateKeep, runConcurrent, cleanup } from './tier3-statekeep.js';
+import { runDurability, runConcurrent, cleanup } from './tier3-statekeep.js';
 
 const fmt = {
   num: (n) => n.toLocaleString('en-US'),
@@ -60,23 +62,11 @@ function printSummary(results) {
     const mult  = r.evPerSec === maxEps ? '  (baseline)' : `  ${(maxEps / r.evPerSec).toFixed(1)}x slower`;
     console.log(`  ${label} ${eps} ev/s  ${bar}${mult}`);
   }
-
-  const sk = results.find(r => r.label.startsWith('StateKeep'));
-  if (sk) {
-    const xs  = results.find(r => r.label === 'Pure XState');
-    if (xs) {
-      const gap = Math.round(xs.evPerSec / sk.evPerSec);
-      console.log(`\n  The ${fmt.num(gap)}x gap is the cost of SQLite persistence, AES-256-GCM`);
-      console.log(`  encryption, the write buffer, and the worker pool — paid once per`);
-      console.log(`  event so that actors survive restarts, scale to millions of instances,`);
-      console.log(`  and migrate zero-downtime with APV across definition versions.`);
-    }
-  }
   console.log(hr('═'));
 }
 
 console.log(`\n${hr('═')}`);
-console.log('  StateKeep Benchmark — XState vs XState+APV vs StateKeep (embedded)');
+console.log('  StateKeep Benchmark — XState vs XState+APV vs StateKeep (3 durability modes)');
 console.log(hr('═'));
 console.log('  Machine: 3-state order flow  idle → processing → done → idle');
 console.log('  Cycle  : PROCESS → COMPLETE → RESET  (3 events/cycle)');
@@ -84,25 +74,37 @@ console.log(hr('─'));
 
 const results = [];
 
-process.stdout.write('\n  [1/3] Pure XState ... ');
+process.stdout.write('\n  [1/5] Pure XState ... ');
 const r1 = await runXState({ warmupCycles: 5_000, measureCycles: 100_000 });
 console.log('done');
 printResult(r1, null);
 results.push(r1);
 
-process.stdout.write('\n  [2/3] XState + APV fingerprinting ... ');
+process.stdout.write('\n  [2/5] XState + APV fingerprinting ... ');
 const r2 = await runXStateApv({ warmupCycles: 5_000, measureCycles: 100_000 });
 console.log('done');
 printResult(r2, null);
 results.push(r2);
 
-process.stdout.write('\n  [3/3] StateKeep (embedded) — initialising ... ');
-const r3 = await runStateKeep({ warmupCycles: 10, measureCycles: 200 });
+process.stdout.write('\n  [3/5] StateKeep embedded — buffered (default) ... ');
+const r3 = await runDurability('buffered', { warmupCycles: 10, measureCycles: 200 });
 console.log('done');
 printResult(r3, r1.evPerSec);
 results.push(r3);
 
-process.stdout.write('\n  Running concurrent benchmark (10 actors) ... ');
+process.stdout.write('\n  [4/5] StateKeep embedded — sync (zero loss) ... ');
+const r4 = await runDurability('sync', { warmupCycles: 10, measureCycles: 200 });
+console.log('done');
+printResult(r4, r1.evPerSec);
+results.push(r4);
+
+process.stdout.write('\n  [5/5] StateKeep embedded — async (hot registry only) ... ');
+const r5 = await runDurability('async', { warmupCycles: 10, measureCycles: 200 });
+console.log('done');
+printResult(r5, r1.evPerSec);
+results.push(r5);
+
+process.stdout.write('\n  Concurrent benchmark (10 actors, buffered) ... ');
 const r3c = await runConcurrent({ concurrency: 10, eventsPerActor: 30 });
 console.log('done');
 console.log(`\n  ${r3c.label}`);

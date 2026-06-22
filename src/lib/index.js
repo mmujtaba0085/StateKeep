@@ -25,6 +25,10 @@ export async function createStateKeep({
   if (enginePath)    process.env.STATEKEEP_ENGINE_PATH    = enginePath;
   if (workerCount)   process.env.STATEKEEP_WORKER_COUNT   = String(workerCount);
 
+  // Silence all internal logs in embedded mode unless caller has set a level.
+  // Users get result objects back, not log streams.
+  process.env.LOG_LEVEL ??= 'silent';
+
   const { engineReady, getEngine } = await import('../ffi/engine.js');
   await engineReady;
 
@@ -80,11 +84,11 @@ export async function createStateKeep({
       return result;
     },
 
-    async sendEvent(actorId, event) {
+    async sendEvent(actorId, event, { durability = 'buffered' } = {}) {
       if (!actorId) throw new Error('actorId is required');
       const eng       = getEngine();
       const clockTick = eng.available ? Number(eng.clockTick()) : Date.now();
-      return _sendEvent(actorId, event, clockTick);
+      return _sendEvent(actorId, event, clockTick, { durability });
     },
 
     async getActor(actorId) {

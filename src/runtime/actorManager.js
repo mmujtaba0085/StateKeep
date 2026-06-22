@@ -255,7 +255,7 @@ export async function spawnActor({ definitionId, orgId, initialContext, logicalS
  *   both land in the same 50ms flush transaction.
  */
 export async function sendEvent(actorId, event, tick, opts = {}) {
-  const { eventData, priority = 'normal', orgId: optsOrgId } = opts;
+  const { eventData, priority = 'normal', orgId: optsOrgId, durability = 'buffered' } = opts;
   const pool = getWorkerPool();
 
   // Load from hot registry or SQLite.
@@ -477,15 +477,21 @@ export async function sendEvent(actorId, event, tick, opts = {}) {
   touch(actorId, newEntry);
 
   const buf = getWriteBuffer();
-  buf.queueState(actorId, {
-    stateValue:         result.stateValue,
-    context:            result.context,
-    historyFingerprint: result.historyFingerprint,
-    regionFingerprints: newRegionFingerprints,
-    lastEventTick:      tick ?? Date.now(),
-    status:             result.done ? 'terminated' : 'active',
-  });
-  if (eventData) buf.queueEvent(eventData);
+  // durability: 'buffered' (default) — flush every FLUSH_MS (50ms window)
+  // durability: 'sync'     — flush immediately before returning (zero loss)
+  // durability: 'async'    — skip write buffer entirely; relies on LRU eviction to persist
+  if (durability !== 'async') {
+    buf.queueState(actorId, {
+      stateValue:         result.stateValue,
+      context:            result.context,
+      historyFingerprint: result.historyFingerprint,
+      regionFingerprints: newRegionFingerprints,
+      lastEventTick:      tick ?? Date.now(),
+      status:             result.done ? 'terminated' : 'active',
+    });
+    if (eventData) buf.queueEvent(eventData);
+    if (durability === 'sync') await buf.flush();
+  }
 
   if (result.done) {
     try {

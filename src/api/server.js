@@ -97,19 +97,21 @@ await fastify.register(FastifySwaggerUI, {
 
 await fastify.register(FastifyWebSocket);
 
-await fastify.register(FastifyRateLimit, {
-  global:     true,
-  timeWindow: 60_000,
-  max:        5000,
-  allowList:  (_req, _key) => process.env.NODE_ENV === 'test',
-  keyGenerator: (req) => req.ip,
-  errorResponseBuilder: (_req, context) => ({
-    error:      'Rate limit exceeded',
-    limit:      context.max,
-    timeWindow: context.after,
-    retryAfter: context.ttl,
-  }),
-});
+if (process.env.STATEKEEP_RATE_LIMIT !== 'false') {
+  await fastify.register(FastifyRateLimit, {
+    global:     true,
+    timeWindow: 60_000,
+    max:        parseInt(process.env.STATEKEEP_RATE_LIMIT_MAX ?? '5000', 10),
+    allowList:  (_req, _key) => process.env.NODE_ENV === 'test',
+    keyGenerator: (req) => req.ip,
+    errorResponseBuilder: (_req, context) => ({
+      error:      'Rate limit exceeded',
+      limit:      context.max,
+      timeWindow: context.after,
+      retryAfter: context.ttl,
+    }),
+  });
+}
 
 // ── x-request-id: echo or generate, attach to logger context, set response header ──
 fastify.addHook('onRequest', async (req, reply) => {

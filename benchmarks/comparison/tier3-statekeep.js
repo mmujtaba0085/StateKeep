@@ -3,6 +3,11 @@
  *
  * Uses createStateKeep() directly — no HTTP server, no API key.
  * Full stack: APV fingerprinting, SQLite write buffer, worker pool, encryption.
+ *
+ * Three durability modes:
+ *   buffered (default) — flush every FLUSH_MS, 50ms crash window
+ *   sync               — flush immediately per event, zero crash window, slower
+ *   async              — skip write buffer, hot-registry only until eviction
  */
 
 import { createStateKeep } from '../../src/lib/index.js';
@@ -23,9 +28,9 @@ const MACHINE_DEF = {
 
 const CYCLE = ['PROCESS', 'COMPLETE', 'RESET'];
 
-let _sk          = null;
+let _sk           = null;
 let _definitionId = null;
-let _tmpDir      = null;
+let _tmpDir       = null;
 
 async function getOrInit() {
   if (_sk) return { sk: _sk, definitionId: _definitionId };
@@ -45,14 +50,14 @@ export async function cleanup() {
   if (_tmpDir) { try { rmSync(_tmpDir, { recursive: true }); } catch {} _tmpDir = null; }
 }
 
-export async function run({ warmupCycles = 10, measureCycles = 200 } = {}) {
+export async function runDurability(durability = 'buffered', { warmupCycles = 10, measureCycles = 200 } = {}) {
   const { sk, definitionId } = await getOrInit();
 
   const actor   = await sk.spawnActor({ definitionId });
   const actorId = actor.id;
 
   for (let i = 0; i < warmupCycles; i++) {
-    for (const type of CYCLE) await sk.sendEvent(actorId, { type });
+    for (const type of CYCLE) await sk.sendEvent(actorId, { type }, { durability });
   }
 
   const latencies = new Float64Array(measureCycles * CYCLE.length);
@@ -62,14 +67,29 @@ export async function run({ warmupCycles = 10, measureCycles = 200 } = {}) {
   for (let i = 0; i < measureCycles; i++) {
     for (const type of CYCLE) {
       const s = performance.now();
-      await sk.sendEvent(actorId, { type });
+      await sk.sendEvent(actorId, { type }, { durability });
       latencies[idx++] = performance.now() - s;
     }
   }
   const elapsed = performance.now() - t0;
 
-  return buildResult('StateKeep (embedded)', 'in-process SQLite+workers+APV, no HTTP', elapsed, latencies);
+  const label = durability === 'sync'
+    ? 'StateKeep embedded (sync — zero loss)'
+    : durability === 'async'
+    ? 'StateKeep embedded (async — hot registry only)'
+    : 'StateKeep embedded (buffered — 50ms window)';
+
+  const note = durability === 'sync'
+    ? 'flush to SQLite per event, zero crash window'
+    : durability === 'async'
+    ? 'no write buffer — persists on actor eviction only'
+    : 'in-process SQLite write buffer, 50ms window';
+
+  return buildResult(label, note, elapsed, latencies);
 }
+
+// Backward-compat alias used by run.js
+export const run = (opts) => runDurability('buffered', opts);
 
 export async function runConcurrent({ concurrency = 10, eventsPerActor = 30 } = {}) {
   const { sk, definitionId } = await getOrInit();
