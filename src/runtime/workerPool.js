@@ -90,8 +90,9 @@ function tierDepth(queues) {
 
 export class WorkerPool {
   constructor(workerCount) {
-    this.workerCount = workerCount;
-    this.workers     = [];
+    this.workerCount   = workerCount;
+    this.workers       = [];
+    this._shuttingDown = false;
     this._init();
   }
 
@@ -173,11 +174,11 @@ export class WorkerPool {
     worker.on('error', (err) => {
       console.error(`[workerPool] Worker ${index} error:`, err);
       this._rejectAll(slot, err);
-      this._respawn(index);
+      if (!this._shuttingDown) this._respawn(index);
     });
 
     worker.on('exit', (code) => {
-      if (code !== 0) {
+      if (code !== 0 && !this._shuttingDown) {
         console.error(`[workerPool] Worker ${index} exited with code ${code}`);
         this._rejectAll(slot, new Error(`Worker exited: ${code}`));
         this._respawn(index);
@@ -510,6 +511,7 @@ export class WorkerPool {
   }
 
   terminate() {
+    this._shuttingDown = true;
     for (const slot of this.workers) {
       try { slot.worker.terminate(); } catch {}
     }

@@ -110,6 +110,7 @@ async function run() {
 
   // Output JSON for parent process to parse
   process.stdout.write('\n__PG_RESULTS__' + JSON.stringify(results) + '__PG_END__\n');
+  process.exit(0);
 }
 
 run().catch(err => {
