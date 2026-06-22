@@ -27,3 +27,7 @@ ui/screenshots-new/
 test/e2e/reports/
 prv-v2/
 patches/
+xstate/
+run-webhook-*.sh
+run-sc8.sh
+sk-test.sh

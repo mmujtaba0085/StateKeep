@@ -98,26 +98,25 @@ export function bigIntToHex(bi) {
 
 /**
  * Convert a stored fingerprint hex string to BigInt for engine calls.
- * The '0' sentinel means "no events processed" and maps to FNV_OFFSET
- * when used as a starting point for hashing — but as a BigInt value
- * passed to the engine it is kept as-is (0n = wildcard in some contexts).
+ * The '0' sentinel means "no events processed".
  *
- * Callers that need the wildcard (0n) for apv_register_changepoint when
- * no historyPath is provided should use 0n directly, not hexToBigInt('0').
+ * Use hexToBigInt when you want 0n as an explicit wildcard (e.g. for
+ * apv_register_changepoint when no historyPath is provided).
  *
- * Callers that need the actor's fingerprint for apv_compute_accessible
- * or apv_actor_started should use fingerprintToBigInt(actor.historyFingerprint),
- * which also maps '0' to 0n — acceptable because a just-spawned actor with
- * no events has not yet diverged from any prefix.
+ * Use fingerprintToBigInt when passing an actor's historyFingerprint
+ * to apv_compute_accessible or apv_actor_started — '0' must map to
+ * FNV_OFFSET because in the new engine 0n == APV_PREFIX_WILDCARD and
+ * would incorrectly match every wildcard changepoint.
  */
 export function hexToBigInt(hex) {
   if (!hex || hex === '0') return 0n;
   return BigInt(`0x${hex.padStart(16, '0')}`);
 }
 
-/** Convert hex fingerprint to BigInt for passing to the engine. */
+/** Convert actor historyFingerprint hex to BigInt for engine calls. */
 export function fingerprintToBigInt(hex) {
-  return hexToBigInt(hex);
+  if (!hex || hex === '0') return FNV_OFFSET;
+  return BigInt(`0x${hex.padStart(16, '0')}`);
 }
 
 // ── Parallel (per-region) hash helpers ───────────────────────────────────────

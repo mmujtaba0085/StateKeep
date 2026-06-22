@@ -56,6 +56,7 @@ import { analyseDefinition }          from '../lib/staticAnalysis.js';
 import { issueToken, consumeToken }   from '../../registry/confirmTokenStore.js';
 import { insertChangepoint, insertParChangepoint } from '../../registry/changepointRepo.js';
 import { normalizeHistoryRegions } from '../../runtime/statePaths.js';
+import { getWriteBuffer } from '../../runtime/writeBuffer.js';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -330,6 +331,11 @@ export async function definitionRoutes(fastify) {
     }
 
     // ── Step 2: Stranded-actor check (only when parentId is supplied) ────────
+    // Flush deferred writes so the DB reflects the latest actor states before
+    // we query for stranded actors (avoids false-negative when a recent event
+    // hasn't been written yet by the 50ms write-buffer timer).
+    if (parentId) getWriteBuffer().flush();
+
     if (parentId) {
       const strandedGroups = findStrandedActors(parentId, effectiveValidStates, orgId);
       const totalStranded  = strandedGroups.reduce((s, g) => s + g.count, 0);
@@ -461,7 +467,16 @@ export async function definitionRoutes(fastify) {
         const regionHexMap   = computeRegionHashes(normalizedHistoryRegions);
         const regionArr      = regionFingerprintsToArray(regionHexMap);
         if (regionArr && regionArr.length > 0) {
-          eng.registerChangepointParallel(tStar, regionArr, BigInt(refinement), id);
+          const rc = eng.registerChangepointParallel(tStar, regionArr, BigInt(refinement), id);
+          if (rc === -2) {
+            // Engine rejected this selector as ambiguous (Proposition 5.14 violation).
+            // The definition row was already written to DB; without a matching changepoint
+            // it is inert — no actors will be migrated to it. Deploy under a different
+            // version ID or adjust the selector to resolve the conflict.
+            return reply.code(409).send({
+              error: 'Ambiguous deployment: this historyRegions selector conflicts with an existing changepoint at the same deployment tick. Ensure selectors are pairwise incompatible or use a covering union selector (Proposition 5.14).',
+            });
+          }
           insertParChangepoint({ orgId, tStar: Number(tStar), regionHashesHexMap: regionHexMap, refinement, childDefId: id });
         }
       } else {

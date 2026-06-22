@@ -3,10 +3,9 @@ const { useState: useState7, useEffect: useEffect7 } = React;
 
 function PageSettings() {
   const [section, setSection] = useState7("organisation");
-  const { pushToast, setModal, apiKey } = useApp();
+  const { pushToast, setModal } = useApp();
   const sections = [
     { id: "organisation", label: "Organisation" },
-    { id: "apikeys",      label: "API Keys" },
     { id: "webhooks",     label: "Webhooks" },
     { id: "notifications",label: "Notifications" },
     { id: "danger",       label: "Danger Zone" }
@@ -29,8 +28,7 @@ function PageSettings() {
       ),
       React.createElement("div", { className: "settings-content" },
         section === "organisation" && React.createElement(OrgSection, null),
-        section === "apikeys" && React.createElement(KeysSection, { pushToast, setModal, apiKey }),
-        section === "webhooks" && React.createElement(WebhooksSection, { apiKey }),
+        section === "webhooks" && React.createElement(WebhooksSection, null),
         section === "notifications" && React.createElement(NotificationsSection, null),
         section === "danger" && React.createElement(DangerSection, null)
       )
@@ -151,18 +149,17 @@ function KeysSection({ pushToast, setModal, apiKey }) {
   );
 }
 
-function WebhooksSection({ apiKey }) {
+function WebhooksSection() {
   const [webhooks, setWebhooks] = useState7([]);
   const [loading, setLoading] = useState7(false);
 
   useEffect7(() => {
-    if (!apiKey) return;
     setLoading(true);
     Api.get("/v1/webhooks")
       .then(data => setWebhooks((data.webhooks || []).map(w => Api.mapWebhook(w))))
       .catch(() => {})
       .finally(() => setLoading(false));
-  }, [apiKey]);
+  }, []);
 
   return React.createElement("div", null,
     React.createElement("div", { className: "settings-section" },
@@ -170,9 +167,7 @@ function WebhooksSection({ apiKey }) {
         React.createElement("h3", { style: { margin: 0 } }, "Webhooks"),
         React.createElement("a", { href: "#webhooks", className: "btn btn-primary" }, Icons.Plus({ size: 12 }), "Manage webhooks")
       ),
-      !apiKey
-        ? React.createElement("div", { className: "card", style: { padding: "20px", color: "var(--muted)", fontSize: 12 } }, "Set your API key in the sidebar to see webhooks.")
-        : loading
+      loading
         ? React.createElement("div", { className: "card", style: { padding: "20px", color: "var(--muted)", fontSize: 12 } }, "Loading…")
         : webhooks.length === 0
         ? React.createElement("div", { className: "card", style: { padding: "20px", color: "var(--muted)", fontSize: 12 } }, "No webhooks registered. Use the Webhooks page to register endpoints.")

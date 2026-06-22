@@ -13,6 +13,11 @@ import { uniqueId } from './helpers/api.js';
 
 const BASE      = process.env.STATEKEEP_URL ?? `http://localhost:${process.env.PORT ?? '3001'}`;
 const ADMIN_KEY = process.env.STATEKEEP_ADMIN_KEY ?? 'test-admin-key';
+
+// Open-source mode: org management (/v1/orgs) and auth/verify are removed.
+test.beforeEach(async ({}, testInfo) => {
+  testInfo.skip(true, 'Multi-tenancy management removed in open-source mode');
+});
 const API_KEY   = process.env.STATEKEEP_API_KEY   ?? '';
 
 const SENTINEL = '__test_key_do_not_use_in_production__';

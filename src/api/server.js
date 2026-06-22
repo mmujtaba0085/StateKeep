@@ -24,15 +24,11 @@ import { engineReady, getEngine } from '../ffi/engine.js';
 import { getDb } from '../registry/db.js';
 import { getMaxTStar } from '../registry/changepointRepo.js';
 import { seedEngineRegistry } from '../runtime/actorManager.js';
-import './adminKey.js';                                  // fails fast if STATEKEEP_ADMIN_KEY unset
 import { authMiddleware } from './middleware/auth.js';
 import { healthRoutes } from './routes/health.js';
 import { metricsRoutes } from './routes/metrics.js';
 import { actorRoutes } from './routes/actors.js';
 import { definitionRoutes } from './routes/definitions.js';
-import { keysRoutes } from './routes/keys.js';
-import { orgsRoutes } from './routes/orgs.js';
-import { authVerifyRoutes } from './routes/authVerify.js';
 import { exportRoutes }     from './routes/export.js';
 import { scheduledRoutes }  from './routes/scheduled.js';
 import { scenarioRoutes } from './routes/scenarios.js';
@@ -52,7 +48,6 @@ try { mkdirSync(LOG_DIR, { recursive: true }); } catch {}
 const fastify = Fastify({
   logger: {
     level: process.env.LOG_LEVEL ?? 'info',
-    redact: ['req.headers["x-api-key"]'],   // never log raw keys
     ...(process.env.NODE_ENV === 'production' ? {
       transport: {
         target: 'pino-roll',
@@ -82,29 +77,11 @@ await fastify.register(FastifySwagger, {
       contact:     { name: 'StateKeep', url: 'https://statekeep.io' },
       license:     { name: 'Proprietary' },
     },
-    components: {
-      securitySchemes: {
-        apiKey: {
-          type: 'apiKey',
-          in:   'header',
-          name: 'x-api-key',
-          description: 'API key issued via POST /v1/keys',
-        },
-        adminKey: {
-          type: 'apiKey',
-          in:   'header',
-          name: 'x-admin-key',
-          description: 'Admin key from STATEKEEP_ADMIN_KEY env var',
-        },
-      },
-    },
-    security: [{ apiKey: [] }],
     tags: [
       { name: 'actors',      description: 'Actor lifecycle — spawn, events, state, terminate' },
       { name: 'definitions', description: 'Machine definition deployment and migration' },
       { name: 'webhooks',    description: 'Outbound webhook subscriptions' },
-      { name: 'keys',        description: 'API key management' },
-      { name: 'admin',       description: 'Admin-only operations (require X-Admin-Key)' },
+      { name: 'admin',       description: 'Admin operations' },
       { name: 'health',      description: 'Health and metrics' },
     ],
   },
@@ -118,24 +95,12 @@ await fastify.register(FastifySwaggerUI, {
 
 await fastify.register(FastifyWebSocket);
 
-// Tier limit cache: rawApiKey → max-per-minute.
-// Populated by auth middleware after first successful key validation.
-// Avoids bcrypt in the hot-path rate-limit check.
-const _tierCache = new Map();
-export function cacheTierLimit(rawKey, tier) {
-  const TIER_LIMITS = { free: 300, pro: 1000, enterprise: 5000 };
-  _tierCache.set(rawKey, TIER_LIMITS[tier] ?? 1000);
-}
-
 await fastify.register(FastifyRateLimit, {
-  global: true,
+  global:     true,
   timeWindow: 60_000,
-  allowList: (_req, _key) => process.env.NODE_ENV === 'test',
-  // Per-org bucket: each API key gets its own counter. IP fallback for unauthenticated.
-  keyGenerator: (req) => req.headers['x-api-key'] ?? req.ip,
-  // max is a function so tier limits take effect without a separate hook.
-  // Defaults to enterprise (5000) on first request so tests and new keys aren't throttled before cache warms.
-  max: (_req, key) => _tierCache.get(key) ?? 5000,
+  max:        5000,
+  allowList:  (_req, _key) => process.env.NODE_ENV === 'test',
+  keyGenerator: (req) => req.ip,
   errorResponseBuilder: (_req, context) => ({
     error:      'Rate limit exceeded',
     limit:      context.max,
@@ -152,19 +117,8 @@ fastify.addHook('onRequest', async (req, reply) => {
   reply.header('X-Request-Id', id);
 });
 
-// ── Auth (global preHandler, skips public paths) ──────────────────────────────
+// ── Set orgId on every request ────────────────────────────────────────────────
 fastify.addHook('preHandler', authMiddleware);
-
-// ── Populate tier cache after auth resolves the key ──────────────────────────
-// The rate-limit plugin's max() function reads _tierCache synchronously.
-// First request from a new key gets the default (100/min); all subsequent
-// requests use the tier limit once auth has populated the cache here.
-fastify.addHook('preHandler', async (req) => {
-  const raw = req.headers['x-api-key'];
-  if (raw && req.apiKey?.tier && !_tierCache.has(raw)) {
-    cacheTierLimit(raw, req.apiKey.tier);
-  }
-});
 
 // ── Static dashboard ──────────────────────────────────────────────────────────
 // No caching for dashboard JS/JSX — every deploy should be visible immediately.
@@ -181,9 +135,6 @@ await fastify.register(healthRoutes);
 await fastify.register(metricsRoutes);
 await fastify.register(actorRoutes);
 await fastify.register(definitionRoutes);
-await fastify.register(keysRoutes);
-await fastify.register(orgsRoutes);
-await fastify.register(authVerifyRoutes);
 await fastify.register(exportRoutes);
 await fastify.register(scheduledRoutes);
 await fastify.register(scenarioRoutes);
@@ -223,15 +174,8 @@ fastify.get('/api-explorer', { schema: { hide: true } }, async (_req, reply) => 
     layout: 'BaseLayout',
     deepLinking: true,
     persistAuthorization: true,
-    requestInterceptor: (req) => {
-      const k = localStorage.getItem('sk_api_key');
-      if (k) req.headers['x-api-key'] = k;
-      return req;
-    },
-    onComplete: () => {
-      const k = localStorage.getItem('sk_api_key');
-      if (k) ui.preauthorizeApiKey('apiKey', k);
-    }
+    requestInterceptor: (req) => req,
+    onComplete: () => {}
   });
 </script>
 </body></html>`;

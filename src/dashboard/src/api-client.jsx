@@ -31,40 +31,15 @@ function extractVersion(definitionId) {
 // ── API client singleton ──────────────────────────────────────────────────────
 
 const Api = (() => {
-  const STORE_KEY = 'sk_api_key';
-  let _key = localStorage.getItem(STORE_KEY) || '';
-  let _listeners = [];
-
   const self = {
-    get key() { return _key; },
-
-    setKey(k) {
-      _key = k;
-      if (k) localStorage.setItem(STORE_KEY, k);
-      else localStorage.removeItem(STORE_KEY);
-      _listeners.forEach(fn => fn(k));
-    },
-
-    onChange(fn) {
-      _listeners.push(fn);
-      return () => { _listeners = _listeners.filter(l => l !== fn); };
-    },
-
     async request(method, path, body, opts = {}) {
-      const headers = { 'Content-Type': 'application/json', 'X-Priority': opts.priority ?? 'high' };
-      if (_key) headers['X-Api-Key'] = _key;
+      const headers = { 'Content-Type': 'application/json' };
+      if (opts.priority) headers['X-Priority'] = opts.priority;
       const res = await fetch(path, {
         method,
         headers,
         body: body !== undefined ? JSON.stringify(body) : undefined,
       });
-      if (res.status === 401) {
-        // Stale or revoked key — clear it so the login page re-appears
-        self.setKey('');
-        const err = new Error('Session expired — please sign in again');
-        err.status = 401;
-        throw err;
-      }
       if (!res.ok) {
         const text = await res.text().catch(() => '');
         let msg = 'HTTP ' + res.status;

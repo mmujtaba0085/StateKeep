@@ -12,11 +12,15 @@
  */
 
 import { existsSync } from 'fs';
+import { fileURLToPath } from 'url';
+import { dirname, join } from 'path';
 import fallback from './fallback.js';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const ENGINE_PATHS = [
   process.env.STATEKEEP_ENGINE_PATH,
-  'libapv-engine.so',
+  join(__dirname, 'libapv-engine-fixed.so'),
 ].filter(Boolean);
 
 const OUTPUT_BUFFER_SIZE = 512;  // max definition ID length + safety margin

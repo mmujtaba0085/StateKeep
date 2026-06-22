@@ -323,8 +323,8 @@ test('webhook with non-localhost http URL is rejected with 400', async () => {
 
 // ── 7: Cross-org isolation ────────────────────────────────────────────────────
 
-test('cross-org: org A cannot delete org B webhook', async () => {
-  // Create org A with a real key
+test.skip('cross-org: org A cannot delete org B webhook', async () => {
+  // Open-source mode: /v1/orgs removed, cross-org isolation not applicable.
   const orgARes = await adminPost('/v1/orgs', { name: uniqueId('wh-orgA') });
   expect(orgARes.status).toBe(201);
   const orgAId  = orgARes.body.id;
@@ -421,7 +421,7 @@ test('GET /v1/webhooks/:id/deliveries?status=delivered filters correctly', async
   }
 }, 12_000);
 
-test('GET /v1/webhooks/:id/deliveries: cross-org returns 404', async () => {
+test.skip('GET /v1/webhooks/:id/deliveries: cross-org returns 404', async () => {
   const orgARes = await adminPost('/v1/orgs', { name: uniqueId('dlv-orgA') });
   const orgAId  = orgARes.body.id;
   const keyARes = await adminPost(`/v1/orgs/${orgAId}/keys`, { label: 'A', tier: 'enterprise' });
