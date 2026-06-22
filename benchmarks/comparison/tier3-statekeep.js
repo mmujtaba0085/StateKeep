@@ -11,7 +11,6 @@
  */
 
 import { createStateKeep } from '../../src/lib/index.js';
-import { randomBytes } from 'crypto';
 import { mkdtempSync, rmSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
@@ -36,10 +35,9 @@ async function getOrInit() {
   if (_sk) return { sk: _sk, definitionId: _definitionId };
 
   _tmpDir = mkdtempSync(join(tmpdir(), 'sk-bench-'));
-  const dbPath        = join(_tmpDir, 'bench.db');
-  const encryptionKey = randomBytes(32).toString('hex');
+  const dbPath = join(_tmpDir, 'bench.db');
 
-  _sk = await createStateKeep({ dbPath, encryptionKey });
+  _sk = await createStateKeep({ dbPath }); // no encryption key — self-hosted, user owns the DB
   const { id } = await _sk.deployDefinition(MACHINE_DEF);
   _definitionId = id;
   return { sk: _sk, definitionId: _definitionId };
