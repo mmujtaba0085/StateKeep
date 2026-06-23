@@ -1,15 +1,16 @@
 /**
  * benchmarks/comparison/tier4-postgres.js
  *
- * StateKeep (embedded) with Postgres backend — same machine, same cycle as
- * tier3-statekeep.js. Must run in its own process because isPostgres is a
- * module-level singleton that can't be changed after the first import.
+ * StateKeep (embedded) with Postgres backend — same machine, time-based measurement.
+ * Must run in its own process because isPostgres is a module-level singleton.
  *
- * When run directly: outputs a JSON array of result objects to stdout.
- * Spawned by run.js which parses that JSON and merges into the summary.
+ * Encryption key is explicitly NOT set — context stored as plaintext.
  *
  * Connection: Unix socket peer auth — no password needed.
  * URL: postgresql:///statekeep_bench?host=/var/run/postgresql
+ *
+ * When run directly: outputs __PG_RESULTS__[...]__PG_END__ to stdout.
+ * Spawned by run.js which parses that JSON and merges into the summary.
  */
 
 const DB_URL = process.env.STATEKEEP_PG_URL
@@ -17,6 +18,9 @@ const DB_URL = process.env.STATEKEEP_PG_URL
 
 // Must set before any import resolves singletons
 process.env.STATEKEEP_DB_URL = DB_URL;
+
+// Ensure no encryption key leaks in from the environment
+delete process.env.STATEKEEP_ENCRYPTION_KEY;
 
 import { createStateKeep } from '../../src/lib/index.js';
 
@@ -32,7 +36,10 @@ const MACHINE_DEF = {
 
 const CYCLE = ['PROCESS', 'COMPLETE', 'RESET'];
 
-async function run() {
+async function run({
+  warmupSecs  = parseInt(process.env.WARMUP_SECS  ?? '2',  10),
+  measureSecs = parseInt(process.env.MEASURE_SECS ?? '10', 10),
+} = {}) {
   const sk = await createStateKeep({ dbUrl: DB_URL });
   const { id: definitionId } = await sk.deployDefinition(MACHINE_DEF);
 
@@ -43,39 +50,42 @@ async function run() {
     const actorId = actor.id;
 
     // Warmup
-    for (let i = 0; i < 10; i++) {
+    const warmupEnd = performance.now() + warmupSecs * 1000;
+    while (performance.now() < warmupEnd) {
       for (const type of CYCLE) await sk.sendEvent(actorId, { type }, { durability });
     }
 
-    const MEASURE = 200;
-    const latencies = new Float64Array(MEASURE * CYCLE.length);
-    let idx = 0;
-
+    // Measure
+    const latencies = [];
+    const measureEnd = performance.now() + measureSecs * 1000;
     const t0 = performance.now();
-    for (let i = 0; i < MEASURE; i++) {
+
+    while (performance.now() < measureEnd) {
       for (const type of CYCLE) {
         const s = performance.now();
         await sk.sendEvent(actorId, { type }, { durability });
-        latencies[idx++] = performance.now() - s;
+        latencies.push(performance.now() - s);
       }
     }
     const elapsed = performance.now() - t0;
 
-    const sorted   = Float64Array.from(latencies).sort();
-    const total    = latencies.length;
-    const evPerSec = Math.round(total / (elapsed / 1000));
-    const p50      = sorted[Math.floor(total * 0.50)] * 1000;
-    const p95      = sorted[Math.floor(total * 0.95)] * 1000;
-    const p99      = sorted[Math.floor(total * 0.99)] * 1000;
+    const arr   = new Float64Array(latencies).sort();
+    const total = arr.length;
 
-    const label = `StateKeep Postgres (${durability})`;
-    const note  = durability === 'sync'
-      ? 'Postgres transaction per event, zero crash window'
-      : durability === 'async'
-      ? 'Postgres — hot registry only, no flush'
-      : 'Postgres write buffer, 50ms window';
-
-    results.push({ label, note, evPerSec, p50, p95, p99, totalEvents: total, elapsedMs: elapsed });
+    results.push({
+      label:       `StateKeep Postgres (${durability})`,
+      note:        durability === 'sync'
+        ? 'Postgres transaction per event, zero crash window'
+        : durability === 'async'
+        ? 'Postgres — hot registry only, no flush'
+        : 'Postgres write buffer, 50ms window',
+      evPerSec:    Math.round(total / (elapsed / 1000)),
+      p50:         arr[Math.floor(total * 0.50)] * 1000,
+      p95:         arr[Math.floor(total * 0.95)] * 1000,
+      p99:         arr[Math.floor(total * 0.99)] * 1000,
+      totalEvents: total,
+      elapsedMs:   elapsed,
+    });
   }
 
   // Concurrent benchmark
@@ -87,16 +97,20 @@ async function run() {
     for (const type of CYCLE) await sk.sendEvent(a.id, { type });
   }));
 
-  const EVENTS_PER_ACTOR = 30;
-  const totalEvents = CONCURRENCY * EVENTS_PER_ACTOR;
-  const t0c = performance.now();
+  let totalEvents = 0;
+  const t0c    = performance.now();
+  const endC   = t0c + measureSecs * 1000;
+
   await Promise.all(actors.map(async a => {
-    const cycles = Math.floor(EVENTS_PER_ACTOR / CYCLE.length);
-    for (let i = 0; i < cycles; i++) {
-      for (const type of CYCLE) await sk.sendEvent(a.id, { type });
+    while (performance.now() < endC) {
+      for (const type of CYCLE) {
+        await sk.sendEvent(a.id, { type });
+        totalEvents++;
+      }
     }
   }));
-  const elapsedC  = performance.now() - t0c;
+
+  const elapsedC = performance.now() - t0c;
   results.push({
     label:      `StateKeep Postgres (${CONCURRENCY} concurrent actors)`,
     note:       'Postgres MVCC — parallel writes without single-writer lock',
@@ -108,7 +122,6 @@ async function run() {
 
   await sk.close();
 
-  // Output JSON for parent process to parse
   process.stdout.write('\n__PG_RESULTS__' + JSON.stringify(results) + '__PG_END__\n');
   process.exit(0);
 }

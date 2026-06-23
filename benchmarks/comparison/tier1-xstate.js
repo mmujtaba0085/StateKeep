@@ -1,8 +1,8 @@
 /**
  * Tier 1: Pure XState — in-process, no persistence, no APV.
  *
- * Measures raw state machine throughput: how fast XState can process events
- * in memory with no other overhead.
+ * Time-based: runs for MEASURE_SECS seconds so all tiers share the same
+ * wall-clock budget and throughput numbers are directly comparable.
  */
 
 import { createMachine, createActor } from '../../node_modules/xstate/dist/xstate.cjs.mjs';
@@ -19,25 +19,27 @@ const MACHINE_DEF = {
 
 const CYCLE = [{ type: 'PROCESS' }, { type: 'COMPLETE' }, { type: 'RESET' }];
 
-export async function run({ warmupCycles = 5_000, measureCycles = 100_000 } = {}) {
+export async function run({ warmupSecs = 2, measureSecs = 10 } = {}) {
   const machine = createMachine(MACHINE_DEF);
   const actor   = createActor(machine);
   actor.start();
 
-  // Warm up — let JIT compile the hot path
-  for (let i = 0; i < warmupCycles; i++) {
+  // Warmup — let JIT compile the hot path
+  const warmupEnd = performance.now() + warmupSecs * 1000;
+  while (performance.now() < warmupEnd) {
     for (const ev of CYCLE) actor.send(ev);
   }
 
-  const latencies = new Float64Array(measureCycles * CYCLE.length);
-  let idx = 0;
-
+  // Measure
+  const latencies = [];
+  const measureEnd = performance.now() + measureSecs * 1000;
   const t0 = performance.now();
-  for (let i = 0; i < measureCycles; i++) {
+
+  while (performance.now() < measureEnd) {
     for (const ev of CYCLE) {
       const s = performance.now();
       actor.send(ev);
-      latencies[idx++] = performance.now() - s;
+      latencies.push(performance.now() - s);
     }
   }
   const elapsed = performance.now() - t0;
@@ -48,11 +50,15 @@ export async function run({ warmupCycles = 5_000, measureCycles = 100_000 } = {}
 }
 
 function buildResult(label, note, elapsedMs, latencies) {
-  const sorted   = Float64Array.from(latencies).sort();
-  const total    = latencies.length;
-  const evPerSec = Math.round(total / (elapsedMs / 1000));
-  const p50      = sorted[Math.floor(total * 0.50)] * 1000; // µs
-  const p95      = sorted[Math.floor(total * 0.95)] * 1000;
-  const p99      = sorted[Math.floor(total * 0.99)] * 1000;
-  return { label, note, evPerSec, p50, p95, p99, totalEvents: total, elapsedMs };
+  const arr    = new Float64Array(latencies).sort();
+  const total  = arr.length;
+  return {
+    label, note,
+    evPerSec:    Math.round(total / (elapsedMs / 1000)),
+    p50:         arr[Math.floor(total * 0.50)] * 1000,
+    p95:         arr[Math.floor(total * 0.95)] * 1000,
+    p99:         arr[Math.floor(total * 0.99)] * 1000,
+    totalEvents: total,
+    elapsedMs,
+  };
 }

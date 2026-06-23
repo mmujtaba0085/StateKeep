@@ -2,13 +2,19 @@
  * Tier 3: StateKeep (embedded) — in-process, SQLite + APV + worker pool.
  *
  * Uses createStateKeep() directly — no HTTP server, no API key.
- * Full stack: APV fingerprinting, SQLite write buffer, worker pool, encryption.
+ * Encryption key is explicitly NOT set so context is stored as plaintext.
  *
  * Three durability modes:
  *   buffered (default) — flush every FLUSH_MS, 50ms crash window
  *   sync               — flush immediately per event, zero crash window, slower
  *   async              — skip write buffer, hot-registry only until eviction
+ *
+ * Time-based: runs for measureSecs seconds so throughput is directly
+ * comparable to tier1/tier2 which run the same wall-clock budget.
  */
+
+// Ensure no encryption key leaks in from the environment
+delete process.env.STATEKEEP_ENCRYPTION_KEY;
 
 import { createStateKeep } from '../../src/lib/index.js';
 import { mkdtempSync, rmSync } from 'fs';
@@ -37,7 +43,7 @@ async function getOrInit() {
   _tmpDir = mkdtempSync(join(tmpdir(), 'sk-bench-'));
   const dbPath = join(_tmpDir, 'bench.db');
 
-  _sk = await createStateKeep({ dbPath }); // no encryption key — self-hosted, user owns the DB
+  _sk = await createStateKeep({ dbPath }); // no encryptionKey — self-hosted
   const { id } = await _sk.deployDefinition(MACHINE_DEF);
   _definitionId = id;
   return { sk: _sk, definitionId: _definitionId };
@@ -48,34 +54,37 @@ export async function cleanup() {
   if (_tmpDir) { try { rmSync(_tmpDir, { recursive: true }); } catch {} _tmpDir = null; }
 }
 
-export async function runDurability(durability = 'buffered', { warmupCycles = 10, measureCycles = 200 } = {}) {
+export async function runDurability(durability = 'buffered', { warmupSecs = 2, measureSecs = 10 } = {}) {
   const { sk, definitionId } = await getOrInit();
 
   const actor   = await sk.spawnActor({ definitionId });
   const actorId = actor.id;
 
-  for (let i = 0; i < warmupCycles; i++) {
+  // Warmup
+  const warmupEnd = performance.now() + warmupSecs * 1000;
+  while (performance.now() < warmupEnd) {
     for (const type of CYCLE) await sk.sendEvent(actorId, { type }, { durability });
   }
 
-  const latencies = new Float64Array(measureCycles * CYCLE.length);
-  let idx = 0;
-
+  // Measure
+  const latencies = [];
+  const measureEnd = performance.now() + measureSecs * 1000;
   const t0 = performance.now();
-  for (let i = 0; i < measureCycles; i++) {
+
+  while (performance.now() < measureEnd) {
     for (const type of CYCLE) {
       const s = performance.now();
       await sk.sendEvent(actorId, { type }, { durability });
-      latencies[idx++] = performance.now() - s;
+      latencies.push(performance.now() - s);
     }
   }
   const elapsed = performance.now() - t0;
 
   const label = durability === 'sync'
-    ? 'StateKeep embedded (sync — zero loss)'
+    ? 'StateKeep SQLite (sync — zero loss)'
     : durability === 'async'
-    ? 'StateKeep embedded (async — hot registry only)'
-    : 'StateKeep embedded (buffered — 50ms window)';
+    ? 'StateKeep SQLite (async — hot registry only)'
+    : 'StateKeep SQLite (buffered — 50ms window)';
 
   const note = durability === 'sync'
     ? 'flush to SQLite per event, zero crash window'
@@ -86,46 +95,53 @@ export async function runDurability(durability = 'buffered', { warmupCycles = 10
   return buildResult(label, note, elapsed, latencies);
 }
 
-// Backward-compat alias used by run.js
+// Backward-compat alias
 export const run = (opts) => runDurability('buffered', opts);
 
-export async function runConcurrent({ concurrency = 10, eventsPerActor = 30 } = {}) {
+export async function runConcurrent({ concurrency = 10, measureSecs = 10 } = {}) {
   const { sk, definitionId } = await getOrInit();
 
   const actors = await Promise.all(
     Array.from({ length: concurrency }, () => sk.spawnActor({ definitionId }))
   );
 
+  // Warmup — one full cycle per actor
   await Promise.all(actors.map(async a => {
     for (const type of CYCLE) await sk.sendEvent(a.id, { type });
   }));
 
-  const totalEvents = concurrency * eventsPerActor;
-  const t0          = performance.now();
+  let totalEvents = 0;
+  const t0       = performance.now();
+  const endTime  = t0 + measureSecs * 1000;
 
   await Promise.all(actors.map(async a => {
-    const cycles = Math.floor(eventsPerActor / CYCLE.length);
-    for (let i = 0; i < cycles; i++) {
-      for (const type of CYCLE) await sk.sendEvent(a.id, { type });
+    while (performance.now() < endTime) {
+      for (const type of CYCLE) {
+        await sk.sendEvent(a.id, { type });
+        totalEvents++;
+      }
     }
   }));
 
-  const elapsed  = performance.now() - t0;
-  const evPerSec = Math.round(totalEvents / (elapsed / 1000));
+  const elapsed = performance.now() - t0;
   return {
-    label:      `StateKeep embedded (${concurrency} concurrent actors)`,
-    evPerSec,
+    label:      `StateKeep SQLite (${concurrency} concurrent actors)`,
+    evPerSec:   Math.round(totalEvents / (elapsed / 1000)),
     elapsedMs:  elapsed,
     totalEvents,
   };
 }
 
 function buildResult(label, note, elapsedMs, latencies) {
-  const sorted   = Float64Array.from(latencies).sort();
-  const total    = latencies.length;
-  const evPerSec = Math.round(total / (elapsedMs / 1000));
-  const p50      = sorted[Math.floor(total * 0.50)] * 1000;
-  const p95      = sorted[Math.floor(total * 0.95)] * 1000;
-  const p99      = sorted[Math.floor(total * 0.99)] * 1000;
-  return { label, note, evPerSec, p50, p95, p99, totalEvents: total, elapsedMs };
+  const arr    = new Float64Array(latencies).sort();
+  const total  = arr.length;
+  return {
+    label, note,
+    evPerSec:    Math.round(total / (elapsedMs / 1000)),
+    p50:         arr[Math.floor(total * 0.50)] * 1000,
+    p95:         arr[Math.floor(total * 0.95)] * 1000,
+    p99:         arr[Math.floor(total * 0.99)] * 1000,
+    totalEvents: total,
+    elapsedMs,
+  };
 }
