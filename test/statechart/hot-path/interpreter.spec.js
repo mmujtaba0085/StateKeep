@@ -114,3 +114,35 @@ describe('hierarchical state bubbling', () => {
     assert.equal(result.stateValue, 'cancelled');
   });
 });
+
+describe('action execution order', () => {
+  test('exit action sees pre-transition context (XState semantics)', () => {
+    const c = compiled({ id: 't', initial: 'a', states: {
+      a: { exit: 'logCtx', on: { GO: { target: 'b', actions: ['assignX'] } } },
+      b: {},
+    }});
+    const seenCtx = [];
+    const reg = loadRegistry({
+      actions: {
+        logCtx:  ({ context }) => { seenCtx.push(context.x ?? 'none'); },
+        assignX: ({ context }) => ({ x: 'assigned' }),
+      }
+    });
+    processEvent(makeEntry('a', {}), c, { type: 'GO' }, reg);
+    assert.equal(seenCtx[0], 'none', 'exit action should see pre-transition context');
+  });
+});
+
+describe('transient loop depth', () => {
+  test('100-hop chain completes without error', () => {
+    const states = { start: { on: { GO: 's0' } } };
+    for (let i = 0; i < 100; i++) {
+      states[`s${i}`] = { always: [{ target: `s${i + 1}` }] };
+    }
+    states['s100'] = { type: 'final' };
+    const c = compiled({ id: 't', initial: 'start', states });
+    const result = processEvent(makeEntry('start'), c, { type: 'GO' }, emptyReg);
+    assert.equal(result.error, undefined, 'should not flag TRANSIENT_LOOP_DETECTED');
+    assert.equal(result.stateValue, 's100');
+  });
+});

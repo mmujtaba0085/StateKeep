@@ -63,7 +63,10 @@ function findCandidates(stateKey, eventType, transitions) {
 function evalGuard(guardName, context, event, registry) {
   if (!guardName) return true;
   const fn = registry.guards[guardName];
-  if (!fn) return false;
+  if (!fn) {
+    console.warn(`[interpreter] Guard '${guardName}' not found in registry — treating as false`);
+    return false;
+  }
   try {
     return Boolean(fn({ context, event }, {}));
   } catch (err) {
@@ -145,6 +148,24 @@ export function processEvent(entry, compiledJson, event, registry, pendingSends 
     emit:  () => {},
   };
 
+  // Exit actions for old state — fires first, sees pre-transition context (XState semantics)
+  for (const actionName of (exitActions[oldStateKey] ?? [])) {
+    const classified = classifyAction(actionName, registry);
+    if (!classified) continue;
+    if (classified.type === 'tier1') {
+      try {
+        const result = classified.fn({ context, event }, meta);
+        if (result && typeof result === 'object' && !result.then) {
+          context = { ...context, ...result };
+        }
+      } catch {}
+    } else if (classified.type === 'tier2') {
+      tier2.push({ name: actionName, fn: classified.fn, context, event });
+    } else if (classified.type === 'durable') {
+      durable.push({ name: actionName, fn: classified.fn, context, event, opts: classified.fn.__sk_durable });
+    }
+  }
+
   // Tier-1 actions on transition (assign, etc.) — run synchronously now
   for (const actionName of (winner.actions ?? [])) {
     const classified = classifyAction(actionName, registry);
@@ -158,19 +179,6 @@ export function processEvent(entry, compiledJson, event, registry, pendingSends 
       } catch (err) {
         console.error(`[interpreter] Tier-1 action '${actionName}' threw:`, err.message);
       }
-    } else if (classified.type === 'tier2') {
-      tier2.push({ name: actionName, fn: classified.fn, context, event });
-    } else if (classified.type === 'durable') {
-      durable.push({ name: actionName, fn: classified.fn, context, event, opts: classified.fn.__sk_durable });
-    }
-  }
-
-  // Exit actions for old state
-  for (const actionName of (exitActions[oldStateKey] ?? [])) {
-    const classified = classifyAction(actionName, registry);
-    if (!classified) continue;
-    if (classified.type === 'tier1') {
-      try { classified.fn({ context, event }, meta); } catch {}
     } else if (classified.type === 'tier2') {
       tier2.push({ name: actionName, fn: classified.fn, context, event });
     } else if (classified.type === 'durable') {
@@ -199,7 +207,7 @@ export function processEvent(entry, compiledJson, event, registry, pendingSends 
     if (!transWinner) break;
     newStateKey = transWinner.target ?? newStateKey;
   }
-  if (transientDepth >= MAX_TRANSIENT_DEPTH) {
+  if (transientDepth >= MAX_TRANSIENT_DEPTH && transientStates[newStateKey]) {
     // Actor goes to needs_rescue — caller detects via special flag
     return {
       stateValue:         entry.stateValue,
