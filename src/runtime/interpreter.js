@@ -168,6 +168,10 @@ export function processEvent(entry, compiledJson, event, registry, pendingSends 
     };
   }
 
+  // Snapshot context reference before any tier-1 assign actions can produce a new object.
+  // Tier-1 assigns return new objects (never mutate in place), so restoring this reference
+  // is zero-cost and sufficient to roll back all mutations on transient-loop bail.
+  const contextSnapshot = entry.context;
   let context    = entry.context;
   const tier2    = [];
   const durable  = [];
@@ -241,10 +245,12 @@ export function processEvent(entry, compiledJson, event, registry, pendingSends 
     newStateKey = transWinner.target ?? newStateKey;
   }
   if (transientDepth >= MAX_TRANSIENT_DEPTH && transientStates[newStateKey]) {
-    // Actor goes to needs_rescue — caller detects via special flag
+    // Actor goes to needs_rescue — caller detects via special flag.
+    // Return contextSnapshot (pre-mutation) and empty action arrays so no
+    // side-effects fire for a transition that did not successfully complete.
     return {
       stateValue:         entry.stateValue,
-      context,
+      context:            contextSnapshot,
       historyFingerprint: entry.historyFingerprint,
       stateEntryId:       entry.stateEntryId,
       done:               false,
@@ -252,6 +258,7 @@ export function processEvent(entry, compiledJson, event, registry, pendingSends 
       scheduledEventOps:  [],
       tier2Actions:       [],
       durableActions:     [],
+      invokesToStart:     [],
     };
   }
 
