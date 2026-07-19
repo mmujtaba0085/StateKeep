@@ -22,13 +22,15 @@ const HIGH_WATER = 200;
 
 class WriteBuffer {
   constructor() {
-    this._states    = new Map();
-    this._events    = [];
-    this._decisions = [];
-    this._pending   = new Set();
-    this._stmts     = null;
-    this._flushing  = false;   // Postgres-mode concurrent-flush guard
-    this._timer     = setInterval(() => { this.flush().catch(() => {}); }, FLUSH_MS).unref();
+    this._states            = new Map();
+    this._events            = [];
+    this._decisions         = [];
+    this._scheduledCancels  = [];
+    this._scheduledCreates  = [];
+    this._pending           = new Set();
+    this._stmts             = null;
+    this._flushing          = false;   // Postgres-mode concurrent-flush guard
+    this._timer             = setInterval(() => { this.flush().catch(() => {}); }, FLUSH_MS).unref();
   }
 
   queueState(actorId, data) {
@@ -44,6 +46,23 @@ class WriteBuffer {
 
   queueDecision(args) {
     this._decisions.push(args);
+  }
+
+  /**
+   * Queue a cancel of all pending __SK_TIMEOUT_ events for the given actor+stateKey.
+   * Processed atomically with state writes in the next flush().
+   */
+  queueScheduledCancel(actorId, stateKey) {
+    this._scheduledCancels.push({ actorId, stateKey });
+  }
+
+  /**
+   * Queue creation of a scheduled event row (after: timer fired from interpreter).
+   * payload is a plain object — will be JSON-stringified and encrypted on flush.
+   */
+  queueScheduledCreate({ actorId, orgId, eventType, fireAt, payload }) {
+    this._scheduledCreates.push({ actorId, orgId, eventType, fireAt,
+      payload: JSON.stringify(payload) });
   }
 
   hasPendingEvent(actorId, idempotencyKey) {
@@ -76,7 +95,13 @@ class WriteBuffer {
   }
 
   flush() {
-    if (this._states.size === 0 && this._events.length === 0 && this._decisions.length === 0) {
+    // Drain scheduled ops first so they are included in the early-exit check and
+    // processed atomically with state writes even when no state rows are pending.
+    const scheduledCancels = this._scheduledCancels.splice(0);
+    const scheduledCreates = this._scheduledCreates.splice(0);
+
+    if (this._states.size === 0 && this._events.length === 0 && this._decisions.length === 0
+        && scheduledCancels.length === 0 && scheduledCreates.length === 0) {
       return Promise.resolve();
     }
 
@@ -89,18 +114,33 @@ class WriteBuffer {
       if (ev.idempotency_key) this._pending.delete(`${ev.actor_id}:${ev.idempotency_key}`);
     }
 
-    if (rows.length === 0 && events.length === 0 && decisions.length === 0) return Promise.resolve();
+    if (rows.length === 0 && events.length === 0 && decisions.length === 0
+        && scheduledCancels.length === 0 && scheduledCreates.length === 0) {
+      return Promise.resolve();
+    }
 
     if (isPostgres) {
-      return this._flushPostgres(rows, events, decisions);
+      return this._flushPostgres(rows, events, decisions, scheduledCancels, scheduledCreates);
     }
 
     try {
-      const { state: stateStmt, event: eventStmt, decision: decisionStmt } = this._getStmts();
+      const { state: stateStmt, event: eventStmt, decision: decisionStmt,
+              schedCancel: cancelStmt, schedInsert: insertSched } = this._getStmts();
       getDb().transaction(() => {
         for (const row of rows)      stateStmt.run(row);
         for (const ev of events)     eventStmt.run(ev);
         for (const dec of decisions) decisionStmt.run(...dec);
+        // Cancel stale scheduled events for states that were exited
+        for (const { actorId, stateKey } of scheduledCancels) {
+          cancelStmt.run(actorId, `__SK_TIMEOUT_${stateKey.replace(/\./g, '_')}_%`);
+        }
+        // Create new scheduled events for states with after:
+        for (const row of scheduledCreates) {
+          insertSched.run(
+            row.actorId, row.orgId, row.eventType,
+            encrypt(row.payload), row.fireAt, Date.now()
+          );
+        }
       })();
     } catch (err) {
       console.error('[writeBuffer] flush error:', err.message);
@@ -108,7 +148,7 @@ class WriteBuffer {
     return Promise.resolve();
   }
 
-  async _flushPostgres(rows, events, decisions) {
+  async _flushPostgres(rows, events, decisions, scheduledCancels = [], scheduledCreates = []) {
     if (this._flushing) return;
     this._flushing = true;
     try {
@@ -141,6 +181,23 @@ class WriteBuffer {
                 from_definition_id, to_definition_id, actor_fingerprint, prefix_hash, created_at)
              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
             dec
+          );
+        }
+        // Cancel stale scheduled events for states that were exited
+        for (const { actorId, stateKey } of scheduledCancels) {
+          await client.query(
+            `UPDATE scheduled_events SET status='cancelled'
+             WHERE actor_id=$1 AND event_type LIKE $2 AND status='pending'`,
+            [actorId, `__SK_TIMEOUT_${stateKey.replace(/\./g, '_')}_%`]
+          );
+        }
+        // Create new scheduled events for states with after:
+        for (const row of scheduledCreates) {
+          await client.query(
+            `INSERT INTO scheduled_events
+               (actor_id, org_id, event_type, payload_enc, fire_at, status, created_at)
+             VALUES ($1,$2,$3,$4,$5,'pending',$6)`,
+            [row.actorId, row.orgId, row.eventType, encrypt(row.payload), row.fireAt, Date.now()]
           );
         }
       });
@@ -177,6 +234,16 @@ class WriteBuffer {
           (actor_id, org_id, deployment_id, trigger, evaluated_at, decision, reason,
            from_definition_id, to_definition_id, actor_fingerprint, prefix_hash, created_at)
         VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+      `),
+      schedCancel: db.prepare(`
+        UPDATE scheduled_events
+        SET status = 'cancelled'
+        WHERE actor_id = ? AND event_type LIKE ? AND status = 'pending'
+      `),
+      schedInsert: db.prepare(`
+        INSERT INTO scheduled_events
+          (actor_id, org_id, event_type, payload_enc, fire_at, status, created_at)
+        VALUES (?, ?, ?, ?, ?, 'pending', ?)
       `),
     };
     return this._stmts;

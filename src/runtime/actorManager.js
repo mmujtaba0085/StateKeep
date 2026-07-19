@@ -5,6 +5,7 @@
  * Public API consumed by the Fastify route handlers.
  */
 
+import { randomInt } from 'crypto';
 import { LRUCache } from './lruCache.js';
 import { fingerprintToBigInt, regionFingerprintsToArray } from '../ffi/hashUtils.js';
 import { getEngine } from '../ffi/engine.js';
@@ -22,7 +23,8 @@ import {
   getActorDefinitionId,
 } from '../registry/actorRepo.js';
 import { findDefinitionById } from '../registry/definitionRepo.js';
-import { isPostgres } from '../registry/db.js';
+import { getDb, encrypt, isPostgres } from '../registry/db.js';
+import { serializeRegionFingerprints } from '../registry/regionFingerprintCodec.js';
 import { emitWebhookEvent } from '../api/lib/webhookEmitter.js';
 import { getWildcardChildDef, loadChangepointsAfter, loadParChangepointsAfter } from '../registry/changepointRepo.js';
 
@@ -151,6 +153,19 @@ function logDecision({
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+/** Extract the canonical dot-separated key from a stateValue (mirrors interpreter.js). */
+function stateKeyOf(sv) {
+  if (typeof sv === 'string') return sv;
+  if (sv && typeof sv === 'object') {
+    const top = Object.keys(sv)[0];
+    const sub = sv[top];
+    if (typeof sub === 'string') return `${top}.${sub}`;
+    if (sub && typeof sub === 'object') return `${top}.${stateKeyOf(sub)}`;
+    return top;
+  }
+  return String(sv);
+}
 
 function touch(id, entry) {
   entry.lastAccess = Date.now();
@@ -462,6 +477,18 @@ export async function sendEvent(actorId, event, tick, opts = {}) {
       { code: 'NO_COMPILED_FORM' }
     );
   }
+  // ── Stale after: timeout guard ────────────────────────────────────────────────
+  // The scheduler spreads payload onto the event, so stateEntryId lands at event.stateEntryId.
+  // Fall back to event.payload?.stateEntryId for callers that nest it.
+  if (event.type?.startsWith('__SK_TIMEOUT_')) {
+    const expectedEntryId = event.stateEntryId ?? event.payload?.stateEntryId ?? event.data?.stateEntryId;
+    if (expectedEntryId !== undefined && expectedEntryId !== entry.stateEntryId) {
+      // Stale timer — actor has already transitioned to a different state; discard silently.
+      return { stateValue: entry.stateValue, context: entry.context,
+               historyFingerprint: entry.historyFingerprint, done: false, migratedTo: null };
+    }
+  }
+
   const pendingSends = [];
   const registry     = getGlobalRegistry() ?? { guards: {}, actions: {}, services: {} };
   const interpResult = processEvent(
@@ -540,6 +567,27 @@ export async function sendEvent(actorId, event, tick, opts = {}) {
     });
     if (eventData) buf.queueEvent(eventData);
     if (durability === 'sync') await buf.flush();
+  }
+
+  // ── after: scheduled event lifecycle ──────────────────────────────────────────
+  // Queue cancel of old state's timers and creation of new state's timers.
+  // These are processed atomically with the state write in the next flush().
+  if (interpResult.scheduledEventOps?.length > 0) {
+    for (const op of interpResult.scheduledEventOps) {
+      if (op.op === 'cancel') {
+        buf.queueScheduledCancel(actorId, op.stateKey);
+      } else if (op.op === 'create') {
+        for (const { eventType, delayMs } of op.entries) {
+          buf.queueScheduledCreate({
+            actorId,
+            orgId:   entry.orgId,
+            eventType,
+            fireAt:  Date.now() + delayMs,
+            payload: { stateEntryId: op.newEntryId },
+          });
+        }
+      }
+    }
   }
 
   if (result.done) {
@@ -714,13 +762,85 @@ export async function migrateActor(actorId, targetDefinitionId, { priority = 'no
   }
 
   const newLogicalStartTick = Number(targetDef.deployedAt) + 1;
-  await migrateActorDefinition(actorId, {
-    definitionId:       targetDefinitionId,
-    stateValue:         result.stateValue,
-    context:            result.context,
-    regionFingerprints: result.regionFingerprints ?? null,
-    logicalStartTick:   newLogicalStartTick,
-  });
+  const newEntryId          = randomInt(0, 2 ** 32);
+
+  // ── Atomic DB update ───────────────────────────────────────────────────────
+  // SQLite: single transaction cancels old after: timers, updates actor,
+  // and schedules after: timers for the new state — all or nothing.
+  // Postgres: best-effort (cancel then update); atomic transaction variant omitted
+  // since the primary deployment is SQLite.
+  if (!isPostgres) {
+    const db        = getDb();
+    const encCtx    = result.context != null
+      ? encrypt(Buffer.from(JSON.stringify(result.context)))
+      : null;
+    db.transaction(() => {
+      // 1. Cancel all pending after: timers for this actor (old state exited)
+      db.prepare(
+        `UPDATE scheduled_events SET status='cancelled'
+         WHERE actor_id=? AND event_type LIKE '__SK_TIMEOUT_%' AND status='pending'`
+      ).run(actorId);
+
+      // 2. Update actor definition, state, and stateEntryId atomically
+      db.prepare(
+        `UPDATE actors
+         SET definition_id=?, state_value=?, context_json=?,
+             region_fingerprints=?, logical_start_tick=?, state_entry_id=?,
+             status='active', updated_at=?
+         WHERE id=?`
+      ).run(
+        targetDefinitionId,
+        result.stateValue != null ? JSON.stringify(result.stateValue) : null,
+        encCtx,
+        serializeRegionFingerprints(result.regionFingerprints ?? null),
+        newLogicalStartTick,
+        newEntryId,
+        Date.now(),
+        actorId
+      );
+
+      // 3. Schedule after: timers for the new state (if any)
+      const afterTransitions = targetDef.compiledJson?.afterTransitions;
+      if (afterTransitions) {
+        const newStateKey = stateKeyOf(result.stateValue);
+        const afters      = afterTransitions[newStateKey] ?? [];
+        if (afters.length > 0) {
+          const insertSched = db.prepare(
+            `INSERT INTO scheduled_events
+               (actor_id, org_id, event_type, payload_enc, fire_at, status, created_at)
+             VALUES (?, ?, ?, ?, ?, 'pending', ?)`
+          );
+          const now = Date.now();
+          for (const { delayMs, eventType } of afters) {
+            insertSched.run(
+              actorId, actor.orgId, eventType,
+              encrypt(JSON.stringify({ stateEntryId: newEntryId })),
+              now + delayMs, now
+            );
+          }
+        }
+      }
+    })();
+  } else {
+    // Postgres: update definition (without stateEntryId for now); cancel old timers separately.
+    await migrateActorDefinition(actorId, {
+      definitionId:       targetDefinitionId,
+      stateValue:         result.stateValue,
+      context:            result.context,
+      regionFingerprints: result.regionFingerprints ?? null,
+      logicalStartTick:   newLogicalStartTick,
+    });
+    try {
+      const { query } = await import('../registry/db-postgres.js');
+      await query(
+        `UPDATE scheduled_events SET status='cancelled'
+         WHERE actor_id=$1 AND event_type LIKE '__SK_TIMEOUT_%' AND status='pending'`,
+        [actorId]
+      );
+    } catch (e) {
+      console.warn(`[actorManager] migrateActor: failed to cancel old timers for ${actorId}: ${e.message}`);
+    }
+  }
 
   try {
     const eng = getEngine();
@@ -740,6 +860,7 @@ export async function migrateActor(actorId, targetDefinitionId, { priority = 'no
       regionFingerprints: result.regionFingerprints ?? null,
       lastEventTick:      actor.lastEventTick,
       logicalStartTick:   newLogicalStartTick,
+      stateEntryId:       newEntryId,
       lastAccess:         Date.now(),
     });
   }
