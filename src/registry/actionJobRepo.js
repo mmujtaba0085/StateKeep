@@ -1,6 +1,6 @@
 // src/registry/actionJobRepo.js
 import { randomUUID } from 'crypto';
-import { getDb, encrypt, decrypt, isPostgres } from './db.js';
+import { getDb, encrypt, isPostgres } from './db.js';
 
 export async function insertActionJob({ actorId, actionName, context, event, maxRetries, fireAt }) {
   const id  = randomUUID();
@@ -26,16 +26,19 @@ export async function insertActionJob({ actorId, actionName, context, event, max
 
 export async function claimActionJobs(batchSize = 50) {
   if (isPostgres) {
-    const { queryAll, query } = await import('./db-postgres.js');
-    const rows = await queryAll(
-      `SELECT * FROM action_jobs WHERE status='pending' AND next_retry_at <= $1 LIMIT $2`,
+    const { queryAll } = await import('./db-postgres.js');
+    return queryAll(
+      `WITH claimed AS (
+         SELECT id FROM action_jobs
+         WHERE status='pending' AND next_retry_at <= $1
+         LIMIT $2
+         FOR UPDATE SKIP LOCKED
+       )
+       UPDATE action_jobs SET status='running'
+       WHERE id IN (SELECT id FROM claimed)
+       RETURNING *`,
       [Date.now(), batchSize]
     );
-    if (rows.length > 0) {
-      const ids = rows.map(r => r.id);
-      await query(`UPDATE action_jobs SET status='running' WHERE id=ANY($1::text[])`, [ids]);
-    }
-    return rows;
   }
   const db = getDb();
   const rows = db.prepare(
