@@ -249,7 +249,7 @@ export async function updateActorStatus(id, status) {
   getStmts().updateStatus.run({ id, status, updated_at: now() });
 }
 
-export async function migrateActorDefinition(id, { definitionId, stateValue, context, regionFingerprints, logicalStartTick }) {
+export async function migrateActorDefinition(id, { definitionId, stateValue, context, regionFingerprints, logicalStartTick, stateEntryId }) {
   const encContext = context != null
     ? encrypt(Buffer.from(JSON.stringify(context)))
     : null;
@@ -259,12 +259,13 @@ export async function migrateActorDefinition(id, { definitionId, stateValue, con
     await query(
       `UPDATE actors SET
          definition_id=$1, state_value=$2, context_json=$3,
-         region_fingerprints=$4, logical_start_tick=$5, status='active', updated_at=$6
-       WHERE id=$7`,
+         region_fingerprints=$4, logical_start_tick=$5, state_entry_id=$6,
+         status='active', updated_at=$7
+       WHERE id=$8`,
       [definitionId,
        stateValue != null ? JSON.stringify(stateValue) : null,
        encContext, serializeRegionFingerprints(regionFingerprints),
-       logicalStartTick ?? 0, now(), id]
+       logicalStartTick ?? 0, stateEntryId ?? 0, now(), id]
     );
     return;
   }

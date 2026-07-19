@@ -572,6 +572,8 @@ export async function sendEvent(actorId, event, tick, opts = {}) {
   // ── after: scheduled event lifecycle ──────────────────────────────────────────
   // Queue cancel of old state's timers and creation of new state's timers.
   // These are processed atomically with the state write in the next flush().
+  // scheduledEventOps queued regardless of durability — timer state must persist
+  // even for async-mode callers; stale-guard in sendEvent protects against misfires
   if (interpResult.scheduledEventOps?.length > 0) {
     for (const op of interpResult.scheduledEventOps) {
       if (op.op === 'cancel') {
@@ -822,13 +824,14 @@ export async function migrateActor(actorId, targetDefinitionId, { priority = 'no
       }
     })();
   } else {
-    // Postgres: update definition (without stateEntryId for now); cancel old timers separately.
+    // Postgres: update definition including stateEntryId; cancel + recreate after: timers.
     await migrateActorDefinition(actorId, {
       definitionId:       targetDefinitionId,
       stateValue:         result.stateValue,
       context:            result.context,
       regionFingerprints: result.regionFingerprints ?? null,
       logicalStartTick:   newLogicalStartTick,
+      stateEntryId:       newEntryId,
     });
     try {
       const { query } = await import('../registry/db-postgres.js');
@@ -837,8 +840,27 @@ export async function migrateActor(actorId, targetDefinitionId, { priority = 'no
          WHERE actor_id=$1 AND event_type LIKE '__SK_TIMEOUT_%' AND status='pending'`,
         [actorId]
       );
+      // Create after: timers for the new state
+      const afterTransitions = targetDef.compiledJson?.afterTransitions;
+      if (afterTransitions) {
+        const newStateKey = stateKeyOf(result.stateValue);
+        const afters      = afterTransitions[newStateKey] ?? [];
+        if (afters.length > 0) {
+          const now = Date.now();
+          for (const { delayMs, eventType } of afters) {
+            await query(
+              `INSERT INTO scheduled_events
+                 (actor_id, org_id, event_type, payload_enc, fire_at, status, created_at)
+               VALUES ($1,$2,$3,$4,$5,'pending',$6)`,
+              [actorId, actor.orgId, eventType,
+               Buffer.from(JSON.stringify({ stateEntryId: newEntryId })),
+               now + delayMs, now]
+            );
+          }
+        }
+      }
     } catch (e) {
-      console.warn(`[actorManager] migrateActor: failed to cancel old timers for ${actorId}: ${e.message}`);
+      console.warn(`[actorManager] migrateActor: failed to manage timers for ${actorId}: ${e.message}`);
     }
   }
 
