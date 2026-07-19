@@ -341,7 +341,7 @@ export async function sendEvent(actorId, event, tick, opts = {}) {
   const eng = getEngine();
   let migratedTo = null;
 
-  if (eng.available) {
+  if (eng.available && typeof eng.changepointCount === 'function' && eng.changepointCount() > 0) {
     const currentTick = BigInt(tick ?? eng.clockTick());
     const fp          = entry.historyFingerprint;
     const cachedResult = getCachedDecision(actorId, entry.definitionId, fp, currentTick);
@@ -560,20 +560,21 @@ export async function sendEvent(actorId, event, tick, opts = {}) {
 
   const newRegionFingerprints = result.regionFingerprints ?? entry.regionFingerprints ?? null;
 
-  // Update hot registry
-  const newEntry = {
-    definitionId:       entry.definitionId,
-    orgId:              entry.orgId,
-    stateValue:         result.stateValue,
-    context:            result.context,
-    historyFingerprint: result.historyFingerprint,
-    regionFingerprints: newRegionFingerprints,
-    stateEntryId:       interpResult.stateEntryId,
-    lastEventTick:      tick ?? Date.now(),
-    logicalStartTick:   entry.logicalStartTick,
-    lastAccess:         Date.now(),
-  };
-  touch(actorId, newEntry);
+  // Context-diff: compare reference before mutating entry (no assign → same object)
+  const contextChanged = interpResult.context !== entry.context;
+
+  // Capture pre-event state for webhook before mutating entry in-place
+  const _fromState = entry.stateValue;
+
+  // In-place mutation — no new object, no GC pressure at high ev/s
+  entry.stateValue         = result.stateValue;
+  entry.context            = result.context;
+  entry.historyFingerprint = result.historyFingerprint;
+  entry.regionFingerprints = newRegionFingerprints;
+  entry.stateEntryId       = interpResult.stateEntryId;
+  entry.lastEventTick      = tick ?? Date.now();
+  entry.lastAccess         = Date.now();
+  hotRegistry.set(actorId, entry);  // update LRU position
 
   const buf = getWriteBuffer();
   // durability: 'buffered' (default) — flush every FLUSH_MS (50ms window)
@@ -582,12 +583,13 @@ export async function sendEvent(actorId, event, tick, opts = {}) {
   if (durability !== 'async') {
     buf.queueState(actorId, {
       stateValue:         result.stateValue,
-      context:            result.context,
+      context:            contextChanged ? result.context : undefined,
       historyFingerprint: result.historyFingerprint,
       regionFingerprints: newRegionFingerprints,
       lastEventTick:      tick ?? Date.now(),
       stateEntryId:       interpResult.stateEntryId,
       status:             result.done ? 'terminated' : 'active',
+      _skipContextEnc:    !contextChanged,
     });
     if (eventData) buf.queueEvent(eventData);
     if (durability === 'sync') await buf.flush();
@@ -629,11 +631,11 @@ export async function sendEvent(actorId, event, tick, opts = {}) {
   }
 
   // Emit webhook events (never throws — emitWebhookEvent swallows errors)
-  const orgId = entry.orgId ?? newEntry.orgId;
+  const orgId = entry.orgId;
   if (orgId) {
     emitWebhookEvent(orgId, 'state.changed', {
       actorId,
-      fromState: entry.stateValue,
+      fromState: _fromState,
       toState:   result.stateValue,
       event:     event.type ?? event,
     });

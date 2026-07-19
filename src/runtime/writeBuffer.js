@@ -76,19 +76,28 @@ class WriteBuffer {
     if (isPostgres) {
       // Fire-and-forget; caller (terminateActor) awaits the subsequent updateActorStatus.
       import('./db-postgres.js').then(({ query }) => {
-        query(
-          `UPDATE actors SET state_value=$1, context_json=$2, history_fingerprint=$3,
-            region_fingerprints=$4, last_event_tick=$5, status=$6, updated_at=$7,
-            state_entry_id=$8 WHERE id=$9`,
-          [row.state_value, row.context_json, row.history_fingerprint,
-           row.region_fingerprints, row.last_event_tick, row.status, row.updated_at,
-           row.state_entry_id, row.id]
-        ).catch(e => console.error(`[writeBuffer] flushActor PG ${actorId}:`, e.message));
+        const skipCtx = row.context_json === undefined;
+        const sql = skipCtx
+          ? `UPDATE actors SET state_value=$1, history_fingerprint=$2,
+              region_fingerprints=$3, last_event_tick=$4, status=$5, updated_at=$6,
+              state_entry_id=$7 WHERE id=$8`
+          : `UPDATE actors SET state_value=$1, context_json=$2, history_fingerprint=$3,
+              region_fingerprints=$4, last_event_tick=$5, status=$6, updated_at=$7,
+              state_entry_id=$8 WHERE id=$9`;
+        const args = skipCtx
+          ? [row.state_value, row.history_fingerprint,
+             row.region_fingerprints, row.last_event_tick, row.status, row.updated_at,
+             row.state_entry_id, row.id]
+          : [row.state_value, row.context_json, row.history_fingerprint,
+             row.region_fingerprints, row.last_event_tick, row.status, row.updated_at,
+             row.state_entry_id, row.id];
+        query(sql, args).catch(e => console.error(`[writeBuffer] flushActor PG ${actorId}:`, e.message));
       });
       return;
     }
     try {
-      this._getStmts().state.run(row);
+      const stmts = this._getStmts();
+      (row.context_json === undefined ? stmts.stateNoCtx : stmts.state).run(row);
     } catch (err) {
       console.error(`[writeBuffer] flushActor(${actorId}) error:`, err.message);
     }
@@ -124,10 +133,16 @@ class WriteBuffer {
     }
 
     try {
-      const { state: stateStmt, event: eventStmt, decision: decisionStmt,
+      const { state: stateStmt, stateNoCtx: stateNoCtxStmt, event: eventStmt, decision: decisionStmt,
               schedCancel: cancelStmt, schedInsert: insertSched } = this._getStmts();
       getDb().transaction(() => {
-        for (const row of rows)      stateStmt.run(row);
+        for (const row of rows) {
+          if (row.context_json === undefined) {
+            stateNoCtxStmt.run(row);
+          } else {
+            stateStmt.run(row);
+          }
+        }
         for (const ev of events)     eventStmt.run(ev);
         for (const dec of decisions) decisionStmt.run(...dec);
         // Cancel stale scheduled events for states that were exited
@@ -155,14 +170,25 @@ class WriteBuffer {
       const { transaction } = await import('../registry/db-postgres.js');
       await transaction(async (client) => {
         for (const row of rows) {
-          await client.query(
-            `UPDATE actors SET state_value=$1, context_json=$2, history_fingerprint=$3,
-               region_fingerprints=$4, last_event_tick=$5, status=$6, updated_at=$7,
-               state_entry_id=$8 WHERE id=$9`,
-            [row.state_value, row.context_json, row.history_fingerprint,
-             row.region_fingerprints, row.last_event_tick, row.status, row.updated_at,
-             row.state_entry_id, row.id]
-          );
+          if (row.context_json === undefined) {
+            await client.query(
+              `UPDATE actors SET state_value=$1, history_fingerprint=$2,
+                 region_fingerprints=$3, last_event_tick=$4, status=$5, updated_at=$6,
+                 state_entry_id=$7 WHERE id=$8`,
+              [row.state_value, row.history_fingerprint,
+               row.region_fingerprints, row.last_event_tick, row.status, row.updated_at,
+               row.state_entry_id, row.id]
+            );
+          } else {
+            await client.query(
+              `UPDATE actors SET state_value=$1, context_json=$2, history_fingerprint=$3,
+                 region_fingerprints=$4, last_event_tick=$5, status=$6, updated_at=$7,
+                 state_entry_id=$8 WHERE id=$9`,
+              [row.state_value, row.context_json, row.history_fingerprint,
+               row.region_fingerprints, row.last_event_tick, row.status, row.updated_at,
+               row.state_entry_id, row.id]
+            );
+          }
         }
         for (const ev of events) {
           await client.query(
@@ -224,6 +250,17 @@ class WriteBuffer {
             updated_at          = @updated_at
         WHERE id = @id
       `),
+      stateNoCtx: db.prepare(`
+        UPDATE actors
+        SET state_value         = @state_value,
+            history_fingerprint = @history_fingerprint,
+            region_fingerprints = @region_fingerprints,
+            last_event_tick     = @last_event_tick,
+            state_entry_id      = @state_entry_id,
+            status              = @status,
+            updated_at          = @updated_at
+        WHERE id = @id
+      `),
       event: db.prepare(`
         INSERT OR IGNORE INTO events
           (actor_id, org_id, event_type, event_payload, tick, processed_at, idempotency_key)
@@ -253,7 +290,7 @@ class WriteBuffer {
     return {
       id,
       state_value:          d.stateValue != null ? JSON.stringify(d.stateValue) : null,
-      context_json:         d.context    != null ? encrypt(Buffer.from(JSON.stringify(d.context))) : null,
+      context_json:         d._skipContextEnc ? undefined : (d.context != null ? encrypt(Buffer.from(JSON.stringify(d.context))) : null),
       history_fingerprint:  String(d.historyFingerprint ?? '0'),
       region_fingerprints:  serializeRegionFingerprints(d.regionFingerprints),
       last_event_tick:      d.lastEventTick ?? null,
