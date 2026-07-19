@@ -538,6 +538,7 @@ export async function sendEvent(actorId, event, tick, opts = {}) {
       const opts     = serviceFn.__sk_invoke ?? {};
       startInvoke(
         actorId, serviceId, invokeFn, opts,
+        { context: interpResult.context, event },
         (targetId, ev) => sendEvent(targetId, ev, Date.now(), { orgId: entry.orgId })
       ).catch(err => console.error(`[actorManager] startInvoke failed for ${actorId}:`, err.message));
     }
@@ -879,7 +880,7 @@ export async function migrateActor(actorId, targetDefinitionId, { priority = 'no
                  (actor_id, org_id, event_type, payload_enc, fire_at, status, created_at)
                VALUES ($1,$2,$3,$4,$5,'pending',$6)`,
               [actorId, actor.orgId, eventType,
-               Buffer.from(JSON.stringify({ stateEntryId: newEntryId })),
+               encrypt(JSON.stringify({ stateEntryId: newEntryId })),
                now + delayMs, now]
             );
           }

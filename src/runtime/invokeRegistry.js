@@ -14,8 +14,14 @@ const _registry = new Map();
  * Start an invoke and register it globally.
  * sendEventFn: async (actorId, event) => void   (bound actorManager.sendEvent)
  */
-export async function startInvoke(actorId, invokeId, serviceFn, opts, sendEventFn) {
+/**
+ * Start an invoke and register it globally.
+ * actorData:   { context, event } — actor's current context and the triggering event.
+ * sendEventFn: async (actorId, event) => void   (bound actorManager.sendEvent)
+ */
+export async function startInvoke(actorId, invokeId, serviceFn, opts, actorData, sendEventFn) {
   const { idempotent = false, timeout = 30_000 } = opts ?? {};
+  const { context: actorContext = {}, event: triggerEvent = {} } = actorData ?? {};
   const serviceId     = invokeId;
   const dbRowId       = randomUUID();
   const correlationId = randomUUID();
@@ -35,8 +41,7 @@ export async function startInvoke(actorId, invokeId, serviceFn, opts, sendEventF
       reject(new Error(`Invoke '${invokeId}' timed out after ${timeout}ms`));
     }, timeout);
 
-    const context = {}; // filled at invoke time from hot registry if available
-    Promise.resolve(serviceFn({ context, event: {} }, {}))
+    Promise.resolve(serviceFn({ context: actorContext, event: triggerEvent }, {}))
       .then(resolve, reject);
   });
 
@@ -103,7 +108,7 @@ export async function recoverInvokes(rows, sendEventFn, implRegistry) {
           ...(serviceFn.__sk_invoke ?? {}),
         };
         // Re-run idempotent invoke with remaining timeout
-        await startInvoke(row.actor_id, row.invoke_id, invokeFn, recOpts, sendEventFn).catch(() => {});
+        await startInvoke(row.actor_id, row.invoke_id, invokeFn, recOpts, {}, sendEventFn).catch(() => {});
       } else {
         // Bug 2: Fire error event and mark failed when serviceFn not found in registry
         console.warn(`[invokeRegistry] recovery: service '${row.service_id}' not found in registry — marking failed`);

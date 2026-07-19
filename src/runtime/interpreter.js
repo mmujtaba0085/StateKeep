@@ -10,6 +10,9 @@ import { updateFingerprint } from '../ffi/fingerprintChain.js';
 
 const MAX_TRANSIENT_DEPTH = 100;
 
+// Minor fix: deduplicate missing-guard warnings (avoid log flood at 30k ev/s)
+const _warnedGuards = new Set();
+
 // ── State key helpers ─────────────────────────────────────────────────────────
 
 /** Extract the canonical string key from a stateValue (flat or compound). */
@@ -64,7 +67,10 @@ function evalGuard(guardName, context, event, registry) {
   if (!guardName) return true;
   const fn = registry.guards[guardName];
   if (!fn) {
-    console.warn(`[interpreter] Guard '${guardName}' not found in registry — treating as false`);
+    if (!_warnedGuards.has(guardName)) {
+      _warnedGuards.add(guardName);
+      console.warn(`[interpreter] Guard '${guardName}' not found in registry — treating as false`);
+    }
     return false;
   }
   try {
@@ -99,6 +105,27 @@ function classifyAction(name, registry) {
  */
 export function processEvent(entry, compiledJson, event, registry, pendingSends = []) {
   const { transitions, transientStates, entryActions, exitActions, afterTransitions, finalStates } = compiledJson;
+
+  // Bug #2: detect parallel state using parallelStates (compiler-recorded) or stateValue shape.
+  // A parallel stateValue has an object top-value with 2+ region keys; compound top-value is a string.
+  let _parallelRoot    = null;   // e.g. 'root'
+  let _parallelRegions = null;   // e.g. { regionA: 'a1', regionB: 'b1' }
+  const _sv = entry.stateValue;
+  if (typeof _sv === 'object' && _sv !== null) {
+    const _topKey    = Object.keys(_sv)[0];
+    const _regionMap = _sv[_topKey];
+    const _isParallelByShape = _regionMap && typeof _regionMap === 'object'
+      && !Array.isArray(_regionMap) && Object.keys(_regionMap).length >= 2;
+    const _isParallelByMeta  = compiledJson.parallelStates?.includes(_topKey);
+    if (_isParallelByShape || _isParallelByMeta) {
+      _parallelRoot    = _topKey;
+      _parallelRegions = _regionMap;
+      console.warn(
+        `[StateKeep] parallel actor state "${_topKey}": full multi-region dispatch not implemented — ` +
+        `processing first-region transition only; other regions unchanged.`
+      );
+    }
+  }
 
   const oldStateKey = stateKeyOf(entry.stateValue);
   const candidates  = findCandidates(oldStateKey, event.type, transitions);
@@ -222,6 +249,34 @@ export function processEvent(entry, compiledJson, event, registry, pendingSends 
     };
   }
 
+  // Bug #1B: descend into compound state's initial child until we reach a leaf.
+  // Fires entry actions for each intermediate compound parent before descending.
+  while (compiledJson.compoundInitials?.[newStateKey]) {
+    const parentKey = newStateKey;
+    const childKey  = compiledJson.compoundInitials[newStateKey];
+    for (const actionName of (entryActions[parentKey] ?? [])) {
+      const classified = classifyAction(actionName, registry);
+      if (!classified) continue;
+      if (classified.type === 'tier1') {
+        try {
+          const result = classified.fn({ context, event }, meta);
+          if (result && typeof result === 'object' && !result.then) {
+            context = { ...context, ...result };
+          }
+        } catch {}
+      } else if (classified.type === 'tier2') {
+        tier2.push({ name: actionName, fn: classified.fn, context, event });
+      } else if (classified.type === 'durable') {
+        durable.push({ name: actionName, fn: classified.fn, context, event, opts: classified.fn.__sk_durable });
+      }
+    }
+    // Arm after: timers for the compound parent state as we pass through it
+    if (afterTransitions[parentKey]) {
+      schedOps.push({ op: 'create', stateKey: parentKey, newEntryId, entries: afterTransitions[parentKey] });
+    }
+    newStateKey = childKey;
+  }
+
   // Entry actions for new state
   for (const actionName of (entryActions[newStateKey] ?? [])) {
     const classified = classifyAction(actionName, registry);
@@ -251,11 +306,45 @@ export function processEvent(entry, compiledJson, event, registry, pendingSends 
 
   const invokesToStart = (compiledJson.invokeStates?.[newStateKey] ?? []).map(inv => inv.src ?? inv.id);
 
+  // Bug #2: reconstruct parallel stateValue and update regionFingerprints for the changed region.
+  // Only the first-region transition is applied; all other regions remain unchanged.
+  let returnStateValue        = keyToStateValue(newStateKey);
+  let returnRegionFingerprints;   // undefined → caller falls back to entry.regionFingerprints
+
+  if (_parallelRoot && _parallelRegions) {
+    const newRegions   = { ..._parallelRegions };
+    const rootPrefix   = `${_parallelRoot}.`;
+
+    if (newStateKey.startsWith(rootPrefix)) {
+      const afterRoot  = newStateKey.slice(rootPrefix.length);
+      const dotIdx     = afterRoot.indexOf('.');
+      const regionName = dotIdx >= 0 ? afterRoot.slice(0, dotIdx) : afterRoot;
+      const newLeaf    = dotIdx >= 0 ? afterRoot.slice(dotIdx + 1) : afterRoot;
+
+      if (regionName in newRegions) {
+        const oldLeaf = newRegions[regionName];
+        newRegions[regionName] = newLeaf;
+
+        // Update regionFingerprints for the region that actually transitioned
+        if (oldLeaf !== newLeaf && entry.regionFingerprints) {
+          const rfpKey = `${_parallelRoot}.${regionName}`;
+          returnRegionFingerprints = {
+            ...entry.regionFingerprints,
+            [rfpKey]: updateFingerprint(entry.regionFingerprints[rfpKey] ?? '0', event.type),
+          };
+        }
+      }
+    }
+
+    returnStateValue = { [_parallelRoot]: newRegions };
+  }
+
   return {
-    stateValue:         keyToStateValue(newStateKey),
+    stateValue:         returnStateValue,
     context,
     historyFingerprint: newFingerprint,
     stateEntryId:       newEntryId,
+    regionFingerprints: returnRegionFingerprints,
     done:               isDone,
     scheduledEventOps:  schedOps,
     tier2Actions:       tier2,

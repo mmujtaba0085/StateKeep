@@ -42,6 +42,7 @@ function walkStates(statesMap, runtimeStatesMap, parentKey, acc) {
     // Parallel region group
     if (cfg.type === 'parallel' && cfg.states) {
       const children = Object.keys(cfg.states).map(c => `${key}.${c}`);
+      acc.parallelStates.push(key);   // Bug #2: always record parallel state keys for interpreter detection
       const onDone   = cfg.onDone;
       if (onDone) {
         const target = typeof onDone === 'string' ? onDone : onDone.target;
@@ -86,6 +87,26 @@ function walkStates(statesMap, runtimeStatesMap, parentKey, acc) {
         id:  inv.id ?? inv.src,
         src: inv.src ?? inv.id,
       }));
+      // Bug #4: compile onDone/onError so done.invoke.* / error.invoke.* events are routable
+      for (const inv of invokes) {
+        const invokeId = inv.id ?? inv.src;
+        if (inv.onDone) {
+          const doneEvent = `done.invoke.${invokeId}`;
+          acc.transitions[`${key}:${doneEvent}`] = normaliseCandidates(
+            typeof inv.onDone === 'string'
+              ? { target: inv.onDone, actions: [], guard: null }
+              : { target: inv.onDone.target ?? null, actions: inv.onDone.actions ?? [], guard: inv.onDone.cond ?? null }
+          );
+        }
+        if (inv.onError) {
+          const errEvent = `error.invoke.${invokeId}`;
+          acc.transitions[`${key}:${errEvent}`] = normaliseCandidates(
+            typeof inv.onError === 'string'
+              ? { target: inv.onError, actions: [], guard: null }
+              : { target: inv.onError.target ?? null, actions: inv.onError.actions ?? [], guard: inv.onError.cond ?? null }
+          );
+        }
+      }
     }
 
     // Entry/exit actions
@@ -94,6 +115,11 @@ function walkStates(statesMap, runtimeStatesMap, parentKey, acc) {
 
     // Recurse
     if (cfg.states) {
+      // Bug #1A: record initial child for compound (non-parallel) states
+      if (cfg.type !== 'parallel') {
+        const childName = cfg.initial ?? Object.keys(cfg.states)[0];
+        acc.compoundInitials[key] = `${key}.${childName}`;
+      }
       walkStates(cfg.states, rtCfg.states ?? {}, key, acc);
     }
   }
@@ -121,8 +147,10 @@ export function compileMachine(definition) {
     exitActions:      {},
     transientStates:  {},
     parallelGroups:   [],
+    parallelStates:   [],  // Bug #2: all parallel state keys (for interpreter detection)
     finalStates:      [],
     invokeStates:     {},
+    compoundInitials: {},  // Bug #1A: stateKey → initial-child stateKey for compound states
   };
 
   walkStates(definition.states ?? {}, runtimeDef.states ?? {}, '', acc);

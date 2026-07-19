@@ -34,7 +34,14 @@ class WriteBuffer {
   }
 
   queueState(actorId, data) {
-    this._states.set(actorId, this._serialize(actorId, data));
+    const row      = this._serialize(actorId, data);
+    const existing = this._states.get(actorId);
+    // Bug #3: if this write skips context but a prior pending write for the same actor
+    // already has an encrypted context, carry it forward so it isn't dropped in the flush.
+    if (row.context_json === undefined && existing?.context_json !== undefined) {
+      row.context_json = existing.context_json;
+    }
+    this._states.set(actorId, row);
     if (this._states.size + this._events.length >= HIGH_WATER) this.flush();
   }
 
