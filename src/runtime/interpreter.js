@@ -11,7 +11,9 @@ import { updateFingerprint } from '../ffi/fingerprintChain.js';
 const MAX_TRANSIENT_DEPTH = 100;
 
 // Minor fix: deduplicate missing-guard warnings (avoid log flood at 30k ev/s)
-const _warnedGuards = new Set();
+const _warnedGuards   = new Set();
+// Bug 1 fix: deduplicate parallel-detection warnings (fire at most once per root key)
+const _warnedParallel = new Set();
 
 // ── State key helpers ─────────────────────────────────────────────────────────
 
@@ -42,6 +44,21 @@ function keyToStateValue(key) {
     result = { [parts[i]]: result };
   }
   return result;
+}
+
+/** Convert a dot-joined path to a nested XState v4 stateValue object.
+ *  'a'           → 'a'
+ *  'step.substep'→ { step: 'substep' }
+ *  'a.b.c'       → { a: { b: 'c' } }
+ */
+function pathToNested(path) {
+  const parts = path.split('.');
+  if (parts.length === 1) return path;
+  let obj = parts[parts.length - 1];
+  for (let i = parts.length - 2; i >= 0; i--) {
+    obj = { [parts[i]]: obj };
+  }
+  return obj;
 }
 
 // ── Transition lookup with hierarchical bubbling ──────────────────────────────
@@ -120,10 +137,14 @@ export function processEvent(entry, compiledJson, event, registry, pendingSends 
     if (_isParallelByShape || _isParallelByMeta) {
       _parallelRoot    = _topKey;
       _parallelRegions = _regionMap;
-      console.warn(
-        `[StateKeep] parallel actor state "${_topKey}": full multi-region dispatch not implemented — ` +
-        `processing first-region transition only; other regions unchanged.`
-      );
+      // Bug 1 fix: emit at most once per parallel root key per process lifetime
+      if (!_warnedParallel.has(_topKey)) {
+        _warnedParallel.add(_topKey);
+        console.warn(
+          `[StateKeep] parallel actor state "${_topKey}": full multi-region dispatch not implemented — ` +
+          `processing first-region transition only; other regions unchanged.`
+        );
+      }
     }
   }
 
@@ -302,7 +323,8 @@ export function processEvent(entry, compiledJson, event, registry, pendingSends 
 
   // Update fingerprint
   const newFingerprint = updateFingerprint(entry.historyFingerprint, event.type);
-  const isDone         = finalStates.includes(newStateKey);
+  // For non-parallel actors this is the final answer; parallel block below may override (Bug 3 fix).
+  let isDone = compiledJson.finalStates?.includes(newStateKey) ?? false;
 
   const invokesToStart = (compiledJson.invokeStates?.[newStateKey] ?? []).map(inv => inv.src ?? inv.id);
 
@@ -315,6 +337,15 @@ export function processEvent(entry, compiledJson, event, registry, pendingSends 
     const newRegions   = { ..._parallelRegions };
     const rootPrefix   = `${_parallelRoot}.`;
 
+    // Build a map of regionName → full dotted state key (for Bug 3 isDone check).
+    // Start from current _parallelRegions values (unchanged regions), then override
+    // the one region that actually transitioned.
+    const regionFullKeys = {};
+    for (const [rName, rVal] of Object.entries(_parallelRegions)) {
+      const leafStr = typeof rVal === 'string' ? rVal : stateKeyOf(rVal);
+      regionFullKeys[rName] = `${_parallelRoot}.${rName}.${leafStr}`;
+    }
+
     if (newStateKey.startsWith(rootPrefix)) {
       const afterRoot  = newStateKey.slice(rootPrefix.length);
       const dotIdx     = afterRoot.indexOf('.');
@@ -323,7 +354,12 @@ export function processEvent(entry, compiledJson, event, registry, pendingSends 
 
       if (regionName in newRegions) {
         const oldLeaf = newRegions[regionName];
-        newRegions[regionName] = newLeaf;
+        // Bug 2 fix: convert flat 'step.substep' leaf to nested { step: 'substep' } for
+        // XState v4 stateValue format; flat single-segment leaves stay as plain strings.
+        newRegions[regionName] = pathToNested(newLeaf);
+
+        // The transitioned region now has a new full path = newStateKey (already correct).
+        regionFullKeys[regionName] = newStateKey;
 
         // Update regionFingerprints for the region that actually transitioned
         if (oldLeaf !== newLeaf && entry.regionFingerprints) {
@@ -334,6 +370,18 @@ export function processEvent(entry, compiledJson, event, registry, pendingSends 
           };
         }
       }
+    }
+
+    // Bug 3 fix: for parallel actors, isDone only when ALL regions are in final states.
+    const group = compiledJson.parallelGroups?.find(g => g.parent === _parallelRoot);
+    if (group) {
+      isDone = group.children.every(childRegion => {
+        const fullKey = regionFullKeys[childRegion];
+        return fullKey != null && (compiledJson.finalStates?.includes(fullKey) ?? false);
+      });
+    } else {
+      // No parallelGroups metadata — cannot determine; conservatively not done.
+      isDone = false;
     }
 
     returnStateValue = { [_parallelRoot]: newRegions };
