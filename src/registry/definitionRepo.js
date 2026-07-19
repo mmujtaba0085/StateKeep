@@ -14,8 +14,8 @@ function getStmts() {
   const db = getDb();
   stmts = {
     insert: db.prepare(`
-      INSERT INTO definitions (id, parent_id, machine_id, org_id, definition_json, deployed_at, status, created_at)
-      VALUES (@id, @parent_id, @machine_id, @org_id, @definition_json, @deployed_at, 'active', @created_at)
+      INSERT INTO definitions (id, parent_id, machine_id, org_id, definition_json, compiled_json, deployed_at, status, created_at)
+      VALUES (@id, @parent_id, @machine_id, @org_id, @definition_json, @compiled_json, @deployed_at, 'active', @created_at)
     `),
     findById:          db.prepare(`SELECT * FROM definitions WHERE id = ?`),
     findByMachine:     db.prepare(`SELECT * FROM definitions WHERE machine_id = ? AND org_id = ? ORDER BY deployed_at ASC`),
@@ -37,6 +37,10 @@ function getStmts() {
 
 function rowToDefinition(row) {
   if (!row) return null;
+  let compiledJson = null;
+  if (row.compiled_json) {
+    try { compiledJson = JSON.parse(row.compiled_json); } catch {}
+  }
   return {
     id:             row.id,
     parentId:       row.parent_id,
@@ -47,13 +51,14 @@ function rowToDefinition(row) {
         ? row.definition_json.toString('utf8')
         : String(row.definition_json)
     ),
+    compiledJson,
     deployedAt:     row.deployed_at,
     createdAt:      row.created_at,
     status:         row.status,
   };
 }
 
-export async function createDefinition({ id, parentId, orgId, definitionJson, deployedAt }) {
+export async function createDefinition({ id, parentId, orgId, definitionJson, compiledJson, deployedAt }) {
   if (!orgId) throw new Error('orgId is required when creating a definition');
   const parent = parentId ? await findDefinitionById(parentId) : null;
   const machineId = parent?.machineId ?? parentId ?? id;
@@ -63,9 +68,9 @@ export async function createDefinition({ id, parentId, orgId, definitionJson, de
   if (isPostgres) {
     const { query } = await import('./db-postgres.js');
     await query(
-      `INSERT INTO definitions (id, parent_id, machine_id, org_id, definition_json, deployed_at, status, created_at)
-       VALUES ($1,$2,$3,$4,$5,$6,'active',$7)`,
-      [id, parentId ?? null, machineId, orgId, defJson, deployedAt, createdAt]
+      `INSERT INTO definitions (id, parent_id, machine_id, org_id, definition_json, deployed_at, status, created_at, compiled_json)
+       VALUES ($1,$2,$3,$4,$5,$6,'active',$7,$8)`,
+      [id, parentId ?? null, machineId, orgId, defJson, deployedAt, createdAt, compiledJson ? JSON.stringify(compiledJson) : null]
     );
     return;
   }
@@ -76,6 +81,7 @@ export async function createDefinition({ id, parentId, orgId, definitionJson, de
     machine_id:      machineId,
     org_id:          orgId,
     definition_json: defJson,
+    compiled_json:   compiledJson ? JSON.stringify(compiledJson) : null,
     deployed_at:     deployedAt,
     created_at:      createdAt,
   });
@@ -124,6 +130,18 @@ export async function updateDefinitionJson(id, definitionJson) {
     return;
   }
   getStmts().updateJson.run({ id, definition_json: JSON.stringify(definitionJson) });
+}
+
+export async function updateCompiledJson(definitionId, compiledJson) {
+  if (isPostgres) {
+    const { query } = await import('./db-postgres.js');
+    await query(`UPDATE definitions SET compiled_json = $1 WHERE id = $2`,
+      [JSON.stringify(compiledJson), definitionId]);
+    return;
+  }
+  const db = getDb();
+  db.prepare(`UPDATE definitions SET compiled_json = @compiled_json WHERE id = @id`)
+    .run({ id: definitionId, compiled_json: JSON.stringify(compiledJson) });
 }
 
 export async function deprecateDefinition(id) {

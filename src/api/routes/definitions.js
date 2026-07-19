@@ -33,10 +33,12 @@ import {
   findDefinitionById,
   createDefinition,
   updateDefinitionJson,
+  updateCompiledJson,
   listDefinitions,
   findDefinitionsByMachine,
   deprecateDefinition,
 } from '../../registry/definitionRepo.js';
+import { compileMachine } from '../../runtime/definitionCompiler.js';
 import {
   findDeploymentsByDefinition,
   createDeployment,
@@ -308,7 +310,7 @@ export async function definitionRoutes(fastify) {
           wouldMigrate:    [],
           wouldStay:       dryActors.map(a => ({ actorId: a.id, currentState: a.stateValue, definitionId: a.definitionId, reason: 'engine_unavailable' })),
           engineAvailable: false,
-          note:            'APV engine not loaded — migration routing unavailable in fallback mode.',
+          note:            'APV engine unavailable — build WASM with `make wasm -C src/ffi` or set STATEKEEP_ENGINE_PATH.',
         };
       }
 
@@ -457,6 +459,19 @@ export async function definitionRoutes(fastify) {
         }
         throw err;
       }
+    }
+
+    // Compile the stored definition and save compiled form (best-effort; failure does not block deploy)
+    try {
+      const storedDef = await findDefinitionById(id);
+      const { runtimeDef, ...compiledForm } = compileMachine(storedDef.definitionJson);
+      await updateCompiledJson(id, compiledForm);
+      // If after: was present, update definitionJson to runtimeDef (after: stripped, __SK_TIMEOUT_ injected)
+      if (Object.keys(compiledForm.afterTransitions).length > 0) {
+        await updateDefinitionJson(id, runtimeDef);
+      }
+    } catch (compileErr) {
+      console.warn(`[definitions] Compile warning for ${id}:`, compileErr.message);
     }
 
     try {
@@ -744,7 +759,7 @@ export async function definitionRoutes(fastify) {
         wouldMigrate:    [],
         wouldStay:       actors.map(a => ({ actorId: a.id, currentState: a.stateValue, definitionId: a.definitionId, reason: 'engine_unavailable' })),
         engineAvailable: false,
-        note:            'APV engine not loaded — migration routing unavailable in fallback mode.',
+        note:            'APV engine unavailable — build WASM with `make wasm -C src/ffi` or set STATEKEEP_ENGINE_PATH.',
       };
     }
 
