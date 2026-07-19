@@ -249,6 +249,8 @@ export function processEvent(entry, compiledJson, event, registry, pendingSends 
   const newFingerprint = updateFingerprint(entry.historyFingerprint, event.type);
   const isDone         = finalStates.includes(newStateKey);
 
+  const invokesToStart = (compiledJson.invokeStates?.[newStateKey] ?? []).map(inv => inv.src ?? inv.id);
+
   return {
     stateValue:         keyToStateValue(newStateKey),
     context,
@@ -258,5 +260,6 @@ export function processEvent(entry, compiledJson, event, registry, pendingSends 
     scheduledEventOps:  schedOps,
     tier2Actions:       tier2,
     durableActions:     durable,
+    invokesToStart,
   };
 }

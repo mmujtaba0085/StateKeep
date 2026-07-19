@@ -13,6 +13,8 @@ import { getWorkerPool } from './workerPool.js';
 import { getWriteBuffer } from './writeBuffer.js';
 import { processEvent }      from './interpreter.js';
 import { getGlobalRegistry } from './implementationRegistry.js';
+import { startInvoke, detachActorInvokes, recoverInvokes } from './invokeRegistry.js';
+import { loadRunningInvokes } from '../registry/invokeRepo.js';
 import {
   createActor as dbCreateActor,
   findActorById,
@@ -36,6 +38,7 @@ const IDLE_TIMEOUT_MS    = parseInt(process.env.IDLE_TIMEOUT_SECONDS  ?? '300', 
 //               regionFingerprints, lastEventTick, lastAccess, logicalStartTick }
 
 const hotRegistry = new LRUCache(HOT_REGISTRY_SIZE, async (actorId, entry) => {
+  detachActorInvokes(actorId);  // explicit intent — invoke Promises survive independently
   try {
     await updateActorState(actorId, {
       stateValue:          entry.stateValue,
@@ -519,6 +522,20 @@ export async function sendEvent(actorId, event, tick, opts = {}) {
       .catch(err => console.error(`[actorManager] Durable action '${name}' failed for ${actorId}:`, err.message));
   }
 
+  // Start invoke services for the new state
+  for (const serviceId of (interpResult.invokesToStart ?? [])) {
+    const registry = getGlobalRegistry() ?? { guards: {}, actions: {}, services: {} };
+    const serviceFn = registry.services[serviceId];
+    if (serviceFn) {
+      const invokeFn = serviceFn.__sk_invoke ? serviceFn.__sk_invoke.originalFn : serviceFn;
+      const opts     = serviceFn.__sk_invoke ?? {};
+      startInvoke(
+        actorId, serviceId, invokeFn, opts,
+        (targetId, ev) => sendEvent(targetId, ev, Date.now(), { orgId: entry.orgId })
+      ).catch(err => console.error(`[actorManager] startInvoke failed for ${actorId}:`, err.message));
+    }
+  }
+
   // Dispatch cross-actor sends collected by meta.send (deferred post-transition)
   for (const { targetId, event: pendingEv } of pendingSends) {
     sendEvent(targetId, pendingEv, tick, { priority, orgId: _eventOrgId })
@@ -940,6 +957,21 @@ export async function seedEngineRegistry() {
   }
 
   await preWarmMachines();
+
+  // Recover in-flight invokes that survived a server restart
+  try {
+    const staleInvokes = await loadRunningInvokes();
+    if (staleInvokes.length > 0) {
+      const reg = getGlobalRegistry() ?? { guards: {}, actions: {}, services: {} };
+      await recoverInvokes(
+        staleInvokes,
+        (id, ev) => sendEvent(id, ev, Date.now(), {}),
+        reg
+      ).catch(err => console.error('[actorManager] invoke recovery error:', err.message));
+    }
+  } catch (err) {
+    console.error('[actorManager] invoke recovery error:', err.message);
+  }
 }
 
 async function preWarmMachines() {

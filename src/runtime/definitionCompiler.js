@@ -78,6 +78,16 @@ function walkStates(statesMap, runtimeStatesMap, parentKey, acc) {
       acc.transientStates[key] = normaliseCandidates(cfg.always);
     }
 
+    // Invoke: states with invoke: [...] field
+    if (cfg.invoke) {
+      const invokes = Array.isArray(cfg.invoke) ? cfg.invoke : [cfg.invoke];
+      acc.invokeStates = acc.invokeStates ?? {};
+      acc.invokeStates[key] = invokes.map(inv => ({
+        id:  inv.id ?? inv.src,
+        src: inv.src ?? inv.id,
+      }));
+    }
+
     // Entry/exit actions
     if (cfg.entry) acc.entryActions[key] = normaliseActions(cfg.entry);
     if (cfg.exit)  acc.exitActions[key]  = normaliseActions(cfg.exit);
@@ -112,6 +122,7 @@ export function compileMachine(definition) {
     transientStates:  {},
     parallelGroups:   [],
     finalStates:      [],
+    invokeStates:     {},
   };
 
   walkStates(definition.states ?? {}, runtimeDef.states ?? {}, '', acc);
