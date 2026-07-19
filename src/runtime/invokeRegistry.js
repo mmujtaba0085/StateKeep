@@ -93,7 +93,25 @@ export async function recoverInvokes(rows, sendEventFn, implRegistry) {
     if (row.idempotent) {
       const serviceFn = implRegistry?.services?.[row.service_id];
       if (serviceFn) {
-        await startInvoke(row.actor_id, row.invoke_id, serviceFn, { idempotent: true, timeout: row.timeout_at - Date.now() }, sendEventFn).catch(() => {});
+        // Bug 1: Mark original row closed so it isn't replayed on next restart
+        await markInvokeFailed(row.id).catch(() => {});
+        // Bug 3: Unwrap decorator — mirrors actorManager pattern
+        const invokeFn = serviceFn.__sk_invoke ? serviceFn.__sk_invoke.originalFn : serviceFn;
+        const recOpts  = {
+          idempotent: true,
+          timeout:    row.timeout_at - Date.now(),
+          ...(serviceFn.__sk_invoke ?? {}),
+        };
+        // Re-run idempotent invoke with remaining timeout
+        await startInvoke(row.actor_id, row.invoke_id, invokeFn, recOpts, sendEventFn).catch(() => {});
+      } else {
+        // Bug 2: Fire error event and mark failed when serviceFn not found in registry
+        console.warn(`[invokeRegistry] recovery: service '${row.service_id}' not found in registry — marking failed`);
+        await sendEventFn(row.actor_id, {
+          type: `error.invoke.${row.service_id}`,
+          data: new Error(`Service '${row.service_id}' not found in registry during recovery`)
+        }).catch(() => {});
+        await markInvokeFailed(row.id).catch(() => {});
       }
     } else {
       await sendEventFn(row.actor_id, { type: `error.invoke.${row.service_id}`, data: new Error('Non-idempotent invoke did not complete before restart') }).catch(() => {});
