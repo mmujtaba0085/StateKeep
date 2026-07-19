@@ -14,15 +14,14 @@
 export async function createStateKeep({
   dbPath,
   encryptionKey,
-  enginePath,
   workerCount,
   dbUrl,
+  setup,
 } = {}) {
   // Env vars must be set before first lazy import of singletons
   if (dbUrl)         process.env.STATEKEEP_DB_URL        = dbUrl;
   if (dbPath)        process.env.STATEKEEP_DB_PATH        = dbPath;
   if (encryptionKey) process.env.STATEKEEP_ENCRYPTION_KEY = encryptionKey;
-  if (enginePath)    process.env.STATEKEEP_ENGINE_PATH    = enginePath;
   if (workerCount)   process.env.STATEKEEP_WORKER_COUNT   = String(workerCount);
 
   // Silence all internal logs in embedded mode unless caller has set a level.
@@ -41,18 +40,14 @@ export async function createStateKeep({
     getDb();
   }
 
-  // Seed APV clock from existing changepoints
+  // Seed APV clock past the highest changepoint tick from a prior run
   const { getMaxTStar } = await import('../registry/changepointRepo.js');
   try {
     const maxTStar = await getMaxTStar();
     if (maxTStar > 0) {
       const eng = getEngine();
-      if (!eng.available) {
-        eng.seedTick(maxTStar);
-      } else {
-        let t = eng.clockTick();
-        while (Number(t) <= maxTStar) t = eng.clockTick();
-      }
+      let t = eng.clockTick();
+      while (Number(t) <= maxTStar) t = eng.clockTick();
     }
   } catch {}
 
@@ -65,6 +60,19 @@ export async function createStateKeep({
   } = await import('../runtime/actorManager.js');
 
   await seedEngineRegistry();
+
+  // Wire guards/actions/services from setup into the global implementation registry
+  if (setup?.machines) {
+    const { loadRegistry, setGlobalRegistry } = await import('../runtime/implementationRegistry.js');
+    const merged = { guards: {}, actions: {}, services: {} };
+    for (const machineSetup of Object.values(setup.machines)) {
+      const s = machineSetup?.setup ?? machineSetup ?? {};
+      Object.assign(merged.guards,   s.guards   ?? {});
+      Object.assign(merged.actions,  s.actions  ?? {});
+      Object.assign(merged.services, s.services ?? {});
+    }
+    setGlobalRegistry(loadRegistry(merged));
+  }
 
   const { getWorkerPool } = await import('../runtime/workerPool.js');
   getWorkerPool();
@@ -86,8 +94,7 @@ export async function createStateKeep({
 
     async sendEvent(actorId, event, { durability = 'buffered' } = {}) {
       if (!actorId) throw new Error('actorId is required');
-      const eng       = getEngine();
-      const clockTick = eng.available ? Number(eng.clockTick()) : Date.now();
+      const clockTick = Number(getEngine().clockTick());
       return _sendEvent(actorId, event, clockTick, { durability });
     },
 

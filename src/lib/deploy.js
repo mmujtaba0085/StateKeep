@@ -7,11 +7,12 @@
 
 import { createMachine } from 'xstate';
 import { randomUUID } from 'crypto';
-import { createDefinition, findDefinitionById } from '../registry/definitionRepo.js';
+import { createDefinition, findDefinitionById, updateCompiledJson } from '../registry/definitionRepo.js';
 import { createDeployment, updateDeploymentStatus } from '../registry/deploymentRepo.js';
 import { enqueueJobs } from '../registry/jobRepo.js';
 import { findActorsByMachine } from '../registry/actorRepo.js';
 import { getEngine } from '../ffi/engine.js';
+import { compileMachine } from '../runtime/definitionCompiler.js';
 
 export async function deployDefinition(definitionJson, {
   orgId    = 'default',
@@ -29,6 +30,14 @@ export async function deployDefinition(definitionJson, {
 
   const def = await findDefinitionById(id);
   if (!def) throw new Error('Definition create failed');
+
+  // Compile and store compiled form so main-thread interpreter can process events
+  try {
+    const { runtimeDef: _rt, ...compiledForm } = compileMachine(def.definitionJson);
+    await updateCompiledJson(id, compiledForm);
+  } catch (compileErr) {
+    console.warn(`[deploy] Compile warning for ${id}:`, compileErr.message);
+  }
 
   if (!parentId) {
     return { id, machineId: def.machineId, deployedAt: tStar };

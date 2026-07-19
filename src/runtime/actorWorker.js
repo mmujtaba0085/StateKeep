@@ -434,7 +434,6 @@ if (parentPort) parentPort.on('message', (msg) => {
   try {
     switch (type) {
       case 'SPAWN':     result = handleSpawn(msg);     break;
-      case 'EVENT':     result = handleEvent(msg);     break;
       case 'HYDRATE':   result = handleHydrate(msg);   break;
       case 'SNAPSHOT':  result = handleSnapshot(msg);  break;
       case 'TERMINATE': result = handleTerminate(msg); break;

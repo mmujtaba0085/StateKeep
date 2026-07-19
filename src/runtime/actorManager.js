@@ -10,6 +10,8 @@ import { fingerprintToBigInt, regionFingerprintsToArray } from '../ffi/hashUtils
 import { getEngine } from '../ffi/engine.js';
 import { getWorkerPool } from './workerPool.js';
 import { getWriteBuffer } from './writeBuffer.js';
+import { processEvent }      from './interpreter.js';
+import { getGlobalRegistry } from './implementationRegistry.js';
 import {
   createActor as dbCreateActor,
   findActorById,
@@ -311,6 +313,7 @@ export async function sendEvent(actorId, event, tick, opts = {}) {
       regionFingerprints: actor.regionFingerprints ?? null,
       lastEventTick:      actor.lastEventTick,
       logicalStartTick:   actor.logicalStartTick,
+      stateEntryId:       actor.stateEntryId ?? 0,
       lastAccess:         Date.now(),
     };
   }
@@ -451,14 +454,58 @@ export async function sendEvent(actorId, event, tick, opts = {}) {
 
   const _eventOrgId = optsOrgId ?? entry.orgId ?? '_system';
 
-  // Dispatch event (on current or just-swapped definition)
-  const result = await pool.send(actorId, {
-    type:               'EVENT',
-    actorId,
+  // ── Main-thread event processing ─────────────────────────────────────────────
+  const def = await cachedFindDefinition(entry.definitionId);
+  if (!def?.compiledJson) {
+    throw Object.assign(
+      new Error(`No compiled form for definition ${entry.definitionId} — redeploy to compile`),
+      { code: 'NO_COMPILED_FORM' }
+    );
+  }
+  const pendingSends = [];
+  const registry     = getGlobalRegistry() ?? { guards: {}, actions: {}, services: {} };
+  const interpResult = processEvent(
+    { ...entry, actorId },
+    def.compiledJson,
     event,
-    historyFingerprint: entry.historyFingerprint,
+    registry,
+    pendingSends,
+  );
+
+  if (interpResult.error === 'TRANSIENT_LOOP_DETECTED') {
+    await updateActorStatus(actorId, 'needs_rescue');
+    throw Object.assign(
+      new Error(`Actor ${actorId} hit transient loop — tagged needs_rescue`),
+      { code: 'TRANSIENT_LOOP_DETECTED' }
+    );
+  }
+
+  // Fire Tier-2 (async, fire-and-forget) actions
+  for (const { name, fn, context: ctx, event: ev } of interpResult.tier2Actions) {
+    Promise.resolve().then(() => fn({ context: ctx, event: ev }, {}))
+      .catch(err => console.error(`[actorManager] Tier-2 action '${name}' failed for ${actorId}:`, err.message));
+  }
+
+  // Queue durable actions (Task 11 wires action_jobs — fire as Tier-2 for now)
+  for (const { name, fn, context: ctx, event: ev } of interpResult.durableActions) {
+    Promise.resolve().then(() => fn({ context: ctx, event: ev }, {}))
+      .catch(err => console.error(`[actorManager] Durable action '${name}' failed for ${actorId}:`, err.message));
+  }
+
+  // Dispatch cross-actor sends collected by meta.send (deferred post-transition)
+  for (const { targetId, event: pendingEv } of pendingSends) {
+    sendEvent(targetId, pendingEv, tick, { priority, orgId: _eventOrgId })
+      .catch(err => console.error(`[actorManager] meta.send to ${targetId} failed:`, err.message));
+  }
+
+  // Normalise to same shape callers expect
+  const result = {
+    stateValue:         interpResult.stateValue,
+    context:            interpResult.context,
+    historyFingerprint: interpResult.historyFingerprint,
     regionFingerprints: entry.regionFingerprints ?? null,
-  }, { priority, orgId: _eventOrgId });
+    done:               interpResult.done,
+  };
 
   const newRegionFingerprints = result.regionFingerprints ?? entry.regionFingerprints ?? null;
 
@@ -470,6 +517,7 @@ export async function sendEvent(actorId, event, tick, opts = {}) {
     context:            result.context,
     historyFingerprint: result.historyFingerprint,
     regionFingerprints: newRegionFingerprints,
+    stateEntryId:       interpResult.stateEntryId,
     lastEventTick:      tick ?? Date.now(),
     logicalStartTick:   entry.logicalStartTick,
     lastAccess:         Date.now(),
@@ -487,6 +535,7 @@ export async function sendEvent(actorId, event, tick, opts = {}) {
       historyFingerprint: result.historyFingerprint,
       regionFingerprints: newRegionFingerprints,
       lastEventTick:      tick ?? Date.now(),
+      stateEntryId:       interpResult.stateEntryId,
       status:             result.done ? 'terminated' : 'active',
     });
     if (eventData) buf.queueEvent(eventData);
