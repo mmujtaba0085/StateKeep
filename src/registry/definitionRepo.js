@@ -30,7 +30,8 @@ function getStmts() {
     prune:         db.prepare(`UPDATE definitions SET status = 'pruned' WHERE id = ?`),
     listByOrg:     db.prepare(`SELECT * FROM definitions WHERE org_id = ? ORDER BY deployed_at DESC LIMIT ? OFFSET ?`),
     count:         db.prepare(`SELECT COUNT(*) as cnt FROM definitions`),
-    updateJson:    db.prepare(`UPDATE definitions SET definition_json = @definition_json WHERE id = @id`),
+    updateJson:         db.prepare(`UPDATE definitions SET definition_json = @definition_json WHERE id = @id`),
+    updateCompiledJson: db.prepare(`UPDATE definitions SET compiled_json = @compiled_json WHERE id = @id`),
   };
   return stmts;
 }
@@ -39,7 +40,10 @@ function rowToDefinition(row) {
   if (!row) return null;
   let compiledJson = null;
   if (row.compiled_json) {
-    try { compiledJson = JSON.parse(row.compiled_json); } catch {}
+    try { compiledJson = JSON.parse(row.compiled_json); }
+    catch (e) {
+      console.warn(`[StateKeep] compiled_json parse error for definition ${row.id}:`, e.message);
+    }
   }
   return {
     id:             row.id,
@@ -139,9 +143,7 @@ export async function updateCompiledJson(definitionId, compiledJson) {
       [JSON.stringify(compiledJson), definitionId]);
     return;
   }
-  const db = getDb();
-  db.prepare(`UPDATE definitions SET compiled_json = @compiled_json WHERE id = @id`)
-    .run({ id: definitionId, compiled_json: JSON.stringify(compiledJson) });
+  getStmts().updateCompiledJson.run({ id: definitionId, compiled_json: JSON.stringify(compiledJson) });
 }
 
 export async function deprecateDefinition(id) {

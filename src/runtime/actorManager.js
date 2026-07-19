@@ -590,7 +590,7 @@ export async function sendEvent(actorId, event, tick, opts = {}) {
       lastEventTick:      tick ?? Date.now(),
       stateEntryId:       interpResult.stateEntryId,
       status:             result.done ? 'terminated' : 'active',
-      _skipContextEnc:    !contextChanged,
+      _omitContextWrite:  !contextChanged,
     });
     if (eventData) buf.queueEvent(eventData);
     if (durability === 'sync') await buf.flush();

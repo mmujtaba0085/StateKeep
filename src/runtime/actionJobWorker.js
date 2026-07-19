@@ -72,8 +72,8 @@ async function processJob(job) {
           .catch(() => {});
       }
     } else {
-      // Exponential backoff: 2^retryCount seconds, capped at 5 minutes
-      const backoffMs = Math.min(1000 * 2 ** newRetryCount, 300_000);
+      // Exponential backoff: 1s, 2s, 4s, …, capped at 5 minutes (first retry = 2^0 = 1s)
+      const backoffMs = Math.min(1000 * 2 ** (newRetryCount - 1), 300_000);
       await retryActionJob(job.id, newRetryCount, Date.now() + backoffMs).catch(() => {});
     }
   }

@@ -46,21 +46,6 @@ function keyToStateValue(key) {
   return result;
 }
 
-/** Convert a dot-joined path to a nested XState v4 stateValue object.
- *  'a'           → 'a'
- *  'step.substep'→ { step: 'substep' }
- *  'a.b.c'       → { a: { b: 'c' } }
- */
-function pathToNested(path) {
-  const parts = path.split('.');
-  if (parts.length === 1) return path;
-  let obj = parts[parts.length - 1];
-  for (let i = parts.length - 2; i >= 0; i--) {
-    obj = { [parts[i]]: obj };
-  }
-  return obj;
-}
-
 // ── Transition lookup with hierarchical bubbling ──────────────────────────────
 
 function findCandidates(stateKey, eventType, transitions) {
@@ -356,7 +341,7 @@ export function processEvent(entry, compiledJson, event, registry, pendingSends 
         const oldLeaf = newRegions[regionName];
         // Bug 2 fix: convert flat 'step.substep' leaf to nested { step: 'substep' } for
         // XState v4 stateValue format; flat single-segment leaves stay as plain strings.
-        newRegions[regionName] = pathToNested(newLeaf);
+        newRegions[regionName] = keyToStateValue(newLeaf);
 
         // The transitioned region now has a new full path = newStateKey (already correct).
         regionFullKeys[regionName] = newStateKey;

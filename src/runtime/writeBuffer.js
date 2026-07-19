@@ -297,7 +297,7 @@ class WriteBuffer {
     return {
       id,
       state_value:          d.stateValue != null ? JSON.stringify(d.stateValue) : null,
-      context_json:         d._skipContextEnc ? undefined : (d.context != null ? encrypt(Buffer.from(JSON.stringify(d.context))) : null),
+      context_json:         d._omitContextWrite ? undefined : (d.context != null ? encrypt(Buffer.from(JSON.stringify(d.context))) : null),
       history_fingerprint:  String(d.historyFingerprint ?? '0'),
       region_fingerprints:  serializeRegionFingerprints(d.regionFingerprints),
       last_event_tick:      d.lastEventTick ?? null,

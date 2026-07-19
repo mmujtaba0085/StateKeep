@@ -26,6 +26,37 @@ export const StateKeep = {
 };
 
 /**
+ * Merge one machine's guards/actions/services into a shared target object,
+ * warning on any key that is already defined (last definition wins).
+ */
+function mergeWithCollisionWarn(target, source, category) {
+  for (const key of Object.keys(source)) {
+    if (Object.prototype.hasOwnProperty.call(target, key)) {
+      console.warn(`[StateKeep] Registry collision: ${category}.${key} is defined in multiple machines — last definition wins`);
+    }
+    target[key] = source[key];
+  }
+}
+
+/**
+ * Merge an iterable of per-machine setup objects into a single registry, with
+ * collision warnings. Equivalent to the Object.assign loop in lib/index.js but
+ * safe — callers should prefer this over a manual spread.
+ *
+ * @param {Iterable<{guards?, actions?, services?}>} machineSetups
+ */
+export function mergeRegistries(machineSetups) {
+  const merged = { guards: {}, actions: {}, services: {} };
+  for (const s of machineSetups) {
+    const setup = s?.setup ?? s ?? {};
+    mergeWithCollisionWarn(merged.guards,   setup.guards   ?? {}, 'guards');
+    mergeWithCollisionWarn(merged.actions,  setup.actions  ?? {}, 'actions');
+    mergeWithCollisionWarn(merged.services, setup.services ?? {}, 'services');
+  }
+  return merged;
+}
+
+/**
  * Load and validate a setup object into a registry.
  * Throws if any guard is async (detected by calling with dummy args).
  */
