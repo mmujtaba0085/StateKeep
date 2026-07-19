@@ -42,6 +42,7 @@ function rowToActor(row) {
     status:              row.status,
     createdAt:           row.created_at,
     updatedAt:           row.updated_at,
+    stateEntryId:        row.state_entry_id ?? 0,
   };
 }
 
@@ -57,11 +58,11 @@ function getStmts() {
       INSERT INTO actors
         (id, definition_id, org_id, state_value, context_json,
          logical_start_tick, history_fingerprint, last_event_tick,
-         status, created_at, updated_at)
+         state_entry_id, status, created_at, updated_at)
       VALUES
         (@id, @definition_id, @org_id, @state_value, @context_json,
          @logical_start_tick, @history_fingerprint, @last_event_tick,
-         @status, @created_at, @updated_at)
+         @state_entry_id, @status, @created_at, @updated_at)
     `),
     findById: db.prepare(`
       SELECT * FROM actors WHERE id = ?
@@ -73,6 +74,7 @@ function getStmts() {
           history_fingerprint  = @history_fingerprint,
           region_fingerprints  = @region_fingerprints,
           last_event_tick      = @last_event_tick,
+          state_entry_id       = @state_entry_id,
           status               = @status,
           updated_at           = @updated_at
       WHERE id = @id
@@ -145,6 +147,7 @@ export async function createActor({
   context,
   logicalStartTick = 0,
   historyFingerprint = '0',
+  stateEntryId = 0,
 } = {}) {
   if (!orgId) throw new Error('orgId is required when creating an actor');
   const ts = now();
@@ -158,12 +161,12 @@ export async function createActor({
       `INSERT INTO actors
          (id, definition_id, org_id, state_value, context_json,
           logical_start_tick, history_fingerprint, last_event_tick,
-          status, created_at, updated_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+          state_entry_id, status, created_at, updated_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
       [id, definitionId, orgId,
        stateValue != null ? JSON.stringify(stateValue) : null,
        encContext, logicalStartTick, String(historyFingerprint),
-       null, 'active', ts, ts]
+       null, stateEntryId ?? 0, 'active', ts, ts]
     );
     return id;
   }
@@ -178,6 +181,7 @@ export async function createActor({
     logical_start_tick:   logicalStartTick,
     history_fingerprint:  String(historyFingerprint),
     last_event_tick:      null,
+    state_entry_id:       stateEntryId ?? 0,
     status:               'active',
     created_at:           ts,
     updated_at:           ts,
@@ -200,6 +204,7 @@ export async function updateActorState(id, {
   regionFingerprints,
   lastEventTick,
   status = 'active',
+  stateEntryId,
 }) {
   const encContext = context != null
     ? encrypt(Buffer.from(JSON.stringify(context)))
@@ -210,12 +215,13 @@ export async function updateActorState(id, {
     await query(
       `UPDATE actors SET
          state_value=$1, context_json=$2, history_fingerprint=$3,
-         region_fingerprints=$4, last_event_tick=$5, status=$6, updated_at=$7
-       WHERE id=$8`,
+         region_fingerprints=$4, last_event_tick=$5, status=$6, updated_at=$7,
+         state_entry_id=$8
+       WHERE id=$9`,
       [stateValue != null ? JSON.stringify(stateValue) : null,
        encContext, String(historyFingerprint),
        serializeRegionFingerprints(regionFingerprints),
-       lastEventTick ?? null, status, now(), id]
+       lastEventTick ?? null, status, now(), stateEntryId ?? 0, id]
     );
     return;
   }
@@ -228,6 +234,7 @@ export async function updateActorState(id, {
     history_fingerprint:  String(historyFingerprint),
     region_fingerprints:  serializeRegionFingerprints(regionFingerprints),
     last_event_tick:      lastEventTick ?? null,
+    state_entry_id:       stateEntryId ?? 0,
     status,
     updated_at:           now(),
   });

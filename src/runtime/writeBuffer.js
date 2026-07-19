@@ -59,9 +59,11 @@ class WriteBuffer {
       import('./db-postgres.js').then(({ query }) => {
         query(
           `UPDATE actors SET state_value=$1, context_json=$2, history_fingerprint=$3,
-            region_fingerprints=$4, last_event_tick=$5, status=$6, updated_at=$7 WHERE id=$8`,
+            region_fingerprints=$4, last_event_tick=$5, status=$6, updated_at=$7,
+            state_entry_id=$8 WHERE id=$9`,
           [row.state_value, row.context_json, row.history_fingerprint,
-           row.region_fingerprints, row.last_event_tick, row.status, row.updated_at, row.id]
+           row.region_fingerprints, row.last_event_tick, row.status, row.updated_at,
+           row.state_entry_id, row.id]
         ).catch(e => console.error(`[writeBuffer] flushActor PG ${actorId}:`, e.message));
       });
       return;
@@ -115,9 +117,11 @@ class WriteBuffer {
         for (const row of rows) {
           await client.query(
             `UPDATE actors SET state_value=$1, context_json=$2, history_fingerprint=$3,
-               region_fingerprints=$4, last_event_tick=$5, status=$6, updated_at=$7 WHERE id=$8`,
+               region_fingerprints=$4, last_event_tick=$5, status=$6, updated_at=$7,
+               state_entry_id=$8 WHERE id=$9`,
             [row.state_value, row.context_json, row.history_fingerprint,
-             row.region_fingerprints, row.last_event_tick, row.status, row.updated_at, row.id]
+             row.region_fingerprints, row.last_event_tick, row.status, row.updated_at,
+             row.state_entry_id, row.id]
           );
         }
         for (const ev of events) {
@@ -158,6 +162,7 @@ class WriteBuffer {
             history_fingerprint = @history_fingerprint,
             region_fingerprints = @region_fingerprints,
             last_event_tick     = @last_event_tick,
+            state_entry_id      = @state_entry_id,
             status              = @status,
             updated_at          = @updated_at
         WHERE id = @id
@@ -185,6 +190,7 @@ class WriteBuffer {
       history_fingerprint:  String(d.historyFingerprint ?? '0'),
       region_fingerprints:  serializeRegionFingerprints(d.regionFingerprints),
       last_event_tick:      d.lastEventTick ?? null,
+      state_entry_id:       d.stateEntryId ?? 0,
       status:               d.status ?? 'active',
       updated_at:           Date.now(),
     };
