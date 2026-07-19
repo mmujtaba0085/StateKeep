@@ -62,6 +62,7 @@ export async function createStateKeep({
   await seedEngineRegistry();
 
   // Wire guards/actions/services from setup into the global implementation registry
+  // Must happen before starting the action job worker so it sees the correct registry.
   if (setup?.machines) {
     const { loadRegistry, setGlobalRegistry } = await import('../runtime/implementationRegistry.js');
     const merged = { guards: {}, actions: {}, services: {} };
@@ -73,6 +74,13 @@ export async function createStateKeep({
     }
     setGlobalRegistry(loadRegistry(merged));
   }
+
+  const { startActionJobWorker, stopActionJobWorker } = await import('../runtime/actionJobWorker.js');
+  const { getGlobalRegistry } = await import('../runtime/implementationRegistry.js');
+  startActionJobWorker(
+    (actorId, event) => _sendEvent(actorId, event, Date.now(), {}),
+    getGlobalRegistry()
+  );
 
   const { getWorkerPool } = await import('../runtime/workerPool.js');
   getWorkerPool();
@@ -109,6 +117,8 @@ export async function createStateKeep({
     },
 
     async close() {
+      // Stop durable action worker before flushing
+      try { stopActionJobWorker(); } catch {}
       // Flush pending writes before terminating workers, then close DB
       try { const { getWriteBuffer } = await import('../runtime/writeBuffer.js'); getWriteBuffer().flush(); } catch {}
       await new Promise(r => setTimeout(r, 100)); // let flush settle

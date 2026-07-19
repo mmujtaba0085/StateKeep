@@ -23,7 +23,9 @@ import { randomUUID } from 'crypto';
 import { engineReady, getEngine } from '../ffi/engine.js';
 import { getDb, isPostgres } from '../registry/db.js';
 import { getMaxTStar } from '../registry/changepointRepo.js';
-import { seedEngineRegistry } from '../runtime/actorManager.js';
+import { seedEngineRegistry, sendEvent } from '../runtime/actorManager.js';
+import { getGlobalRegistry } from '../runtime/implementationRegistry.js';
+import { startActionJobWorker } from '../runtime/actionJobWorker.js';
 import { authMiddleware } from './middleware/auth.js';
 import { healthRoutes } from './routes/health.js';
 import { metricsRoutes } from './routes/metrics.js';
@@ -243,6 +245,11 @@ if (!isPostgres && !process.env.STATEKEEP_MULTI_INSTANCE_WARNED) {
 }
 
 await seedEngineRegistry();
+
+startActionJobWorker(
+  (actorId, event) => sendEvent(actorId, event, Date.now(), {}),
+  getGlobalRegistry()
+);
 
 try {
   await fastify.listen({ port: PORT, host: '0.0.0.0' });

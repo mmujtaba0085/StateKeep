@@ -29,6 +29,7 @@ import { getDb, encrypt, isPostgres } from '../registry/db.js';
 import { serializeRegionFingerprints } from '../registry/regionFingerprintCodec.js';
 import { emitWebhookEvent } from '../api/lib/webhookEmitter.js';
 import { getWildcardChildDef, loadChangepointsAfter, loadParChangepointsAfter } from '../registry/changepointRepo.js';
+import { insertActionJob } from '../registry/actionJobRepo.js';
 
 const HOT_REGISTRY_SIZE  = parseInt(process.env.HOT_REGISTRY_SIZE    ?? '10000',  10);
 const IDLE_TIMEOUT_MS    = parseInt(process.env.IDLE_TIMEOUT_SECONDS  ?? '300',    10) * 1000;
@@ -516,10 +517,16 @@ export async function sendEvent(actorId, event, tick, opts = {}) {
       .catch(err => console.error(`[actorManager] Tier-2 action '${name}' failed for ${actorId}:`, err.message));
   }
 
-  // Queue durable actions (Task 11 wires action_jobs — fire as Tier-2 for now)
-  for (const { name, fn, context: ctx, event: ev } of interpResult.durableActions) {
-    Promise.resolve().then(() => fn({ context: ctx, event: ev }, {}))
-      .catch(err => console.error(`[actorManager] Durable action '${name}' failed for ${actorId}:`, err.message));
+  // Queue durable actions to action_jobs table (retried by actionJobWorker)
+  for (const { name, fn, context: ctx, event: ev, opts } of interpResult.durableActions) {
+    insertActionJob({
+      actorId,
+      actionName:  name,
+      context:     ctx,
+      event:       ev,
+      maxRetries:  opts?.maxRetries ?? 3,
+      fireAt:      Date.now(),
+    }).catch(err => console.error(`[actorManager] insertActionJob failed for '${name}':`, err.message));
   }
 
   // Start invoke services for the new state
