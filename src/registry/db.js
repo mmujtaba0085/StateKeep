@@ -533,6 +533,99 @@ export function getDb() {
     }
   }
 
+  // v19 — running_invokes: invoke restart recovery
+  if (!appliedVersions.has(19)) {
+    _db.exec(`
+      BEGIN;
+      CREATE TABLE IF NOT EXISTS running_invokes (
+        id             TEXT PRIMARY KEY,
+        actor_id       TEXT NOT NULL REFERENCES actors(id),
+        invoke_id      TEXT NOT NULL,
+        service_id     TEXT NOT NULL,
+        started_at     INTEGER NOT NULL,
+        timeout_at     INTEGER NOT NULL,
+        correlation_id TEXT NOT NULL,
+        idempotent     INTEGER NOT NULL DEFAULT 0,
+        status         TEXT NOT NULL DEFAULT 'running'
+                       CHECK(status IN ('running','done','failed'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_running_invokes_actor ON running_invokes(actor_id);
+      INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (19, unixepoch());
+      COMMIT;
+    `);
+    console.log('[db] Migration v19 applied: running_invokes table');
+  }
+
+  // v20 — action_jobs: durable action queue
+  if (!appliedVersions.has(20)) {
+    _db.exec(`
+      BEGIN;
+      CREATE TABLE IF NOT EXISTS action_jobs (
+        id            TEXT PRIMARY KEY,
+        actor_id      TEXT NOT NULL REFERENCES actors(id),
+        action_name   TEXT NOT NULL,
+        context_snap  BLOB,
+        event_snap    TEXT,
+        retry_count   INTEGER NOT NULL DEFAULT 0,
+        max_retries   INTEGER NOT NULL DEFAULT 3,
+        next_retry_at INTEGER NOT NULL,
+        status        TEXT NOT NULL DEFAULT 'pending'
+                      CHECK(status IN ('pending','running','done','failed')),
+        created_at    INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_action_jobs_pending
+        ON action_jobs(status, next_retry_at) WHERE status = 'pending';
+      CREATE INDEX IF NOT EXISTS idx_action_jobs_actor ON action_jobs(actor_id);
+      INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (20, unixepoch());
+      COMMIT;
+    `);
+    console.log('[db] Migration v20 applied: action_jobs table');
+  }
+
+  // v21 — migration_notifications: lazy hot-registry invalidation
+  if (!appliedVersions.has(21)) {
+    _db.exec(`
+      BEGIN;
+      CREATE TABLE IF NOT EXISTS migration_notifications (
+        id                 TEXT PRIMARY KEY,
+        actor_id           TEXT NOT NULL,
+        from_definition_id TEXT NOT NULL,
+        to_definition_id   TEXT NOT NULL,
+        created_at         INTEGER NOT NULL,
+        consumed_at        INTEGER
+      );
+      CREATE INDEX IF NOT EXISTS idx_migration_notifs_pending
+        ON migration_notifications(consumed_at) WHERE consumed_at IS NULL;
+      INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (21, unixepoch());
+      COMMIT;
+    `);
+    console.log('[db] Migration v21 applied: migration_notifications table');
+  }
+
+  // v22 — state_entry_id on actors: stale after: timer guard
+  if (!appliedVersions.has(22)) {
+    const hasStateEntryId = _db.prepare(
+      `SELECT COUNT(*) as cnt FROM pragma_table_info('actors') WHERE name='state_entry_id'`
+    ).get().cnt > 0;
+    if (!hasStateEntryId) {
+      _db.exec(`ALTER TABLE actors ADD COLUMN state_entry_id INTEGER NOT NULL DEFAULT 0;`);
+    }
+    _db.exec(`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (22, unixepoch());`);
+    console.log('[db] Migration v22 applied: state_entry_id on actors');
+  }
+
+  // v23 — compiled_json on definitions: compiled transition table
+  if (!appliedVersions.has(23)) {
+    const hasCompiledJson = _db.prepare(
+      `SELECT COUNT(*) as cnt FROM pragma_table_info('definitions') WHERE name='compiled_json'`
+    ).get().cnt > 0;
+    if (!hasCompiledJson) {
+      _db.exec(`ALTER TABLE definitions ADD COLUMN compiled_json TEXT;`);
+    }
+    _db.exec(`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (23, unixepoch());`);
+    console.log('[db] Migration v23 applied: compiled_json on definitions');
+  }
+
   // Graceful shutdown
   process.on('exit',    () => { try { _db.close(); } catch {} });
   process.on('SIGINT',  () => { process.exit(0); });
