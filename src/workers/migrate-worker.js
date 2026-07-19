@@ -12,6 +12,7 @@ import { findDefinitionById } from '../registry/definitionRepo.js';
 import { fingerprintToBigInt, regionFingerprintsToArray } from '../ffi/hashUtils.js';
 import { incrementMigrated, incrementFailed, updateDeploymentStatus, findDeploymentById } from '../registry/deploymentRepo.js';
 import { migrateActor, invalidateDefinitionCache, seedEngineRegistry } from '../runtime/actorManager.js';
+import { insertMigrationNotification } from '../registry/migrationNotificationRepo.js';
 import { getEngine, engineReady } from '../ffi/engine.js';
 import { getWildcardChildDef, loadChangepointsAfter, loadParChangepointsAfter } from '../registry/changepointRepo.js';
 
@@ -194,6 +195,7 @@ async function processJob(job) {
     }, currentTick);
 
     await markDone(id);
+    await insertMigrationNotification(actor_id, fromDefId, target_def_id).catch(() => {});
     await incrementMigrated(deployment_id);
     evictFromApiCache(actor_id);
   } catch (err) {

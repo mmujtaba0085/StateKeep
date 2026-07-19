@@ -20,9 +20,9 @@ import {
   updateActorStatus,
   migrateActorDefinition,
   findIdleActors,
-  getActorDefinitionId,
 } from '../registry/actorRepo.js';
 import { findDefinitionById } from '../registry/definitionRepo.js';
+import { consumePendingNotifications } from '../registry/migrationNotificationRepo.js';
 import { getDb, encrypt, isPostgres } from '../registry/db.js';
 import { serializeRegionFingerprints } from '../registry/regionFingerprintCodec.js';
 import { emitWebhookEvent } from '../api/lib/webhookEmitter.js';
@@ -74,6 +74,25 @@ setInterval(() => {
     }
   }
 }, 60_000).unref();
+
+// ── Lazy migration invalidation ───────────────────────────────────────────────
+// Poll migration_notifications every 500ms instead of a per-event DB read.
+// migrate-worker writes to this table after each migration; we evict the affected
+// actor from the hot registry so the next event sees the new definition.
+export const _migrationPollTimer = setInterval(async () => {
+  try {
+    const actorIds = await consumePendingNotifications();
+    for (const id of actorIds) {
+      hotRegistry.delete(id);        // delete (not evict) to avoid overwriting DB status
+      const prefix = `${id}:`;
+      for (const key of migrationCheckCache.keys()) {
+        if (key.startsWith(prefix)) migrationCheckCache.delete(key);
+      }
+    }
+  } catch (err) {
+    console.error('[actorManager] migration poll error:', err.message);
+  }
+}, 500).unref();
 
 // ── Definition JSON cache (60s TTL) ───────────────────────────────────────────
 // Reduces DB reads for hot definitions hit on every spawnActor / ensureInWorker.
@@ -276,21 +295,9 @@ export async function sendEvent(actorId, event, tick, opts = {}) {
   const pool = getWorkerPool();
 
   // Load from hot registry or SQLite.
-  // Stale-cache check: if the migrate-worker updated this actor in the DB while it was
-  // in the hot registry, evict and reload so the event is dispatched to the correct definition.
+  // Migration invalidation is handled lazily by the 500ms background poll
+  // (_migrationPollTimer above) — no per-event DB read needed.
   let entry = hotRegistry.get(actorId);
-  let workerNeedsReset = false;
-  if (entry) {
-    const dbRow = await getActorDefinitionId(actorId);
-    if (dbRow && dbRow.definitionId !== entry.definitionId) {
-      hotRegistry.delete(actorId);   // delete, not evict, to avoid overwriting DB status
-      entry = null;
-      // Worker still has the old machine — terminate it so ensureInWorker re-spawns with
-      // the new definition. Without this, SPAWN no-ops (actor already in worker.actors map)
-      // and the actor keeps processing events against the stale machine.
-      workerNeedsReset = true;
-    }
-  }
   if (!entry) {
     const actor = await findActorById(actorId);
     if (!actor) throw new Error(`Actor not found: ${actorId}`);
@@ -309,13 +316,6 @@ export async function sendEvent(actorId, event, tick, opts = {}) {
         ),
         { code: 'ACTOR_NEEDS_RESCUE', actorId, status: 'needs_rescue' }
       );
-    }
-    if (workerNeedsReset) {
-      // Evict the stale machine from the worker thread so SPAWN re-initialises with the
-      // new definition. This happens when the migrate-worker (separate process) migrated
-      // this actor while it was resident in our worker pool.
-      const _orgId = optsOrgId ?? actor.orgId ?? '_system';
-      await pool.send(actorId, { type: 'TERMINATE', actorId }, { priority, orgId: _orgId }).catch(() => {});
     }
     const _ensureOrgId = optsOrgId ?? actor.orgId ?? '_system';
     await ensureInWorker(actorId, actor, priority, _ensureOrgId);
