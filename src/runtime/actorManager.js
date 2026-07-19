@@ -340,6 +340,7 @@ export async function sendEvent(actorId, event, tick, opts = {}) {
   // ── Inline migration check ─────────────────────────────────────────────────
   const eng = getEngine();
   let migratedTo = null;
+  const fromDefId = entry.definitionId;  // capture before any migration reassigns entry
 
   if (eng.available && typeof eng.changepointCount === 'function' && eng.changepointCount() > 0) {
     const currentTick = BigInt(tick ?? eng.clockTick());
@@ -423,7 +424,7 @@ export async function sendEvent(actorId, event, tick, opts = {}) {
 
     if (targetDefId && targetDefId !== entry.definitionId) {
       // Version swap: migrate first, then process event on new definition
-      const fromDefId = entry.definitionId;
+      // fromDefId is captured in outer scope above
       try {
         await migrateActor(actorId, targetDefId, { priority, orgId: entry.orgId });
         // Evict ALL cached decisions for this actor/fromDef (key now includes fingerprint)
@@ -488,8 +489,19 @@ export async function sendEvent(actorId, event, tick, opts = {}) {
     const expectedEntryId = event.stateEntryId ?? event.payload?.stateEntryId ?? event.data?.stateEntryId;
     if (expectedEntryId !== undefined && expectedEntryId !== entry.stateEntryId) {
       // Stale timer — actor has already transitioned to a different state; discard silently.
-      return { stateValue: entry.stateValue, context: entry.context,
-               historyFingerprint: entry.historyFingerprint, done: false, migratedTo: null };
+      return {
+        stateValue:         entry.stateValue,
+        context:            entry.context,
+        historyFingerprint: entry.historyFingerprint,
+        regionFingerprints: entry.regionFingerprints ?? null,
+        stateEntryId:       entry.stateEntryId ?? 0,
+        done:               false,
+        migratedTo:         null,
+        scheduledEventOps:  [],
+        tier2Actions:       [],
+        durableActions:     [],
+        invokesToStart:     [],
+      };
     }
   }
 
@@ -643,7 +655,7 @@ export async function sendEvent(actorId, event, tick, opts = {}) {
     if (migratedTo) {
       emitWebhookEvent(orgId, 'actor.migrated', {
         actorId,
-        fromDef: entry.definitionId,
+        fromDef: fromDefId,
         toDef:   migratedTo,
       });
     }
