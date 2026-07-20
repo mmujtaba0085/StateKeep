@@ -24,7 +24,7 @@ import { engineReady, getEngine } from '../ffi/engine.js';
 import { getDb, isPostgres } from '../registry/db.js';
 import { getMaxTStar } from '../registry/changepointRepo.js';
 import { seedEngineRegistry, sendEvent } from '../runtime/actorManager.js';
-import { getGlobalRegistry } from '../runtime/implementationRegistry.js';
+import { getGlobalRegistry, setGlobalRegistry, loadRegistry } from '../runtime/implementationRegistry.js';
 import { startActionJobWorker } from '../runtime/actionJobWorker.js';
 import { authMiddleware } from './middleware/auth.js';
 import { healthRoutes } from './routes/health.js';
@@ -245,6 +245,34 @@ if (!isPostgres && !process.env.STATEKEEP_MULTI_INSTANCE_WARNED) {
 }
 
 await seedEngineRegistry();
+
+// ── Implementation registry ────────────────────────────────────────────────────
+// Load guards/actions/services from STATEKEEP_REGISTRY_PATH (if set).
+// Missing registry: warn once and continue (no-registry mode, guards silently disabled).
+// Bad registry path or invalid export: log the error and exit (misconfiguration, not degraded mode).
+{
+  const registryPath = process.env.STATEKEEP_REGISTRY_PATH;
+  if (registryPath) {
+    try {
+      const mod = await import(registryPath);
+      setGlobalRegistry(loadRegistry({
+        guards:   mod.guards   ?? mod.default?.guards   ?? {},
+        actions:  mod.actions  ?? mod.default?.actions  ?? {},
+        services: mod.services ?? mod.default?.services ?? {},
+      }));
+      fastify.log.info(`[server] Implementation registry loaded from ${registryPath}`);
+    } catch (err) {
+      fastify.log.error({ err }, `[server] Failed to load implementation registry from ${registryPath} — exiting`);
+      process.exit(1);
+    }
+  } else {
+    fastify.log.warn(
+      '[server] STATEKEEP_REGISTRY_PATH is not set — guards, actions, and invoke services are ' +
+      'disabled on the HTTP event path. Set STATEKEEP_REGISTRY_PATH to a JS module that exports ' +
+      '{ guards, actions, services }.'
+    );
+  }
+}
 
 startActionJobWorker(
   (actorId, event) => sendEvent(actorId, event, Date.now(), {}),
