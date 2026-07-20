@@ -6,6 +6,7 @@
 import { claimActionJobs, markActionJobDone, retryActionJob, markActionJobFailed }
   from '../registry/actionJobRepo.js';
 import { decrypt } from '../registry/db.js';
+import { getGlobalRegistry } from './implementationRegistry.js';
 
 const POLL_MS  = 1_000;
 let _sendEvent = null;
@@ -39,7 +40,7 @@ async function runLoop() {
 }
 
 async function processJob(job) {
-  const fn = _registry?.actions?.[job.action_name];
+  const fn = (getGlobalRegistry() ?? _registry)?.actions?.[job.action_name];
   if (!fn) {
     console.warn(`[actionJobWorker] No action fn for '${job.action_name}' — marking failed`);
     await markActionJobFailed(job.id).catch(() => {});
