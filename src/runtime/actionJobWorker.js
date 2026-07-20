@@ -52,7 +52,7 @@ async function processJob(job) {
   }
   let event = {};
   if (job.event_snap) {
-    try { event = JSON.parse(job.event_snap); } catch {}
+    try { event = JSON.parse(decrypt(Buffer.from(job.event_snap)).toString('utf8')); } catch {}
   }
 
   try {

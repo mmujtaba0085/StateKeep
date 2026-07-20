@@ -626,6 +626,34 @@ export function getDb() {
     console.log('[db] Migration v23 applied: compiled_json on definitions');
   }
 
+  // v24 — Re-encrypt existing plaintext event_snap rows in action_jobs.
+  // Prior to this migration, event_snap was stored as plaintext JSON (TEXT column).
+  // Detection: better-sqlite3 returns TEXT rows as strings and BLOB rows as Buffers.
+  // A string event_snap is plaintext and must be re-encrypted. Only runs when
+  // ENCRYPTION_KEY is set — if no key, plaintext storage is intentional.
+  if (!appliedVersions.has(24)) {
+    if (ENCRYPTION_KEY) {
+      const rows = _db.prepare(
+        `SELECT id, event_snap FROM action_jobs WHERE status IN ('pending','failed') AND event_snap IS NOT NULL`
+      ).all();
+      const update = _db.prepare(`UPDATE action_jobs SET event_snap=? WHERE id=?`);
+      let reencrypted = 0;
+      _db.transaction(() => {
+        for (const row of rows) {
+          if (typeof row.event_snap === 'string') {
+            update.run(encrypt(Buffer.from(row.event_snap)), row.id);
+            reencrypted++;
+          }
+        }
+      })();
+      if (reencrypted > 0) {
+        console.log(`[db] Migration v24: re-encrypted ${reencrypted} plaintext event_snap rows`);
+      }
+    }
+    _db.exec(`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (24, unixepoch());`);
+    console.log('[db] Migration v24 applied: event_snap encryption in action_jobs');
+  }
+
   // Graceful shutdown
   process.on('exit',    () => { try { _db.close(); } catch {} });
   process.on('SIGINT',  () => { process.exit(0); });

@@ -6,7 +6,7 @@ export async function insertActionJob({ actorId, actionName, context, event, max
   const id  = randomUUID();
   const now = Date.now();
   const contextSnap = context != null ? encrypt(Buffer.from(JSON.stringify(context))) : null;
-  const eventSnap   = event   != null ? JSON.stringify(event) : null;
+  const eventSnap   = event   != null ? encrypt(Buffer.from(JSON.stringify(event))) : null;
 
   if (isPostgres) {
     const { query } = await import('./db-postgres.js');
