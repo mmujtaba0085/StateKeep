@@ -78,7 +78,6 @@ function rowToActorRaw(row) {
   return {
     id:                 row.id,
     definitionId:       row.definition_id,
-    orgId:              row.org_id,
     stateValue:         row.state_value ? JSON.parse(row.state_value) : null,
     context,
     logicalStartTick:   row.logical_start_tick,
@@ -115,7 +114,7 @@ export async function exportRoutes(fastify) {
     const { limit, format }  = request.query;
 
     const identity = await getActorIdentity(id);
-    if (!identity || identity.orgId !== request.orgId) {
+    if (!identity) {
       return reply.code(404).send({ error: `Actor ${id} not found` });
     }
 
@@ -188,10 +187,9 @@ export async function exportRoutes(fastify) {
   }, async (request, reply) => {
     const { machineId } = request.params;
     const format        = request.query.format ?? 'json';
-    const orgId         = request.orgId;
 
-    // Verify the machine exists for this org (at least one definition)
-    const defs = await findDefinitionsByMachine(machineId, orgId);
+    // Verify the machine exists (at least one definition)
+    const defs = await findDefinitionsByMachine(machineId);
     if (!defs || defs.length === 0) {
       return reply.code(404).send({ error: `Machine ${machineId} not found` });
     }
@@ -200,18 +198,18 @@ export async function exportRoutes(fastify) {
     if (isPostgres) {
       const { queryAll } = await import('../../registry/db-postgres.js');
       actorRows = await queryAll(
-        `SELECT a.* FROM actors a JOIN definitions d ON a.definition_id=d.id WHERE d.machine_id=$1 AND a.org_id=$2 ORDER BY a.created_at ASC LIMIT $3`,
-        [machineId, orgId, MACHINE_EXPORT_LIMIT]
+        `SELECT a.* FROM actors a JOIN definitions d ON a.definition_id=d.id WHERE d.machine_id=$1 ORDER BY a.created_at ASC LIMIT $2`,
+        [machineId, MACHINE_EXPORT_LIMIT]
       );
     } else {
       actorRows = getDb().prepare(`
         SELECT a.*
         FROM actors a
         JOIN definitions d ON a.definition_id = d.id
-        WHERE d.machine_id = ? AND a.org_id = ?
+        WHERE d.machine_id = ?
         ORDER BY a.created_at ASC
         LIMIT ?
-      `).all(machineId, orgId, MACHINE_EXPORT_LIMIT);
+      `).all(machineId, MACHINE_EXPORT_LIMIT);
     }
 
     const actors = actorRows.map(rowToActorRaw);

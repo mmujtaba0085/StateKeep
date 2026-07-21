@@ -44,7 +44,7 @@ export async function scheduledRoutes(fastify) {
     const { type, payload, fireAt } = request.body;
 
     const actor = await findActorById(id);
-    if (!actor || actor.orgId !== request.orgId) {
+    if (!actor) {
       return reply.code(404).send({ error: `Actor ${id} not found` });
     }
     if (actor.status === 'terminated' || actor.status === 'archived') {
@@ -53,7 +53,6 @@ export async function scheduledRoutes(fastify) {
 
     const schedId = await createScheduledEvent({
       actorId:   id,
-      orgId:     request.orgId,
       eventType: type,
       payload:   payload ?? null,
       fireAt,
@@ -86,11 +85,11 @@ export async function scheduledRoutes(fastify) {
     const status  = request.query.status ?? 'all';
 
     const actor = await findActorById(id);
-    if (!actor || actor.orgId !== request.orgId) {
+    if (!actor) {
       return reply.code(404).send({ error: `Actor ${id} not found` });
     }
 
-    const events = await findByActor(id, request.orgId, status);
+    const events = await findByActor(id, status);
     return reply.send({ actorId: id, scheduledEvents: events });
   });
 
@@ -110,7 +109,7 @@ export async function scheduledRoutes(fastify) {
     const { id, sid } = request.params;
 
     const actor = await findActorById(id);
-    if (!actor || actor.orgId !== request.orgId) {
+    if (!actor) {
       return reply.code(404).send({ error: `Actor ${id} not found` });
     }
 
@@ -119,7 +118,7 @@ export async function scheduledRoutes(fastify) {
       return reply.code(400).send({ error: 'Invalid scheduled event id' });
     }
 
-    const changed = await cancelScheduledEvent(sidNum, id, request.orgId);
+    const changed = await cancelScheduledEvent(sidNum, id);
     if (!changed) {
       return reply.code(404).send({ error: `Scheduled event ${sid} not found or already finished` });
     }
@@ -143,22 +142,21 @@ export async function scheduledRoutes(fastify) {
     if (isPostgres) {
       const { queryAll } = await import('../../registry/db-postgres.js');
       rows = await queryAll(
-        `SELECT * FROM scheduled_events WHERE status='pending' AND org_id=$1 ORDER BY fire_at ASC LIMIT $2`,
-        [request.orgId, limit]
+        `SELECT * FROM scheduled_events WHERE status='pending' ORDER BY fire_at ASC LIMIT $1`,
+        [limit]
       );
     } else {
       rows = getDb().prepare(`
         SELECT * FROM scheduled_events
-        WHERE status = 'pending' AND org_id = ?
+        WHERE status = 'pending'
         ORDER BY fire_at ASC
         LIMIT ?
-      `).all(request.orgId, limit);
+      `).all(limit);
     }
 
     const scheduled = rows.map(r => ({
       id:        r.id,
       actorId:   r.actor_id,
-      orgId:     r.org_id,
       eventType: r.event_type,
       fireAt:    r.fire_at,
       status:    r.status,

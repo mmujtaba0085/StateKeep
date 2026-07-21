@@ -78,8 +78,8 @@ function hashDefinition(definition) {
  * as wouldMigrate without calling the engine (engine uses exact prefix match,
  * not wildcard, for prefix_hash=0).
  */
-async function evaluateMigrationCandidates(machineId, orgId, eng, currentTick, hasHistoryTarget = true) {
-  const actors     = await findActorsByMachine(machineId, orgId);
+async function evaluateMigrationCandidates(machineId, eng, currentTick, hasHistoryTarget = true) {
+  const actors     = await findActorsByMachine(machineId);
   const wouldMigrate = [];
   const wouldStay    = [];
 
@@ -187,10 +187,9 @@ export async function definitionRoutes(fastify) {
                               !Array.isArray(historyRegions) &&
                               Object.keys(historyRegions).length > 0;
     const hasHistoryTarget  = hasHistoryPath || hasHistoryRegions;
-    const orgId             = request.orgId;
     const parentDefForTargeting = parentId ? await findDefinitionById(parentId) : null;
 
-    if (parentId && (!parentDefForTargeting || parentDefForTargeting.orgId !== orgId)) {
+    if (parentId && !parentDefForTargeting) {
       return reply.code(404).send({ error: `Definition ${parentId} not found` });
     }
 
@@ -301,10 +300,10 @@ export async function definitionRoutes(fastify) {
       let migration = { eligible: 0, wouldMigrate: [], wouldStay: [], engineAvailable: eng.available };
 
       if (parentId && eng.available) {
-        const candidates = await evaluateMigrationCandidates(machineId, orgId, eng, dryRunTick, hasHistoryTarget);
+        const candidates = await evaluateMigrationCandidates(machineId, eng, dryRunTick, hasHistoryTarget);
         migration = { ...candidates, engineAvailable: true };
       } else if (parentId) {
-        const dryActors = await findActorsByMachine(machineId, orgId);
+        const dryActors = await findActorsByMachine(machineId);
         migration = {
           eligible:        dryActors.length,
           wouldMigrate:    [],
@@ -317,7 +316,7 @@ export async function definitionRoutes(fastify) {
       // Compute stranded actors for the dryRun preview
       let dryStrandedActors = [];
       if (parentId) {
-        const strandedGroups = await findStrandedActors(parentId, effectiveValidStates, orgId);
+        const strandedGroups = await findStrandedActors(parentId, effectiveValidStates);
         dryStrandedActors    = strandedGroups.map(g => ({ currentState: g.state, count: g.count }));
       }
 
@@ -339,20 +338,19 @@ export async function definitionRoutes(fastify) {
     if (parentId) getWriteBuffer().flush();
 
     if (parentId) {
-      const strandedGroups = await findStrandedActors(parentId, effectiveValidStates, orgId);
+      const strandedGroups = await findStrandedActors(parentId, effectiveValidStates);
       const totalStranded  = strandedGroups.reduce((s, g) => s + g.count, 0);
 
       if (totalStranded > 0) {
         // ── Confirm path ────────────────────────────────────────────────────
         if (confirmToken) {
-          const result = consumeToken(confirmToken, { definitionId: id, currentStrandedCount: totalStranded, orgId });
+          const result = consumeToken(confirmToken, { definitionId: id, currentStrandedCount: totalStranded });
           if (!result.ok) {
             // Re-issue a fresh preview if the token expired or state drifted
             if (result.newPreviewNeeded) {
               const fresh = issueToken({
                 definitionId:  id,
                 parentId,
-                orgId,
                 definitionHash: hashDefinition(definition),
                 strandedGroups,
                 totalStranded,
@@ -361,7 +359,7 @@ export async function definitionRoutes(fastify) {
                 status:        'requires_confirmation',
                 reason:        result.reason,
                 strandedActors: strandedGroups.map(g => ({ currentState: g.state, count: g.count })),
-                safeActors:    (await findActorsByDefinition(parentId, orgId)).length - totalStranded,
+                safeActors:    (await findActorsByDefinition(parentId)).length - totalStranded,
                 confirmToken:  fresh.token,
                 expiresIn:     fresh.expiresIn,
                 message:       `${totalStranded} actor(s) will be tagged needs_rescue. Include confirmToken to proceed.`,
@@ -372,11 +370,10 @@ export async function definitionRoutes(fastify) {
           // Token valid — fall through to storage, will tag stranded actors after write
         } else {
           // ── First PUT — no token yet: return preview ─────────────────────
-          const safeActors = (await findActorsByDefinition(parentId, orgId)).length - totalStranded;
+          const safeActors = (await findActorsByDefinition(parentId)).length - totalStranded;
           const issued = issueToken({
             definitionId:  id,
             parentId,
-            orgId,
             definitionHash: hashDefinition(definition),
             strandedGroups,
             totalStranded,
@@ -449,7 +446,6 @@ export async function definitionRoutes(fastify) {
         await createDefinition({
           id,
           parentId:       parentId ?? null,
-          orgId,
           definitionJson: definitionToStore,
           deployedAt:     Number(tStar),
         });
@@ -491,11 +487,11 @@ export async function definitionRoutes(fastify) {
               error: 'Ambiguous deployment: this historyRegions selector conflicts with an existing changepoint at the same deployment tick. Ensure selectors are pairwise incompatible or use a covering union selector (Proposition 5.14).',
             });
           }
-          await insertParChangepoint({ orgId, tStar: Number(tStar), regionHashesHexMap: regionHexMap, refinement, childDefId: id });
+          await insertParChangepoint({ tStar: Number(tStar), regionHashesHexMap: regionHexMap, refinement, childDefId: id });
         }
       } else {
         eng.registerChangepoint(tStar, prefixHash, BigInt(refinement), id);
-        await insertChangepoint({ orgId, tStar: Number(tStar), prefixHash: prefixHash.toString(), refinement, childDefId: id });
+        await insertChangepoint({ tStar: Number(tStar), prefixHash: prefixHash.toString(), refinement, childDefId: id });
       }
     } catch (e) {
       request.log.warn(`[definitions] registerChangepoint failed: ${e.message}`);
@@ -512,7 +508,7 @@ export async function definitionRoutes(fastify) {
     // ── Step 4: Tag stranded actors needs_rescue (only reached after confirm) ─
     let strandedTagged = 0;
     if (parentId && confirmToken) {
-      const strandedGroups   = await findStrandedActors(parentId, effectiveValidStates, orgId);
+      const strandedGroups   = await findStrandedActors(parentId, effectiveValidStates);
       const strandedActorIds = strandedGroups.flatMap(g => g.actorIds);
       if (strandedActorIds.length > 0) {
         await bulkTagNeedsRescue(strandedActorIds);
@@ -529,7 +525,7 @@ export async function definitionRoutes(fastify) {
     if (parentId) {
       const currentTick = eng.clockTick();
       // Migrate all active actors across the full machine family (all versions)
-      const actors = await findActorsByMachine(machineId, orgId);
+      const actors = await findActorsByMachine(machineId);
 
       if (actors.length > 0) {
         // Build the job list: only actors whose fingerprint matches the scalar
@@ -544,7 +540,7 @@ export async function definitionRoutes(fastify) {
           // fingerprint, not as "match all".  Bypass the engine and enqueue every active
           // actor on the machine directly.
           for (const actor of actors) {
-            pendingJobs.push({ actor_id: actor.id, org_id: orgId, target_def_id: id });
+            pendingJobs.push({ actor_id: actor.id, target_def_id: id });
           }
           const wildcardThreshold = parseInt(process.env.STATEKEEP_WILDCARD_WARN_THRESHOLD ?? '10000', 10);
           if (pendingJobs.length > wildcardThreshold) {
@@ -580,12 +576,12 @@ export async function definitionRoutes(fastify) {
               request.log.warn(`[definitions] computeAccessible failed for ${actor.id}: ${e.message}`);
             }
             if (targetDefId && targetDefId !== actor.definitionId) {
-              pendingJobs.push({ actor_id: actor.id, org_id: orgId, target_def_id: targetDefId });
+              pendingJobs.push({ actor_id: actor.id, target_def_id: targetDefId });
             }
           }
         }
 
-        deploymentId = await createDeployment({ definitionId: id, affectedActors: pendingJobs.length, orgId });
+        deploymentId = await createDeployment({ definitionId: id, affectedActors: pendingJobs.length });
         affectedCount = pendingJobs.length;
 
         if (pendingJobs.length > 0) {
@@ -620,7 +616,7 @@ export async function definitionRoutes(fastify) {
   }, async (request, reply) => {
     const { id } = request.params;
     const def = await findDefinitionById(id);
-    if (!def || def.orgId !== request.orgId) return reply.code(404).send({ error: `Definition ${id} not found` });
+    if (!def) return reply.code(404).send({ error: `Definition ${id} not found` });
     const deployments = await findDeploymentsByDefinition(id);
     return reply.send({
       definition: { id: def.id, parentId: def.parentId, deployedAt: def.deployedAt, status: def.status },
@@ -636,12 +632,12 @@ export async function definitionRoutes(fastify) {
   }, async (request, reply) => {
     const { id } = request.params;
     const def = await findDefinitionById(id);
-    if (!def || def.orgId !== request.orgId) return reply.code(404).send({ error: `Definition ${id} not found` });
+    if (!def) return reply.code(404).send({ error: `Definition ${id} not found` });
     if (!def.parentId) {
       return reply.send({ id, parentId: null, diff: null, message: 'No parent — this is a root definition.' });
     }
     const parent = await findDefinitionById(def.parentId);
-    if (!parent || parent.orgId !== request.orgId) return reply.code(404).send({ error: `Parent definition ${def.parentId} not found` });
+    if (!parent) return reply.code(404).send({ error: `Parent definition ${def.parentId} not found` });
 
     const childStates  = Object.keys(def.definitionJson.states   ?? {});
     const parentStates = Object.keys(parent.definitionJson.states ?? {});
@@ -687,20 +683,20 @@ export async function definitionRoutes(fastify) {
   }, async (request, reply) => {
     const { id } = request.params;
     const def = await findDefinitionById(id);
-    if (!def || def.orgId !== request.orgId) return reply.code(404).send({ error: `Definition ${id} not found` });
+    if (!def) return reply.code(404).send({ error: `Definition ${id} not found` });
 
     let rows;
     if (isPostgres) {
       const { queryAll } = await import('../../registry/db-postgres.js');
       rows = await queryAll(
-        `SELECT state_value, COUNT(*) as cnt FROM actors WHERE definition_id=$1 AND org_id=$2 AND status='active' GROUP BY state_value`,
-        [id, request.orgId]
+        `SELECT state_value, COUNT(*) as cnt FROM actors WHERE definition_id=$1 AND status='active' GROUP BY state_value`,
+        [id]
       );
     } else {
       rows = getDb().prepare(`
         SELECT state_value, COUNT(*) as cnt FROM actors
-        WHERE definition_id = ? AND org_id = ? AND status = 'active' GROUP BY state_value
-      `).all(id, request.orgId);
+        WHERE definition_id = ? AND status = 'active' GROUP BY state_value
+      `).all(id);
     }
 
     const byState   = {};
@@ -731,7 +727,6 @@ export async function definitionRoutes(fastify) {
     },
   }, async (request, reply) => {
     const { parentId, definition, historyPath } = request.body;
-    const previewOrgId = request.orgId;
     const eng = getEngine();
 
     const { errors, warnings } = analyseDefinition(definition);
@@ -740,19 +735,16 @@ export async function definitionRoutes(fastify) {
     }
 
     const parentDef = parentId ? await findDefinitionById(parentId) : null;
-    if (parentDef && parentDef.orgId !== previewOrgId) {
-      return reply.code(404).send({ error: `Definition ${parentId} not found` });
-    }
     const previewMachineId = parentDef?.machineId ?? parentId;
 
     const dryRunTick = eng.clockTick();
     let migration = { eligible: 0, wouldMigrate: [], wouldStay: [], engineAvailable: eng.available };
 
     if (previewMachineId && eng.available) {
-      const candidates = await evaluateMigrationCandidates(previewMachineId, previewOrgId, eng, dryRunTick);
+      const candidates = await evaluateMigrationCandidates(previewMachineId, eng, dryRunTick);
       migration = { ...candidates, engineAvailable: true };
     } else if (previewMachineId) {
-      const actors = await findActorsByMachine(previewMachineId, previewOrgId);
+      const actors = await findActorsByMachine(previewMachineId);
       migration = {
         eligible:        actors.length,
         wouldMigrate:    [],
@@ -766,14 +758,14 @@ export async function definitionRoutes(fastify) {
     const tick = Number(dryRunTick);
     const { logDecision } = await import('../../registry/jobRepo.js');
     for (const entry of migration.wouldMigrate) {
-      logDecision({ actorId: entry.actorId, orgId: previewOrgId, trigger: 'preview', evaluatedAt: tick, decision: 'migrated', reason: 'fingerprint_match', fromDefinitionId: parentId, toDefinitionId: entry.targetDefinitionId, actorFingerprint: '0', prefixHash: '0' }).catch(() => {});
+      logDecision({ actorId: entry.actorId, trigger: 'preview', evaluatedAt: tick, decision: 'migrated', reason: 'fingerprint_match', fromDefinitionId: parentId, toDefinitionId: entry.targetDefinitionId, actorFingerprint: '0', prefixHash: '0' }).catch(() => {});
     }
     for (const entry of migration.wouldStay) {
-      logDecision({ actorId: entry.actorId, orgId: previewOrgId, trigger: 'preview', evaluatedAt: tick, decision: 'stayed', reason: entry.reason ?? 'fingerprint_mismatch', fromDefinitionId: parentId, toDefinitionId: null, actorFingerprint: '0', prefixHash: '0' }).catch(() => {});
+      logDecision({ actorId: entry.actorId, trigger: 'preview', evaluatedAt: tick, decision: 'stayed', reason: entry.reason ?? 'fingerprint_mismatch', fromDefinitionId: parentId, toDefinitionId: null, actorFingerprint: '0', prefixHash: '0' }).catch(() => {});
     }
 
     const newStateNames  = Object.keys(definition.states ?? {});
-    const strandedGroups = await findStrandedActors(parentId, newStateNames, previewOrgId);
+    const strandedGroups = await findStrandedActors(parentId, newStateNames);
     const strandedActors = strandedGroups.map(g => ({ currentState: g.state, count: g.count }));
 
     return reply.code(200).send({
@@ -795,7 +787,7 @@ export async function definitionRoutes(fastify) {
     const { id } = request.params;
 
     // id is the machineId (root definition id)
-    const definitions = await findDefinitionsByMachine(id, request.orgId);
+    const definitions = await findDefinitionsByMachine(id);
     if (definitions.length === 0) {
       return reply.code(404).send({ error: `Machine ${id} not found` });
     }
@@ -841,13 +833,13 @@ export async function definitionRoutes(fastify) {
     if (isPostgres) {
       const { queryAll } = await import('../../registry/db-postgres.js');
       summary = await queryAll(
-        `SELECT status, COUNT(*) as cnt FROM actors WHERE org_id=$1 AND definition_id IN (SELECT id FROM definitions WHERE machine_id=$2 AND org_id=$3) GROUP BY status`,
-        [request.orgId, id, request.orgId]
+        `SELECT status, COUNT(*) as cnt FROM actors WHERE definition_id IN (SELECT id FROM definitions WHERE machine_id=$1) GROUP BY status`,
+        [id]
       );
     } else {
       summary = getDb().prepare(`
-        SELECT status, COUNT(*) as cnt FROM actors WHERE org_id = ? AND definition_id IN (SELECT id FROM definitions WHERE machine_id = ? AND org_id = ?) GROUP BY status
-      `).all(request.orgId, id, request.orgId);
+        SELECT status, COUNT(*) as cnt FROM actors WHERE definition_id IN (SELECT id FROM definitions WHERE machine_id = ?) GROUP BY status
+      `).all(id);
     }
     const byStatus = {};
     for (const r of summary) byStatus[r.status] = Number(r.cnt);
@@ -881,9 +873,9 @@ export async function definitionRoutes(fastify) {
       let deployment;
       if (isPostgres) {
         const { queryOne } = await import('../../registry/db-postgres.js');
-        deployment = await queryOne(`SELECT id FROM deployments WHERE id=$1 AND org_id=$2`, [id, request.orgId]);
+        deployment = await queryOne(`SELECT id FROM deployments WHERE id=$1`, [id]);
       } else {
-        deployment = getDb().prepare(`SELECT id FROM deployments WHERE id = ? AND org_id = ?`).get(id, request.orgId);
+        deployment = getDb().prepare(`SELECT id FROM deployments WHERE id = ?`).get(id);
       }
       if (!deployment) return reply.code(404).send({ error: `Deployment ${id} not found` });
 
@@ -892,9 +884,9 @@ export async function definitionRoutes(fastify) {
       let total;
       if (isPostgres) {
         const { queryOne } = await import('../../registry/db-postgres.js');
-        total = Number((await queryOne(`SELECT COUNT(*) as cnt FROM migration_decisions WHERE deployment_id=$1 AND org_id=$2`, [id, request.orgId]))?.cnt ?? 0);
+        total = Number((await queryOne(`SELECT COUNT(*) as cnt FROM migration_decisions WHERE deployment_id=$1`, [id]))?.cnt ?? 0);
       } else {
-        total = getDb().prepare(`SELECT COUNT(*) as cnt FROM migration_decisions WHERE deployment_id = ? AND org_id = ?`).get(id, request.orgId)?.cnt ?? 0;
+        total = getDb().prepare(`SELECT COUNT(*) as cnt FROM migration_decisions WHERE deployment_id = ?`).get(id)?.cnt ?? 0;
       }
 
       const decisions = rows.map(r => ({
@@ -925,7 +917,7 @@ export async function definitionRoutes(fastify) {
     },
   }, async (request, reply) => {
     const def = await findDefinitionById(request.params.id);
-    if (!def || def.orgId !== request.orgId) {
+    if (!def) {
       return reply.code(404).send({ error: `Definition ${request.params.id} not found` });
     }
     return reply.send(def);
@@ -938,7 +930,7 @@ export async function definitionRoutes(fastify) {
     },
   }, async (request, reply) => {
     const def = await findDefinitionById(request.params.id);
-    if (!def || def.orgId !== request.orgId) {
+    if (!def) {
       return reply.code(404).send({ error: `Definition ${request.params.id} not found` });
     }
     await deprecateDefinition(request.params.id);
@@ -957,20 +949,19 @@ export async function definitionRoutes(fastify) {
       },
     },
   }, async (request, reply) => {
-    const defs = await listDefinitions({ ...request.query, orgId: request.orgId });
+    const defs = await listDefinitions({ ...request.query });
 
     // One GROUP BY query — no N+1
     let countRows;
     if (isPostgres) {
       const { queryAll } = await import('../../registry/db-postgres.js');
       countRows = await queryAll(
-        `SELECT definition_id, COUNT(*) as cnt FROM actors WHERE org_id=$1 AND status IN ('active','migrating','needs_rescue') GROUP BY definition_id`,
-        [request.orgId]
+        `SELECT definition_id, COUNT(*) as cnt FROM actors WHERE status IN ('active','migrating','needs_rescue') GROUP BY definition_id`
       );
     } else {
       countRows = getDb().prepare(`
-        SELECT definition_id, COUNT(*) as cnt FROM actors WHERE org_id = ? AND status IN ('active','migrating','needs_rescue') GROUP BY definition_id
-      `).all(request.orgId);
+        SELECT definition_id, COUNT(*) as cnt FROM actors WHERE status IN ('active','migrating','needs_rescue') GROUP BY definition_id
+      `).all();
     }
     const countByDef = Object.fromEntries(countRows.map(r => [r.definition_id, Number(r.cnt)]));
 

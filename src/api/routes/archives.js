@@ -38,39 +38,37 @@ export async function archiveRoutes(fastify) {
       const { queryAll } = await import('../../registry/db-postgres.js');
       if (machineId) {
         rows = await queryAll(
-          `SELECT actor_id, org_id, machine_id, archived_at, state_value, definition_id FROM actor_archives WHERE org_id=$1 AND machine_id=$2 ORDER BY archived_at DESC LIMIT $3 OFFSET $4`,
-          [request.orgId, machineId, limit, offset]
+          `SELECT actor_id, machine_id, archived_at, state_value, definition_id FROM actor_archives WHERE machine_id=$1 ORDER BY archived_at DESC LIMIT $2 OFFSET $3`,
+          [machineId, limit, offset]
         );
       } else {
         rows = await queryAll(
-          `SELECT actor_id, org_id, machine_id, archived_at, state_value, definition_id FROM actor_archives WHERE org_id=$1 ORDER BY archived_at DESC LIMIT $2 OFFSET $3`,
-          [request.orgId, limit, offset]
+          `SELECT actor_id, machine_id, archived_at, state_value, definition_id FROM actor_archives ORDER BY archived_at DESC LIMIT $1 OFFSET $2`,
+          [limit, offset]
         );
       }
     } else {
       const db = getDb();
       if (machineId) {
         rows = db.prepare(`
-          SELECT actor_id, org_id, machine_id, archived_at, state_value, definition_id
+          SELECT actor_id, machine_id, archived_at, state_value, definition_id
           FROM actor_archives
-          WHERE org_id = ? AND machine_id = ?
+          WHERE machine_id = ?
           ORDER BY archived_at DESC
           LIMIT ? OFFSET ?
-        `).all(request.orgId, machineId, limit, offset);
+        `).all(machineId, limit, offset);
       } else {
         rows = db.prepare(`
-          SELECT actor_id, org_id, machine_id, archived_at, state_value, definition_id
+          SELECT actor_id, machine_id, archived_at, state_value, definition_id
           FROM actor_archives
-          WHERE org_id = ?
           ORDER BY archived_at DESC
           LIMIT ? OFFSET ?
-        `).all(request.orgId, limit, offset);
+        `).all(limit, offset);
       }
     }
 
     const archives = rows.map(r => ({
       actorId:      r.actor_id,
-      orgId:        r.org_id,
       machineId:    r.machine_id,
       archivedAt:   r.archived_at,
       stateValue:   r.state_value ? JSON.parse(r.state_value) : null,
@@ -91,9 +89,9 @@ export async function archiveRoutes(fastify) {
     let archiveRow;
     if (isPostgres) {
       const { queryOne } = await import('../../registry/db-postgres.js');
-      archiveRow = await queryOne(`SELECT * FROM actor_archives WHERE actor_id=$1 AND org_id=$2`, [id, request.orgId]);
+      archiveRow = await queryOne(`SELECT * FROM actor_archives WHERE actor_id=$1`, [id]);
     } else {
-      archiveRow = getDb().prepare(`SELECT * FROM actor_archives WHERE actor_id = ? AND org_id = ?`).get(id, request.orgId);
+      archiveRow = getDb().prepare(`SELECT * FROM actor_archives WHERE actor_id = ?`).get(id);
     }
 
     if (!archiveRow) {
@@ -119,7 +117,6 @@ export async function archiveRoutes(fastify) {
       await createActor({
         id:                 archiveData.id,
         definitionId:       archiveData.definitionId,
-        orgId:              archiveData.orgId,
         stateValue:         archiveData.stateValue,
         context:            archiveData.context,
         logicalStartTick:   archiveData.logicalStartTick,
@@ -173,7 +170,6 @@ export async function archiveRoutes(fastify) {
 
       const archiveData = {
         id:                 actor.id,
-        orgId:              actor.orgId,
         definitionId:       actor.definitionId,
         stateValue:         actor.stateValue,
         context:            actor.context,
@@ -182,10 +178,10 @@ export async function archiveRoutes(fastify) {
         archivedAt:         now,
       };
 
-      const filename = join(ARCHIVE_DIR, `${actor.orgId}_${actor.id}.json.gz`);
+      const filename = join(ARCHIVE_DIR, `${actor.id}.json.gz`);
       writeFileSync(filename, gzipSync(JSON.stringify(archiveData)));
 
-      await cancelAllPendingForActor(id, actor.orgId);
+      await cancelAllPendingForActor(id);
       await updateActorStatus(id, 'archived');
       evictFromHotRegistry(id);
 
@@ -193,17 +189,16 @@ export async function archiveRoutes(fastify) {
         const { query } = await import('../../registry/db-postgres.js');
         await query(
           `INSERT INTO actor_archives (actor_id, org_id, machine_id, archived_at, file_path, state_value, definition_id)
-           VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (actor_id) DO UPDATE SET archived_at=EXCLUDED.archived_at, file_path=EXCLUDED.file_path, state_value=EXCLUDED.state_value`,
-          [actor.id, actor.orgId, machineId, now, filename, actor.stateValue ? JSON.stringify(actor.stateValue) : null, actor.definitionId]
+           VALUES ($1,'default',$2,$3,$4,$5,$6) ON CONFLICT (actor_id) DO UPDATE SET archived_at=EXCLUDED.archived_at, file_path=EXCLUDED.file_path, state_value=EXCLUDED.state_value`,
+          [actor.id, machineId, now, filename, actor.stateValue ? JSON.stringify(actor.stateValue) : null, actor.definitionId]
         );
       } else {
         getDb().prepare(`
           INSERT OR REPLACE INTO actor_archives
             (actor_id, org_id, machine_id, archived_at, file_path, state_value, definition_id)
-          VALUES (?, ?, ?, ?, ?, ?, ?)
+          VALUES (?, 'default', ?, ?, ?, ?, ?)
         `).run(
           actor.id,
-          actor.orgId,
           machineId,
           now,
           filename,

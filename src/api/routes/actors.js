@@ -52,21 +52,19 @@ export async function actorRoutes(fastify) {
     let resolvedDefinitionId = rawDefinitionId;
     const exactDef = await findDefinitionById(rawDefinitionId);
     if (!exactDef || exactDef.machineId === rawDefinitionId) {
-      const latest = await findLatestInFamily(rawDefinitionId, request.orgId);
+      const latest = await findLatestInFamily(rawDefinitionId);
       if (latest) resolvedDefinitionId = latest.id;
     }
 
     try {
       const result = await spawnActor({
         definitionId:     resolvedDefinitionId,
-        orgId:            request.orgId,
         initialContext:   request.body.initialContext ?? {},
         logicalStartTick: Number(tick),
       });
 
       getWriteBuffer().queueEvent({
         actor_id:        result.id,
-        org_id:          request.orgId,
         event_type:      'SPAWN',
         event_payload:   null,
         tick:            Number(tick),
@@ -111,9 +109,8 @@ export async function actorRoutes(fastify) {
     const tick  = eng.clockTick();
     const { id } = request.params;
 
-    // Org isolation check — no context decrypt needed here, use lightweight lookup
     const actor = await getActorIdentity(id);
-    if (!actor || actor.orgId !== request.orgId) {
+    if (!actor) {
       return reply.code(404).send({ error: `Actor ${id} not found` });
     }
 
@@ -128,13 +125,13 @@ export async function actorRoutes(fastify) {
         if (isPostgres) {
           const { queryOne } = await import('../../registry/db-postgres.js');
           inDb = !!(await queryOne(
-            `SELECT e.id FROM events e WHERE e.actor_id=$1 AND e.org_id=$2 AND e.idempotency_key=$3`,
-            [id, request.orgId, idempotencyKey]
+            `SELECT e.id FROM events e WHERE e.actor_id=$1 AND e.idempotency_key=$2`,
+            [id, idempotencyKey]
           ));
         } else {
           inDb = !!getDb().prepare(
-            `SELECT e.id FROM events e WHERE e.actor_id = ? AND e.org_id = ? AND e.idempotency_key = ?`
-          ).get(id, request.orgId, idempotencyKey);
+            `SELECT e.id FROM events e WHERE e.actor_id = ? AND e.idempotency_key = ?`
+          ).get(id, idempotencyKey);
         }
       }
 
@@ -164,14 +161,11 @@ export async function actorRoutes(fastify) {
         ? encrypt(Buffer.from(JSON.stringify(payload)))
         : null;
       const tickNum = Number(tick);
-      const orgId   = request.orgId;
 
       const result = await sendEvent(id, event, tickNum, {
         priority,
-        orgId,
         eventData: {
           actor_id:        id,
-          org_id:          orgId,
           event_type:      event.type,
           event_payload:   encPayload,
           tick:            tickNum,
@@ -236,7 +230,7 @@ export async function actorRoutes(fastify) {
   }, async (request, reply) => {
     const { id } = request.params;
     const actor = await getActorIdentity(id);
-    if (!actor || actor.orgId !== request.orgId) {
+    if (!actor) {
       return reply.code(404).send({ error: `Actor ${id} not found` });
     }
 
@@ -256,13 +250,13 @@ export async function actorRoutes(fastify) {
           if (isPostgres) {
             const { queryOne } = await import('../../registry/db-postgres.js');
             inDb = !!(await queryOne(
-              `SELECT e.id FROM events e WHERE e.actor_id=$1 AND e.org_id=$2 AND e.idempotency_key=$3`,
-              [id, request.orgId, idempotencyKey]
+              `SELECT e.id FROM events e WHERE e.actor_id=$1 AND e.idempotency_key=$2`,
+              [id, idempotencyKey]
             ));
           } else {
             inDb = !!getDb().prepare(
-              `SELECT e.id FROM events e WHERE e.actor_id = ? AND e.org_id = ? AND e.idempotency_key = ?`
-            ).get(id, request.orgId, idempotencyKey);
+              `SELECT e.id FROM events e WHERE e.actor_id = ? AND e.idempotency_key = ?`
+            ).get(id, idempotencyKey);
           }
         }
         if (inFlight || inDb) {
@@ -279,10 +273,8 @@ export async function actorRoutes(fastify) {
       try {
         const result = await sendEvent(id, event, tickNum, {
           priority,
-          orgId: request.orgId,
           eventData: {
             actor_id:        id,
-            org_id:          request.orgId,
             event_type:      event.type,
             event_payload:   encPayload,
             tick:            tickNum,
@@ -317,7 +309,7 @@ export async function actorRoutes(fastify) {
   }, async (request, reply) => {
     const { id } = request.params;
     const actor = await getActorIdentity(id);
-    if (!actor || actor.orgId !== request.orgId) {
+    if (!actor) {
       return reply.code(404).send({ error: `Actor ${id} not found` });
     }
     try {
@@ -346,7 +338,7 @@ export async function actorRoutes(fastify) {
     const { id } = request.params;
 
     const actor = await getActorIdentity(id);
-    if (!actor || actor.orgId !== request.orgId) {
+    if (!actor) {
       return reply.code(404).send({ error: `Actor ${id} not found` });
     }
 
@@ -382,7 +374,7 @@ export async function actorRoutes(fastify) {
   }, async (request, reply) => {
     const { id } = request.params;
     const actor = await getActorIdentity(id);
-    if (!actor || actor.orgId !== request.orgId) {
+    if (!actor) {
       return reply.code(404).send({ error: `Actor ${id} not found` });
     }
 
@@ -438,15 +430,15 @@ export async function actorRoutes(fastify) {
   }, async (request, reply) => {
     const { id } = request.params;
     const actor = await getActorIdentity(id);
-    if (!actor || actor.orgId !== request.orgId) {
+    if (!actor) {
       return reply.code(404).send({ error: `Actor ${id} not found` });
     }
 
     try {
       const _pri2    = request.headers['x-priority'];
       const priority = _pri2 === 'urgent' ? 'urgent' : _pri2 === 'high' ? 'high' : 'normal';
-      const cancelled = await cancelAllPendingForActor(id, request.orgId);
-      await terminateActor(id, { priority, orgId: request.orgId });
+      const cancelled = await cancelAllPendingForActor(id);
+      await terminateActor(id, { priority });
       return reply.code(200).send({ cancelled });
     } catch (err) {
       const code = err.message.includes('not found') ? 404 : 500;
@@ -468,7 +460,7 @@ export async function actorRoutes(fastify) {
     },
   }, async (request, reply) => {
     const { limit, offset, definitionId } = request.query;
-    const actors = await findNeedsRescueActors({ limit, offset, definitionId, orgId: request.orgId });
+    const actors = await findNeedsRescueActors({ limit, offset, definitionId });
     return reply.send({
       actors,
       count: actors.length,
@@ -493,18 +485,18 @@ export async function actorRoutes(fastify) {
   }, async (request, reply) => {
     const { id } = request.params;
     const actor = await getActorIdentity(id);
-    if (!actor || actor.orgId !== request.orgId) {
+    if (!actor) {
       return reply.code(404).send({ error: `Actor ${id} not found` });
     }
 
     const { limit, offset } = request.query;
-    const rows = await findDecisionsByActor(id, request.orgId, { limit, offset });
+    const rows = await findDecisionsByActor(id, { limit, offset });
     let total;
     if (isPostgres) {
       const { queryOne } = await import('../../registry/db-postgres.js');
-      total = Number((await queryOne(`SELECT COUNT(*) as cnt FROM migration_decisions WHERE actor_id=$1 AND org_id=$2`, [id, request.orgId]))?.cnt ?? 0);
+      total = Number((await queryOne(`SELECT COUNT(*) as cnt FROM migration_decisions WHERE actor_id=$1`, [id]))?.cnt ?? 0);
     } else {
-      total = getDb().prepare(`SELECT COUNT(*) as cnt FROM migration_decisions WHERE actor_id = ? AND org_id = ?`).get(id, request.orgId)?.cnt ?? 0;
+      total = getDb().prepare(`SELECT COUNT(*) as cnt FROM migration_decisions WHERE actor_id = ?`).get(id)?.cnt ?? 0;
     }
 
     const decisions = rows.map(r => ({
@@ -539,7 +531,7 @@ export async function actorRoutes(fastify) {
   }, async (request, reply) => {
     const { id } = request.params;
     const actor = await getActorIdentity(id);
-    if (!actor || actor.orgId !== request.orgId) {
+    if (!actor) {
       return reply.code(404).send({ error: `Actor ${id} not found` });
     }
 
@@ -558,14 +550,14 @@ export async function actorRoutes(fastify) {
     if (isPostgres) {
       const { query } = await import('../../registry/db-postgres.js');
       await query(
-        `INSERT INTO events (actor_id, org_id, event_type, event_payload, tick, processed_at) VALUES ($1,$2,'MANUALLY_RESCUED',NULL,$3,$4)`,
-        [id, request.orgId, tick, Date.now()]
+        `INSERT INTO events (actor_id, event_type, event_payload, tick, processed_at) VALUES ($1,'MANUALLY_RESCUED',NULL,$2,$3)`,
+        [id, tick, Date.now()]
       );
     } else {
       getDb().prepare(`
-        INSERT INTO events (actor_id, org_id, event_type, event_payload, tick, processed_at)
-        VALUES (?, ?, 'MANUALLY_RESCUED', NULL, ?, ?)
-      `).run(id, request.orgId, tick, Date.now());
+        INSERT INTO events (actor_id, event_type, event_payload, tick, processed_at)
+        VALUES (?, 'MANUALLY_RESCUED', NULL, ?, ?)
+      `).run(id, tick, Date.now());
     }
 
     const updated = await findActorById(id);
@@ -613,7 +605,7 @@ export async function actorRoutes(fastify) {
           resolvedIdCache.set(raw, raw);
         } else {
           // Family root ID or not found → resolve to latest active in family
-          const latest = await findLatestInFamily(raw, request.orgId);
+          const latest = await findLatestInFamily(raw);
           resolvedIdCache.set(raw, latest ? latest.id : raw);
         }
       }
@@ -629,7 +621,6 @@ export async function actorRoutes(fastify) {
       const results = await Promise.allSettled(
         slice.map(req => spawnActor({
           definitionId:     resolvedIdCache.get(req.definitionId),
-          orgId:            request.orgId,
           initialContext:   req.initialContext ?? {},
           logicalStartTick: tick,
         }))
@@ -644,14 +635,14 @@ export async function actorRoutes(fastify) {
             if (isPostgres) {
               const { query } = await import('../../registry/db-postgres.js');
               await query(
-                `INSERT INTO events (actor_id, org_id, event_type, event_payload, tick, processed_at) VALUES ($1,$2,'SPAWN',NULL,$3,$4)`,
-                [v.id, request.orgId, tick, Date.now()]
+                `INSERT INTO events (actor_id, event_type, event_payload, tick, processed_at) VALUES ($1,'SPAWN',NULL,$2,$3)`,
+                [v.id, tick, Date.now()]
               );
             } else {
               getDb().prepare(`
-                INSERT INTO events (actor_id, org_id, event_type, event_payload, tick, processed_at)
-                VALUES (?, ?, 'SPAWN', NULL, ?, ?)
-              `).run(v.id, request.orgId, tick, Date.now());
+                INSERT INTO events (actor_id, event_type, event_payload, tick, processed_at)
+                VALUES (?, 'SPAWN', NULL, ?, ?)
+              `).run(v.id, tick, Date.now());
             }
           } catch {}
           created.push({
@@ -685,8 +676,8 @@ export async function actorRoutes(fastify) {
   }, async (request, reply) => {
     const { limit, offset, status, definitionId } = request.query;
     const [actors, counts] = await Promise.all([
-      listActors({ limit, offset, status, definitionId, orgId: request.orgId }),
-      getActorCountsByStatus(request.orgId),
+      listActors({ limit, offset, status, definitionId }),
+      getActorCountsByStatus(),
     ]);
     return reply.send({
       actors,

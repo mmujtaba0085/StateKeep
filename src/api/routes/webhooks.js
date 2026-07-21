@@ -80,12 +80,12 @@ export async function webhookRoutes(fastify) {
     if (isPostgres) {
       const { query } = await import('../../registry/db-postgres.js');
       await query(
-        `INSERT INTO webhooks (id, org_id, url, secret, events, active, created_at) VALUES ($1,$2,$3,$4,$5,true,$6)`,
-        [id, request.orgId, url, encryptedSecret, eventsJson, now]
+        `INSERT INTO webhooks (id, org_id, url, secret, events, active, created_at) VALUES ($1,'default',$2,$3,$4,true,$5)`,
+        [id, url, encryptedSecret, eventsJson, now]
       );
     } else {
-      getDb().prepare(`INSERT INTO webhooks (id, org_id, url, secret, events, active, created_at) VALUES (?, ?, ?, ?, ?, 1, ?)`
-      ).run(id, request.orgId, url, encryptedSecret, eventsJson, now);
+      getDb().prepare(`INSERT INTO webhooks (id, org_id, url, secret, events, active, created_at) VALUES (?, 'default', ?, ?, ?, 1, ?)`
+      ).run(id, url, encryptedSecret, eventsJson, now);
     }
 
     return reply.code(201).send({
@@ -104,13 +104,12 @@ export async function webhookRoutes(fastify) {
     if (isPostgres) {
       const { queryAll } = await import('../../registry/db-postgres.js');
       rows = await queryAll(
-        `SELECT id, url, events, active, created_at, last_fired_at, failure_count FROM webhooks WHERE org_id=$1 ORDER BY created_at DESC`,
-        [request.orgId]
+        `SELECT id, url, events, active, created_at, last_fired_at, failure_count FROM webhooks ORDER BY created_at DESC`
       );
     } else {
       rows = getDb().prepare(
-        `SELECT id, url, events, active, created_at, last_fired_at, failure_count FROM webhooks WHERE org_id = ? ORDER BY created_at DESC`
-      ).all(request.orgId);
+        `SELECT id, url, events, active, created_at, last_fired_at, failure_count FROM webhooks ORDER BY created_at DESC`
+      ).all();
     }
     return reply.send({ webhooks: rows.map(toWebhookDto) });
   });
@@ -125,13 +124,13 @@ export async function webhookRoutes(fastify) {
     if (isPostgres) {
       const { queryOne } = await import('../../registry/db-postgres.js');
       row = await queryOne(
-        `SELECT id, url, events, active, created_at, last_fired_at, failure_count FROM webhooks WHERE id=$1 AND org_id=$2`,
-        [request.params.id, request.orgId]
+        `SELECT id, url, events, active, created_at, last_fired_at, failure_count FROM webhooks WHERE id=$1`,
+        [request.params.id]
       );
     } else {
       row = getDb().prepare(
-        `SELECT id, url, events, active, created_at, last_fired_at, failure_count FROM webhooks WHERE id = ? AND org_id = ?`
-      ).get(request.params.id, request.orgId);
+        `SELECT id, url, events, active, created_at, last_fired_at, failure_count FROM webhooks WHERE id = ?`
+      ).get(request.params.id);
     }
     if (!row) return reply.code(404).send({ error: `Webhook ${request.params.id} not found` });
     return reply.send(toWebhookDto(row));
@@ -156,9 +155,9 @@ export async function webhookRoutes(fastify) {
     let existing;
     if (isPostgres) {
       const { queryOne } = await import('../../registry/db-postgres.js');
-      existing = await queryOne(`SELECT id FROM webhooks WHERE id=$1 AND org_id=$2`, [id, request.orgId]);
+      existing = await queryOne(`SELECT id FROM webhooks WHERE id=$1`, [id]);
     } else {
-      existing = getDb().prepare(`SELECT id FROM webhooks WHERE id = ? AND org_id = ?`).get(id, request.orgId);
+      existing = getDb().prepare(`SELECT id FROM webhooks WHERE id = ?`).get(id);
     }
     if (!existing) return reply.code(404).send({ error: `Webhook ${id} not found` });
 
@@ -216,13 +215,13 @@ export async function webhookRoutes(fastify) {
     let exists;
     if (isPostgres) {
       const { queryOne, query } = await import('../../registry/db-postgres.js');
-      exists = await queryOne(`SELECT id FROM webhooks WHERE id=$1 AND org_id=$2`, [webhookId, request.orgId]);
+      exists = await queryOne(`SELECT id FROM webhooks WHERE id=$1`, [webhookId]);
       if (!exists) return reply.code(404).send({ error: `Webhook ${webhookId} not found` });
       await query(`DELETE FROM webhook_deliveries WHERE webhook_id=$1`, [webhookId]);
       await query(`DELETE FROM webhooks WHERE id=$1`, [webhookId]);
     } else {
       const db = getDb();
-      exists = db.prepare(`SELECT id FROM webhooks WHERE id = ? AND org_id = ?`).get(webhookId, request.orgId);
+      exists = db.prepare(`SELECT id FROM webhooks WHERE id = ?`).get(webhookId);
       if (!exists) return reply.code(404).send({ error: `Webhook ${webhookId} not found` });
       db.transaction(() => {
         db.prepare(`DELETE FROM webhook_deliveries WHERE webhook_id = ?`).run(webhookId);
@@ -244,26 +243,26 @@ export async function webhookRoutes(fastify) {
     let row;
     if (isPostgres) {
       const { queryOne } = await import('../../registry/db-postgres.js');
-      row = await queryOne(`SELECT id, url FROM webhooks WHERE id=$1 AND org_id=$2`, [webhookId, request.orgId]);
+      row = await queryOne(`SELECT id, url FROM webhooks WHERE id=$1`, [webhookId]);
     } else {
-      row = getDb().prepare(`SELECT id, url FROM webhooks WHERE id = ? AND org_id = ?`).get(webhookId, request.orgId);
+      row = getDb().prepare(`SELECT id, url FROM webhooks WHERE id = ?`).get(webhookId);
     }
     if (!row) return reply.code(404).send({ error: `Webhook ${webhookId} not found` });
 
     const deliveryId = randomUUID();
     const now        = Date.now();
-    const payload    = JSON.stringify({ eventType: 'ping', orgId: request.orgId, timestamp: now, data: {} });
+    const payload    = JSON.stringify({ eventType: 'ping', timestamp: now, data: {} });
 
     if (isPostgres) {
       const { query } = await import('../../registry/db-postgres.js');
       await query(
-        `INSERT INTO webhook_deliveries (id, webhook_id, org_id, event_type, payload, status, attempts, created_at) VALUES ($1,$2,$3,'ping',$4,'pending',0,$5)`,
-        [deliveryId, row.id, request.orgId, payload, now]
+        `INSERT INTO webhook_deliveries (id, webhook_id, org_id, event_type, payload, status, attempts, created_at) VALUES ($1,$2,'default','ping',$3,'pending',0,$4)`,
+        [deliveryId, row.id, payload, now]
       );
     } else {
       getDb().prepare(
-        `INSERT INTO webhook_deliveries (id, webhook_id, org_id, event_type, payload, status, attempts, created_at) VALUES (?, ?, ?, 'ping', ?, 'pending', 0, ?)`
-      ).run(deliveryId, row.id, request.orgId, payload, now);
+        `INSERT INTO webhook_deliveries (id, webhook_id, org_id, event_type, payload, status, attempts, created_at) VALUES (?, ?, 'default', 'ping', ?, 'pending', 0, ?)`
+      ).run(deliveryId, row.id, payload, now);
     }
 
     return reply.code(202).send({ deliveryId, message: 'Ping queued for delivery' });
@@ -289,7 +288,7 @@ export async function webhookRoutes(fastify) {
     let webhook, rows;
     if (isPostgres) {
       const { queryOne, queryAll } = await import('../../registry/db-postgres.js');
-      webhook = await queryOne(`SELECT id FROM webhooks WHERE id=$1 AND org_id=$2`, [id, request.orgId]);
+      webhook = await queryOne(`SELECT id FROM webhooks WHERE id=$1`, [id]);
       if (!webhook) return reply.code(404).send({ error: `Webhook ${id} not found` });
       if (status && status !== 'all') {
         rows = await queryAll(
@@ -304,7 +303,7 @@ export async function webhookRoutes(fastify) {
       }
     } else {
       const db = getDb();
-      webhook = db.prepare(`SELECT id FROM webhooks WHERE id = ? AND org_id = ?`).get(id, request.orgId);
+      webhook = db.prepare(`SELECT id FROM webhooks WHERE id = ?`).get(id);
       if (!webhook) return reply.code(404).send({ error: `Webhook ${id} not found` });
       if (status && status !== 'all') {
         rows = db.prepare(
