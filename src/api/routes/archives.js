@@ -11,7 +11,6 @@ import { join } from 'path';
 import { getDb, encrypt, isPostgres } from '../../registry/db.js';
 import { findActorById, createActor, updateActorStatus } from '../../registry/actorRepo.js';
 import { cancelAllPendingForActor } from '../../registry/scheduledEventRepo.js';
-import { adminMiddleware } from '../middleware/auth.js';
 import { evictFromHotRegistry } from '../../runtime/actorManager.js';
 
 const ARCHIVE_DIR = join(process.env.STATEKEEP_DATA_DIR ?? '/opt/statekeep/data', 'archives');
@@ -143,7 +142,6 @@ export async function archiveRoutes(fastify) {
   // waiting 24 h for natural GC to trigger archival.
   if (process.env.NODE_ENV !== 'production') {
     fastify.post('/v1/admin/actors/:id/force-archive', {
-      preHandler: adminMiddleware,
       schema: {
         params: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
       },

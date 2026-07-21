@@ -9,13 +9,11 @@
 import { pathToFileURL } from 'url';
 import { resolve }       from 'path';
 import { getWorkerPool } from '../../runtime/workerPool.js';
-import { adminMiddleware } from '../middleware/auth.js';
 import { setGlobalRegistry, loadRegistry } from '../../runtime/implementationRegistry.js';
 
 export async function adminRoutes(fastify) {
 
   fastify.post('/v1/admin/workers/:type/restart', {
-    preHandler: adminMiddleware,
     schema: {
       params: {
         type: 'object',
@@ -52,7 +50,6 @@ export async function adminRoutes(fastify) {
   // Cache-bust: append ?t=timestamp to the file URL so Node.js re-executes the module.
   // On failure: old registry stays active — safe rollback, returns 500.
   fastify.post('/v1/admin/setup/reload', {
-    preHandler: adminMiddleware,
     schema: { hide: true },
   }, async (request, reply) => {
     const registryPath = process.env.STATEKEEP_REGISTRY_PATH;

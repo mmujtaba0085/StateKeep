@@ -6,7 +6,6 @@
 
 import { getDb, isPostgres } from '../../registry/db.js';
 import { getEngine } from '../../ffi/engine.js';
-import { adminMiddleware } from '../middleware/auth.js';
 import { getWorkerPool } from '../../runtime/workerPool.js';
 
 const STALE_THRESHOLD_MS = 2 * 60 * 1000;   // 2 minutes
@@ -44,7 +43,7 @@ export async function healthRoutes(fastify) {
 
     return reply.send({
       status:    dbStatus === 'ok' ? 'ok' : 'degraded',
-      engine:    eng.available ? 'real' : 'fallback',
+      engine:    eng.mode,
       db:        dbStatus,
       uptime:    Math.floor(process.uptime()),
       timestamp: new Date().toISOString(),
@@ -101,9 +100,8 @@ export async function healthRoutes(fastify) {
     return reply.send(pool.getQueueStats());
   });
 
-  // ── DELETE /v1/health/workers/:workerId (admin) ───────────────────────────
+  // ── DELETE /v1/health/workers/:workerId ───────────────────────────────────
   fastify.delete('/v1/health/workers/:workerId', {
-    preHandler: adminMiddleware,
     schema: {
       params: {
         type: 'object',

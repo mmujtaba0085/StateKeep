@@ -5,7 +5,7 @@
  * Routes actor operations to a stable worker (hash by actorId).
  * Handles worker crash/restart transparently.
  *
- * Four-tier priority queue per worker slot, with per-org fairness:
+ * Four-tier priority queue per worker slot:
  *   urgent — dashboard manual actions (get state, send event, terminate)
  *   high   — dashboard / interactive user actions  (X-Priority: high)
  *   normal — standard API calls (default)
@@ -18,14 +18,11 @@
  *     every round, then the normal 3H:2N:1L cycle runs alongside it.
  *   - Burst timer resets to null the moment the urgent queue drains.
  *
- * Within each tier, per-org round-robin prevents one org's backlog from
- * starving another org's requests at the same priority level.
- *
  * Tier round-robin (non-burst): 1U(post-burst) : 3H : 2N : 1L per round.
  * When lower tiers are empty the upper tiers drain freely (no starvation).
  *
- * Event coalescing: consecutive EVENT messages for the same actorId from the
- * same org queue are batched into a single BATCH_EVENTS pass, reducing async
+ * Event coalescing: consecutive EVENT messages for the same actorId in the
+ * same tier queue are batched into a single BATCH_EVENTS pass, reducing async
  * round-trips under backlog conditions.
  */
 
@@ -45,46 +42,10 @@ const NORMAL_PER_ROUND  = 2;
 const MAX_COALESCE      = 8;     // max consecutive EVENTs to batch per worker pass
 const URGENT_BURST_MS   = 5_000; // exclusive urgent mode window before interleaving
 
-// ── Per-tier, per-org queue helpers ──────────────────────────────────────────
+// ── Flat queue helpers ────────────────────────────────────────────────────────
 
-function enqueueItem(queues, orgs, orgId, item) {
-  if (!queues.has(orgId)) {
-    queues.set(orgId, []);
-    orgs.push(orgId);
-  }
-  queues.get(orgId).push(item);
-}
-
-/**
- * Dequeue the next item from a tier using round-robin across orgs.
- * Returns null when all org queues in the tier are empty.
- */
-function dequeueItem(queues, orgs, cursorRef) {
-  if (orgs.length === 0) return null;
-  for (let i = 0; i < orgs.length; i++) {
-    const idx   = (cursorRef.value + i) % orgs.length;
-    const orgId = orgs[idx];
-    const q     = queues.get(orgId);
-    if (q && q.length > 0) {
-      cursorRef.value = (idx + 1) % orgs.length;
-      return q.shift();
-    }
-  }
-  return null;
-}
-
-function hasTierItems(queues) {
-  for (const q of queues.values()) {
-    if (q.length > 0) return true;
-  }
-  return false;
-}
-
-function tierDepth(queues) {
-  let n = 0;
-  for (const q of queues.values()) n += q.length;
-  return n;
-}
+function enqueueItem(queue, item) { queue.push(item); }
+function dequeueItem(queue)       { return queue.length ? queue.shift() : null; }
 
 // ── WorkerPool ────────────────────────────────────────────────────────────────
 
@@ -111,23 +72,11 @@ export class WorkerPool {
       ready:       false,
       inFlight:    false,
 
-      // Per-tier, per-org queues: Map<orgId, item[]>
-      urgentQueues: new Map(),
-      highQueues:   new Map(),
-      normalQueues: new Map(),
-      lowQueues:    new Map(),
-
-      // Ordered list of org IDs seen per tier (insertion order = round-robin start)
-      urgentOrgs: [],
-      highOrgs:   [],
-      normalOrgs: [],
-      lowOrgs:    [],
-
-      // Round-robin org cursor per tier
-      urgentOrgIdx: { value: 0 },
-      highOrgIdx:   { value: 0 },
-      normalOrgIdx: { value: 0 },
-      lowOrgIdx:    { value: 0 },
+      // Flat per-tier queues
+      urgentQueue: [],
+      highQueue:   [],
+      normalQueue: [],
+      lowQueue:    [],
 
       // Tier-level round-robin counters
       roundHigh:   0,
@@ -203,16 +152,10 @@ export class WorkerPool {
       }
     }
     slot.pending.clear();
-    for (const queues of [slot.urgentQueues, slot.highQueues, slot.normalQueues, slot.lowQueues]) {
-      for (const q of queues.values()) {
-        for (const item of q) { clearTimeout(item.timer); item.reject(err); }
-      }
-      queues.clear();
+    for (const queue of [slot.urgentQueue, slot.highQueue, slot.normalQueue, slot.lowQueue]) {
+      for (const item of queue) { clearTimeout(item.timer); item.reject(err); }
+      queue.length = 0;
     }
-    slot.urgentOrgs = [];
-    slot.highOrgs   = [];
-    slot.normalOrgs = [];
-    slot.lowOrgs    = [];
     slot.burstStart = null;
     slot.urgentServedThisRound = false;
     slot.inFlight   = false;
@@ -226,18 +169,15 @@ export class WorkerPool {
    * Post-burst (>5 s of continuous urgent):
    *   Urgent gets 1 slot at start of each round, then 3H:2N:1L proceeds normally.
    * No urgent items:
-   *   Normal 3H:2N:1L weighted round-robin with per-org fairness.
+   *   Normal 3H:2N:1L weighted round-robin.
    *
-   * Within every tier, round-robins across org queues so no org can
-   * starve another org's requests at the same priority level.
-   *
-   * Coalesces consecutive EVENTs for the same actorId+orgId into BATCH_EVENTS.
+   * Coalesces consecutive EVENTs for the same actorId into BATCH_EVENTS.
    */
   _scheduleNext(slot) {
-    const U = hasTierItems(slot.urgentQueues);
-    const H = hasTierItems(slot.highQueues);
-    const N = hasTierItems(slot.normalQueues);
-    const L = hasTierItems(slot.lowQueues);
+    const U = slot.urgentQueue.length > 0;
+    const H = slot.highQueue.length > 0;
+    const N = slot.normalQueue.length > 0;
+    const L = slot.lowQueue.length > 0;
 
     if (!U && !H && !N && !L) return;
 
@@ -251,12 +191,12 @@ export class WorkerPool {
 
       if (burstActive) {
         // Exclusive burst: urgent only, everything else pauses
-        next = dequeueItem(slot.urgentQueues, slot.urgentOrgs, slot.urgentOrgIdx);
+        next = dequeueItem(slot.urgentQueue);
         if (next) tier = 'urgent';
       } else {
         // Post-burst: urgent gets 1 slot per round before H:N:L
         if (!slot.urgentServedThisRound) {
-          next = dequeueItem(slot.urgentQueues, slot.urgentOrgs, slot.urgentOrgIdx);
+          next = dequeueItem(slot.urgentQueue);
           if (next) { tier = 'urgent'; slot.urgentServedThisRound = true; }
         }
       }
@@ -268,27 +208,27 @@ export class WorkerPool {
     // H:N:L round-robin — skipped entirely during burst exclusive mode
     if (!next && !burstActive) {
       if (H && slot.roundHigh < HIGH_PER_ROUND) {
-        next = dequeueItem(slot.highQueues, slot.highOrgs, slot.highOrgIdx);
+        next = dequeueItem(slot.highQueue);
         if (next) { slot.roundHigh++; tier = 'high'; }
       }
 
       if (!next && N && slot.roundNormal < NORMAL_PER_ROUND) {
-        next = dequeueItem(slot.normalQueues, slot.normalOrgs, slot.normalOrgIdx);
+        next = dequeueItem(slot.normalQueue);
         if (next) { slot.roundNormal++; tier = 'normal'; }
       }
 
       if (!next) {
         // Round complete: serve low if available, else drain whatever has items.
         if (L) {
-          next = dequeueItem(slot.lowQueues, slot.lowOrgs, slot.lowOrgIdx);
+          next = dequeueItem(slot.lowQueue);
           if (next) tier = 'low';
         }
         if (!next && H) {
-          next = dequeueItem(slot.highQueues, slot.highOrgs, slot.highOrgIdx);
+          next = dequeueItem(slot.highQueue);
           if (next) tier = 'high';
         }
         if (!next && N) {
-          next = dequeueItem(slot.normalQueues, slot.normalOrgs, slot.normalOrgIdx);
+          next = dequeueItem(slot.normalQueue);
           if (next) tier = 'normal';
         }
         slot.roundHigh             = 0;
@@ -304,24 +244,22 @@ export class WorkerPool {
     slot.stats.waitMs[tier]  += waitMs;
     slot.stats.waitCnt[tier]++;
 
-    // Coalesce consecutive EVENTs for same actorId from the same org queue
+    // Coalesce consecutive EVENTs for same actorId from the same tier queue
     if (next.message.type === 'EVENT') {
-      const actorId  = next.message.actorId;
-      const orgId    = next.orgId;
-      const queues   =
-        tier === 'urgent' ? slot.urgentQueues :
-        tier === 'high'   ? slot.highQueues   :
-        tier === 'normal' ? slot.normalQueues : slot.lowQueues;
-      const orgQueue = queues.get(orgId);
-      const batch    = [next];
+      const actorId = next.message.actorId;
+      const queue   =
+        tier === 'urgent' ? slot.urgentQueue :
+        tier === 'high'   ? slot.highQueue   :
+        tier === 'normal' ? slot.normalQueue : slot.lowQueue;
+      const batch   = [next];
 
       while (
         batch.length < MAX_COALESCE &&
-        orgQueue && orgQueue.length > 0 &&
-        orgQueue[0].message.type === 'EVENT' &&
-        orgQueue[0].message.actorId === actorId
+        queue.length > 0 &&
+        queue[0].message.type === 'EVENT' &&
+        queue[0].message.actorId === actorId
       ) {
-        const extra = orgQueue.shift();
+        const extra = queue.shift();
         const ew = Date.now() - extra.queuedAt;
         slot.stats.served[tier]++;
         slot.stats.waitMs[tier]  += ew;
@@ -382,8 +320,8 @@ export class WorkerPool {
         slot.pending.set(id, { resolve, reject, timer });
         slot.worker.postMessage({ ...message, id });
       } else {
-        const item = { id, message, resolve, reject, timer, queuedAt: Date.now(), orgId: '_system' };
-        enqueueItem(slot.normalQueues, slot.normalOrgs, '_system', item);
+        const item = { id, message, resolve, reject, timer, queuedAt: Date.now() };
+        enqueueItem(slot.normalQueue, item);
       }
     });
   }
@@ -394,10 +332,9 @@ export class WorkerPool {
    * @param {object}  message
    * @param {object}  [opts]
    * @param {string}  [opts.priority='normal']  'urgent' | 'high' | 'normal' | 'low'
-   * @param {string}  [opts.orgId='_system']    org namespace for fairness isolation
    * @returns {Promise}
    */
-  send(actorId, message, { priority = 'normal', orgId = '_system' } = {}) {
+  send(actorId, message, { priority = 'normal' } = {}) {
     const slot = this.workers[this._slotFor(actorId)];
     if (!slot) throw new Error('No worker available');
 
@@ -411,11 +348,9 @@ export class WorkerPool {
       const queuedAt = Date.now();
       const timer = setTimeout(() => {
         slot.pending.delete(id);
-        for (const queues of [slot.urgentQueues, slot.highQueues, slot.normalQueues, slot.lowQueues]) {
-          for (const q of queues.values()) {
-            const idx = q.findIndex(i => i.id === id);
-            if (idx !== -1) { q.splice(idx, 1); break; }
-          }
+        for (const queue of [slot.urgentQueue, slot.highQueue, slot.normalQueue, slot.lowQueue]) {
+          const idx = queue.findIndex(i => i.id === id);
+          if (idx !== -1) { queue.splice(idx, 1); break; }
         }
         reject(new Error(`Worker timeout for ${message.type} on ${actorId}`));
       }, TIMEOUT_MS);
@@ -429,16 +364,12 @@ export class WorkerPool {
         slot.pending.set(id, { resolve, reject, timer });
         slot.worker.postMessage({ ...message, id });
       } else {
-        const item   = { id, message, resolve, reject, timer, queuedAt, orgId };
-        const queues =
-          tier === 'urgent' ? slot.urgentQueues :
-          tier === 'high'   ? slot.highQueues   :
-          tier === 'low'    ? slot.lowQueues     : slot.normalQueues;
-        const orgs   =
-          tier === 'urgent' ? slot.urgentOrgs :
-          tier === 'high'   ? slot.highOrgs   :
-          tier === 'low'    ? slot.lowOrgs    : slot.normalOrgs;
-        enqueueItem(queues, orgs, orgId, item);
+        const item  = { id, message, resolve, reject, timer, queuedAt };
+        const queue =
+          tier === 'urgent' ? slot.urgentQueue :
+          tier === 'high'   ? slot.highQueue   :
+          tier === 'low'    ? slot.lowQueue    : slot.normalQueue;
+        enqueueItem(queue, item);
       }
     });
   }
@@ -450,10 +381,10 @@ export class WorkerPool {
       inFlight: slot.inFlight,
       burstActive: slot.burstStart !== null && (Date.now() - slot.burstStart) < URGENT_BURST_MS,
       queued: {
-        urgent: tierDepth(slot.urgentQueues),
-        high:   tierDepth(slot.highQueues),
-        normal: tierDepth(slot.normalQueues),
-        low:    tierDepth(slot.lowQueues),
+        urgent: slot.urgentQueue.length,
+        high:   slot.highQueue.length,
+        normal: slot.normalQueue.length,
+        low:    slot.lowQueue.length,
       },
       served: { ...slot.stats.served },
       avgWaitMs: {
@@ -470,10 +401,10 @@ export class WorkerPool {
     const totWaitCnt = { urgent: 0, high: 0, normal: 0, low: 0 };
 
     for (const slot of this.workers) {
-      totQueued.urgent += tierDepth(slot.urgentQueues);
-      totQueued.high   += tierDepth(slot.highQueues);
-      totQueued.normal += tierDepth(slot.normalQueues);
-      totQueued.low    += tierDepth(slot.lowQueues);
+      totQueued.urgent += slot.urgentQueue.length;
+      totQueued.high   += slot.highQueue.length;
+      totQueued.normal += slot.normalQueue.length;
+      totQueued.low    += slot.lowQueue.length;
       for (const t of ['urgent', 'high', 'normal', 'low']) {
         totServed[t]  += slot.stats.served[t];
         totWaitMs[t]  += slot.stats.waitMs[t];
@@ -541,7 +472,7 @@ export function getWorkerPool() {
     const legacyCount   = (maxActors > 0 && ACTORS_PER_WORKER > 0) ? Math.ceil(maxActors / ACTORS_PER_WORKER) : 0;
     const count         = explicitCount || Math.max(cpuDefault, legacyCount);
     _pool = new WorkerPool(count);
-    console.log(`[workerPool] Started ${count} actor workers (cpu=${os.cpus().length}, 1U(burst 5s):${HIGH_PER_ROUND}H:${NORMAL_PER_ROUND}N:1L per-org round-robin)`);
+    console.log(`[workerPool] Started ${count} actor workers (cpu=${os.cpus().length}, 1U(burst 5s):${HIGH_PER_ROUND}H:${NORMAL_PER_ROUND}N:1L round-robin)`);
   }
   return _pool;
 }

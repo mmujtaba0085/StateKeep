@@ -7,7 +7,6 @@
  * GET    /v1/scheduled               — Admin: list all pending scheduled events
  */
 
-import { adminMiddleware }                                       from '../middleware/auth.js';
 import { findActorById }                                        from '../../registry/actorRepo.js';
 import {
   createScheduledEvent,
@@ -166,9 +165,8 @@ export async function scheduledRoutes(fastify) {
     return reply.send({ count: scheduled.length, scheduled });
   });
 
-  // ── GET /v1/scheduled/dead-letter (admin) ─────────────────────────────────
+  // ── GET /v1/scheduled/dead-letter ─────────────────────────────────────────
   fastify.get('/v1/scheduled/dead-letter', {
-    preHandler: adminMiddleware,
     schema: {
       querystring: {
         type: 'object',

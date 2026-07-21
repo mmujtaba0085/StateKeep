@@ -26,7 +26,6 @@ import { getMaxTStar } from '../registry/changepointRepo.js';
 import { seedEngineRegistry, sendEvent } from '../runtime/actorManager.js';
 import { getGlobalRegistry, setGlobalRegistry, loadRegistry } from '../runtime/implementationRegistry.js';
 import { startActionJobWorker } from '../runtime/actionJobWorker.js';
-import { authMiddleware } from './middleware/auth.js';
 import { healthRoutes } from './routes/health.js';
 import { metricsRoutes } from './routes/metrics.js';
 import { actorRoutes } from './routes/actors.js';
@@ -38,8 +37,6 @@ import { archiveRoutes } from './routes/archives.js';
 import { webhookRoutes } from './routes/webhooks.js';
 import { adminRoutes } from './routes/admin.js';
 import { internalRoutes } from './routes/internal.js';
-import { keysRoutes } from './routes/keys.js';
-import { orgsRoutes } from './routes/orgs.js';
 import { websocketRoutes } from './websocket.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -123,9 +120,6 @@ fastify.addHook('onRequest', async (req, reply) => {
   reply.header('X-Request-Id', id);
 });
 
-// ── Set orgId on every request ────────────────────────────────────────────────
-fastify.addHook('preHandler', authMiddleware);
-
 // ── Static dashboard ──────────────────────────────────────────────────────────
 // No caching for dashboard JS/JSX — every deploy should be visible immediately.
 await fastify.register(FastifyStatic, {
@@ -148,8 +142,6 @@ await fastify.register(archiveRoutes);
 await fastify.register(webhookRoutes);
 await fastify.register(adminRoutes);
 await fastify.register(internalRoutes);
-await fastify.register(keysRoutes);
-await fastify.register(orgsRoutes);
 await fastify.register(websocketRoutes);
 
 // ── OpenAPI JSON alias (/openapi.json → /docs/json) ──────────────────────────
