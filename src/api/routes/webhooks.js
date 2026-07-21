@@ -80,11 +80,11 @@ export async function webhookRoutes(fastify) {
     if (isPostgres) {
       const { query } = await import('../../registry/db-postgres.js');
       await query(
-        `INSERT INTO webhooks (id, org_id, url, secret, events, active, created_at) VALUES ($1,'default',$2,$3,$4,true,$5)`,
+        `INSERT INTO webhooks (id, url, secret, events, active, created_at) VALUES ($1,$2,$3,$4,true,$5)`,
         [id, url, encryptedSecret, eventsJson, now]
       );
     } else {
-      getDb().prepare(`INSERT INTO webhooks (id, org_id, url, secret, events, active, created_at) VALUES (?, 'default', ?, ?, ?, 1, ?)`
+      getDb().prepare(`INSERT INTO webhooks (id, url, secret, events, active, created_at) VALUES (?, ?, ?, ?, 1, ?)`
       ).run(id, url, encryptedSecret, eventsJson, now);
     }
 
@@ -256,12 +256,12 @@ export async function webhookRoutes(fastify) {
     if (isPostgres) {
       const { query } = await import('../../registry/db-postgres.js');
       await query(
-        `INSERT INTO webhook_deliveries (id, webhook_id, org_id, event_type, payload, status, attempts, created_at) VALUES ($1,$2,'default','ping',$3,'pending',0,$4)`,
+        `INSERT INTO webhook_deliveries (id, webhook_id, event_type, payload, status, attempts, created_at) VALUES ($1,$2,'ping',$3,'pending',0,$4)`,
         [deliveryId, row.id, payload, now]
       );
     } else {
       getDb().prepare(
-        `INSERT INTO webhook_deliveries (id, webhook_id, org_id, event_type, payload, status, attempts, created_at) VALUES (?, ?, 'default', 'ping', ?, 'pending', 0, ?)`
+        `INSERT INTO webhook_deliveries (id, webhook_id, event_type, payload, status, attempts, created_at) VALUES (?, ?, 'ping', ?, 'pending', 0, ?)`
       ).run(deliveryId, row.id, payload, now);
     }
 

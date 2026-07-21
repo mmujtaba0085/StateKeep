@@ -34,6 +34,8 @@ CREATE TABLE IF NOT EXISTS actors (
     history_fingerprint  TEXT NOT NULL DEFAULT '0',
     region_fingerprints  TEXT,
     state_entry_id       BIGINT NOT NULL DEFAULT 0,
+    logical_start_tick   BIGINT NOT NULL DEFAULT 0,
+    last_event_tick      BIGINT,
     status               TEXT NOT NULL DEFAULT 'active'
                          CHECK(status IN ('active','migrating','terminated','archived','needs_rescue')),
     created_at           BIGINT NOT NULL,

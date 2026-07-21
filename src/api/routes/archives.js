@@ -186,15 +186,15 @@ export async function archiveRoutes(fastify) {
       if (isPostgres) {
         const { query } = await import('../../registry/db-postgres.js');
         await query(
-          `INSERT INTO actor_archives (actor_id, org_id, machine_id, archived_at, file_path, state_value, definition_id)
-           VALUES ($1,'default',$2,$3,$4,$5,$6) ON CONFLICT (actor_id) DO UPDATE SET archived_at=EXCLUDED.archived_at, file_path=EXCLUDED.file_path, state_value=EXCLUDED.state_value`,
+          `INSERT INTO actor_archives (actor_id, machine_id, archived_at, file_path, state_value, definition_id)
+           VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (actor_id) DO UPDATE SET archived_at=EXCLUDED.archived_at, file_path=EXCLUDED.file_path, state_value=EXCLUDED.state_value`,
           [actor.id, machineId, now, filename, actor.stateValue ? JSON.stringify(actor.stateValue) : null, actor.definitionId]
         );
       } else {
         getDb().prepare(`
           INSERT OR REPLACE INTO actor_archives
-            (actor_id, org_id, machine_id, archived_at, file_path, state_value, definition_id)
-          VALUES (?, 'default', ?, ?, ?, ?, ?)
+            (actor_id, machine_id, archived_at, file_path, state_value, definition_id)
+          VALUES (?, ?, ?, ?, ?, ?)
         `).run(
           actor.id,
           machineId,
