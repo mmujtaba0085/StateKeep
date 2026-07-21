@@ -70,7 +70,7 @@ export function bigIntToHex(bi) {
 
 /**
  * Convert a stored fingerprint hex string to BigInt for engine calls.
- * The '0' sentinel means "no events processed" and maps to FNV32_OFFSET.
+ * The '0' sentinel means "no events processed" and maps to FNV64_OFFSET.
  *
  * Use hexToBigInt when you want 0n as an explicit wildcard (e.g. for
  * apv_register_changepoint when no historyPath is provided).
