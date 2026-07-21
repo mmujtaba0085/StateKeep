@@ -93,10 +93,10 @@ export function getDb() {
   _db.pragma('temp_store   = MEMORY');
   _db.pragma('wal_autocheckpoint = 1000');
 
-  // Bootstrap schema
+  // Bootstrap schema — wrapped in a transaction so concurrent fresh-DB
+  // processes don't see a partially-initialised schema mid-exec.
   const schema = readFileSync(join(__dirname, 'schema.sql'), 'utf8');
-  // Execute statement by statement (better-sqlite3 exec handles multiple)
-  _db.exec(schema);
+  _db.transaction(() => _db.exec(schema))();
 
   // ── Live migrations (applied to existing databases) ──────────────────────
   // Each migration is guarded by INSERT OR IGNORE into schema_migrations so it

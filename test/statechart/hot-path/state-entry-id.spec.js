@@ -10,15 +10,15 @@ const defId = randomUUID();
 await (async () => {
   const db = getDb();
   db.prepare(
-    `INSERT OR IGNORE INTO definitions (id, machine_id, org_id, definition_json, deployed_at, status, created_at)
-     VALUES (?, ?, 'default', '{}', 0, 'active', 0)`
+    `INSERT OR IGNORE INTO definitions (id, machine_id, definition_json, deployed_at, status, created_at)
+     VALUES (?, ?, '{}', 0, 'active', 0)`
   ).run(defId, defId);
 })();
 
 test('createActor stores stateEntryId', async () => {
   const id = randomUUID();
   await createActor({
-    id, definitionId: defId, orgId: 'default',
+    id, definitionId: defId,
     stateValue: 'idle', context: {}, logicalStartTick: 0,
     historyFingerprint: '0', stateEntryId: 7,
   });
@@ -29,7 +29,7 @@ test('createActor stores stateEntryId', async () => {
 test('updateActorState persists stateEntryId', async () => {
   const id = randomUUID();
   await createActor({
-    id, definitionId: defId, orgId: 'default',
+    id, definitionId: defId,
     stateValue: 'idle', context: {}, logicalStartTick: 0,
     historyFingerprint: '0', stateEntryId: 0,
   });
