@@ -51,16 +51,21 @@ CREATE INDEX IF NOT EXISTS idx_actors_rescue  ON actors(status) WHERE status = '
 
 -- ── Event log ─────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS events (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    actor_id        TEXT NOT NULL REFERENCES actors(id),
-    event_type      TEXT NOT NULL,
-    event_payload   BLOB,
-    tick            INTEGER NOT NULL,
-    processed_at    INTEGER NOT NULL
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    actor_id         TEXT NOT NULL REFERENCES actors(id),
+    event_type       TEXT NOT NULL,
+    event_payload    BLOB,
+    tick             INTEGER NOT NULL,
+    processed_at     INTEGER NOT NULL,
+    idempotency_key  TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_events_actor        ON events(actor_id);
 CREATE INDEX IF NOT EXISTS idx_events_processed_at ON events(processed_at);
+CREATE INDEX IF NOT EXISTS idx_events_actor_cursor ON events(actor_id, id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_events_idempotency
+  ON events(actor_id, idempotency_key)
+  WHERE idempotency_key IS NOT NULL;
 
 -- ── Deployments ───────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS deployments (
