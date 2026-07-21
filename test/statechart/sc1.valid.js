@@ -552,6 +552,7 @@ describe('SC1-L: Initial context is preserved through transitions', () => {
     await send(id, 'SUBMIT');
     await send(id, 'PASS');
     await send(id, 'DISBURSE');
+    await new Promise(r => setTimeout(r, 100)); // wait for event writes to flush
 
     const events = (await get(`/v1/actors/${id}/events`)).body;
     assert.ok(events.total >= 3, `Expected >= 3 events, got ${events.total}`);

@@ -9,7 +9,7 @@
  * Skips actors that are terminated, archived, or needs_rescue.
  */
 
-import { getDb, encrypt } from '../registry/db.js';
+import { getDb, encrypt, isPostgres } from '../registry/db.js';
 import { findDueEvents, markFired, markFailed, markDispatchFailed, scheduleRetryOrFail } from '../registry/scheduledEventRepo.js';
 import { startHeartbeat } from './heartbeat.js';
 import { findActorById } from '../registry/actorRepo.js';
@@ -22,52 +22,63 @@ const SKIP_STATUSES = new Set(['terminated', 'archived', 'needs_rescue']);
 console.log('[scheduler-worker] Starting...');
 
 await engineReady;
-getDb();   // bootstrap DB + run migrations
+
+if (isPostgres) {
+  const { bootstrapSchema } = await import('../registry/db-postgres.js');
+  await bootstrapSchema();
+} else {
+  getDb();
+}
+
 startHeartbeat('scheduler');
 
 async function tick() {
   const now  = Date.now();
-  const rows = findDueEvents(now);
+  const rows = await findDueEvents(now);
 
   for (const row of rows) {
     // Check actor before claiming — retry or permanently fail if actor is gone/terminal
-    const actor = findActorById(row.actor_id);
+    const actor = await findActorById(row.actorId ?? row.actor_id);
     if (!actor || SKIP_STATUSES.has(actor.status)) {
       const reason = `actor ${actor ? actor.status : 'not found'}`;
-      scheduleRetryOrFail(row, reason);
+      await scheduleRetryOrFail(row, reason);
       continue;
     }
 
     // Claim atomically — markFired returns 0 if another worker beat us
-    const claimed = markFired(row.id, now);
+    const claimed = await markFired(row.id, now);
     if (!claimed) continue;
 
     try {
+      const eng       = getEngine();
+      const clockTick = eng.available ? Number(eng.clockTick()) : Date.now();
+      const event     = { type: row.eventType ?? row.event_type, ...(row.payload ?? {}) };
 
-      const eng        = getEngine();
-      const clockTick  = eng.available ? Number(eng.clockTick()) : Date.now();
-      const event      = { type: row.event_type, ...(row.payload ?? {}) };
-
-      await sendEvent(row.actor_id, event, clockTick);
+      await sendEvent(row.actorId ?? row.actor_id, event, clockTick);
 
       // Write SCHEDULED_EVENT_FIRED to event log
-      const db = getDb();
       const encPayload = row.payload
         ? encrypt(Buffer.from(JSON.stringify(row.payload)))
         : null;
-      db.prepare(`
-        INSERT INTO events (actor_id, org_id, event_type, event_payload, tick, processed_at)
-        VALUES (?, ?, 'SCHEDULED_EVENT_FIRED', ?, ?, ?)
-      `).run(row.actor_id, row.org_id, encPayload, clockTick, now);
+
+      if (isPostgres) {
+        const { query } = await import('../registry/db-postgres.js');
+        await query(
+          `INSERT INTO events (actor_id, org_id, event_type, event_payload, tick, processed_at) VALUES ($1,$2,'SCHEDULED_EVENT_FIRED',$3,$4,$5)`,
+          [row.actorId ?? row.actor_id, row.orgId ?? row.org_id, encPayload, clockTick, now]
+        );
+      } else {
+        getDb().prepare(
+          `INSERT INTO events (actor_id, org_id, event_type, event_payload, tick, processed_at) VALUES (?, ?, 'SCHEDULED_EVENT_FIRED', ?, ?, ?)`
+        ).run(row.actorId ?? row.actor_id, row.orgId ?? row.org_id, encPayload, clockTick, now);
+      }
 
     } catch (err) {
       const errMsg = err.message ?? String(err);
-      // markFired already transitioned to 'fired'; fall back to markDispatchFailed
-      // then schedule a retry from the current row (still has original retry_count)
-      markDispatchFailed(row.id, errMsg);
+      await markDispatchFailed(row.id, errMsg);
       // Re-fetch row to get current retry_count before retry decision
       const refreshed = { ...row, status: 'failed' };
-      scheduleRetryOrFail(refreshed, errMsg);
+      await scheduleRetryOrFail(refreshed, errMsg);
       console.warn(`[scheduler-worker] Scheduled event ${row.id} failed: ${errMsg}`);
     }
   }

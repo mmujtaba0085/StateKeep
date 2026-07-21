@@ -20,13 +20,13 @@ import {
   bigIntToHex,
   FNV_OFFSET,
 } from '../../src/ffi/hashUtils.js';
+import { updateRegionFingerprintsForTransition } from '../../src/runtime/statePaths.js';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 /** Simulate the JSON round-trip that insertParChangepoint / loadParChangepointsAfter do. */
 function serializeRegionHashes(regionHexMap) {
-  const arr = Object.values(regionHexMap);
-  return JSON.stringify(arr);
+  return JSON.stringify(regionHexMap);
 }
 
 function deserializeRegionHashes(jsonStr) {
@@ -38,40 +38,43 @@ function hexArrToBigInts(hexArr) {
   return hexArr.map(h => BigInt(`0x${h.padStart(16, '0')}`));
 }
 
+function storedRegionsToBigInts(jsonStr) {
+  const stored = JSON.parse(jsonStr);
+  return Array.isArray(stored) ? hexArrToBigInts(stored) : regionFingerprintsToArray(stored);
+}
+
 // ── SC11-P1: par_changepoints serialization round-trip ───────────────────────
 
 describe('SC11-P1: par_changepoints serialization round-trip', () => {
 
-  test('P1-1: region hash map serializes to JSON array and deserializes back', () => {
-    const rfp  = computeRegionHashes({ payment: ['PAY'], shipping: ['SELECT_SHIPPING'] });
+  test('P1-1: region hash map serializes to JSON object and deserializes back', () => {
+    const rfp  = computeRegionHashes({ 'active.payment': ['PAY'], 'active.shipping': ['SELECT_SHIPPING'] });
     const json = serializeRegionHashes(rfp);
-    const arr  = deserializeRegionHashes(json);
-    assert.ok(Array.isArray(arr), 'deserialized value is an array');
-    assert.equal(arr.length, 2);
-    for (const h of arr) {
+    const map  = deserializeRegionHashes(json);
+    assert.equal(typeof map, 'object', 'deserialized value is an object');
+    assert.equal(Object.keys(map).length, 2);
+    for (const h of Object.values(map)) {
       assert.equal(typeof h, 'string', 'each element is a hex string');
       assert.equal(h.length, 16, 'each element is 16 chars');
     }
   });
 
-  test('P1-2: round-tripped hex strings convert back to correct BigInts', () => {
-    const rfp     = computeRegionHashes({ payment: ['PAY'] });
+  test('P1-2: round-tripped path-keyed map keeps the raw region fingerprint', () => {
+    const rfp     = computeRegionHashes({ 'active.payment': ['PAY'] });
     const json    = serializeRegionHashes(rfp);
-    const arr     = deserializeRegionHashes(json);
-    const bigInts = hexArrToBigInts(arr);
+    const map     = deserializeRegionHashes(json);
 
-    const expected = fingerprintToBigInt(computeHistoryHash(['PAY']));
-    assert.ok(bigInts.includes(expected), 'BigInt from round-trip matches direct computation');
+    assert.equal(map['active.payment'], computeHistoryHash(['PAY']));
   });
 
   test('P1-3: two-region changepoint survives JSON round-trip with correct values', () => {
     const payHash  = computeHistoryHash(['PAY']);
     const shipHash = computeHistoryHash(['SELECT_SHIPPING']);
-    const rfp      = { payment: payHash, shipping: shipHash };
+    const rfp      = { 'active.payment': payHash, 'active.shipping': shipHash };
 
     const json = serializeRegionHashes(rfp);
-    const arr  = deserializeRegionHashes(json);
-    const bis  = hexArrToBigInts(arr);
+    const map  = deserializeRegionHashes(json);
+    const bis  = Object.values(map).map(fingerprintToBigInt);
 
     assert.ok(bis.some(b => b === fingerprintToBigInt(payHash)), 'payment hash present');
     assert.ok(bis.some(b => b === fingerprintToBigInt(shipHash)), 'shipping hash present');
@@ -90,13 +93,11 @@ describe('SC11-P2: parallel seeding simulation (migrate-worker syncRegistry)', (
 
   /** Simulate what syncRegistry() does: load JSON row → BigInt[] → would-be engine call. */
   function simulateSeed(row) {
-    const hexArr   = JSON.parse(row.region_hashes);
-    const regionArr = hexArr.map(h => BigInt(`0x${h.padStart(16, '0')}`));
-    return regionArr;
+    return storedRegionsToBigInts(row.region_hashes);
   }
 
   test('P2-1: seeded BigInt array matches original regionFingerprintsToArray output', () => {
-    const rfp      = computeRegionHashes({ payment: ['PAY'], shipping: ['SELECT_SHIPPING'] });
+    const rfp      = computeRegionHashes({ 'active.payment': ['PAY'], 'active.shipping': ['SELECT_SHIPPING'] });
     const original = regionFingerprintsToArray(rfp);
 
     const row     = { region_hashes: serializeRegionHashes(rfp), t_star: 42, refinement: 0, child_def_id: 'checkout-v2' };
@@ -110,7 +111,7 @@ describe('SC11-P2: parallel seeding simulation (migrate-worker syncRegistry)', (
   });
 
   test('P2-2: seeding a single-region changepoint produces one-element BigInt array', () => {
-    const rfp     = computeRegionHashes({ payment: ['PAY', 'CONFIRM'] });
+    const rfp     = computeRegionHashes({ 'active.payment': ['PAY', 'CONFIRM'] });
     const row     = { region_hashes: serializeRegionHashes(rfp) };
     const seeded  = simulateSeed(row);
     assert.equal(seeded.length, 1);
@@ -124,6 +125,11 @@ describe('SC11-P2: parallel seeding simulation (migrate-worker syncRegistry)', (
     assert.equal(seeded.length, 3);
     const unique = new Set(seeded);
     assert.equal(unique.size, 3, 'all three region hashes are distinct');
+  });
+
+  test('P2-4: legacy JSON array rows still seed as raw engine hashes', () => {
+    const legacy = JSON.stringify(['0000000000000001', '0000000000000002']);
+    assert.deepEqual(simulateSeed({ region_hashes: legacy }), [1n, 2n]);
   });
 });
 
@@ -183,64 +189,74 @@ describe('SC11-P3: parallel routing — AND composition semantics', () => {
 
 describe('SC11-P4: per-region fingerprint update — delta tracking', () => {
 
-  const FNV_PRIME  = 0x00000100000001B3n;
-  const UINT64_MAX = 0xFFFFFFFFFFFFFFFFn;
-
-  function fnv1aUpdate(hash, str) {
-    const buf = Buffer.from(String(str), 'utf8');
-    for (const byte of buf) hash = ((hash ^ BigInt(byte)) * FNV_PRIME) & UINT64_MAX;
-    return hash;
-  }
-
-  function simulateUpdateFingerprint(hexFp, eventType) {
-    const current = (!hexFp || hexFp === '0') ? FNV_OFFSET : BigInt(`0x${hexFp.padStart(16, '0')}`);
-    return fnv1aUpdate(current, eventType).toString(16).padStart(16, '0');
-  }
+  const checkoutMachine = {
+    id: 'checkout',
+    initial: 'active',
+    states: {
+      active: {
+        type: 'parallel',
+        states: {
+          payment: {
+            initial: 'unpaid',
+            states: {
+              unpaid: {},
+              paid: {},
+            },
+          },
+          shipping: {
+            initial: 'unselected',
+            states: {
+              unselected: {},
+              selected: {},
+            },
+          },
+        },
+      },
+    },
+  };
 
   /** Simulate actorWorker handleEvent() per-region diff: only update region if state changed. */
   function simulateRegionUpdate(preStateValue, postStateValue, eventType, rfpBefore) {
-    const rfpAfter = { ...rfpBefore };
-    if (preStateValue && typeof preStateValue === 'object') {
-      for (const region of Object.keys(preStateValue)) {
-        if (JSON.stringify(preStateValue[region]) !== JSON.stringify(postStateValue?.[region])) {
-          rfpAfter[region] = simulateUpdateFingerprint(rfpBefore[region] ?? '0', eventType);
-        }
-      }
-    }
-    return rfpAfter;
+    return updateRegionFingerprintsForTransition(
+      checkoutMachine,
+      preStateValue,
+      postStateValue,
+      eventType,
+      rfpBefore
+    );
   }
 
   test('P4-1: PAY event changes payment region, not shipping', () => {
     const pre  = { active: { payment: 'unpaid', shipping: 'unselected' } };
     const post = { active: { payment: 'paid',   shipping: 'unselected' } };
-    const rfp  = simulateRegionUpdate(pre, post, 'PAY', { active: '0' });
+    const rfp  = simulateRegionUpdate(pre, post, 'PAY', { 'active.payment': '0', 'active.shipping': '0' });
     // active region changed → updated
-    assert.notEqual(rfp.active, '0');
+    assert.equal(rfp['active.payment'], computeHistoryHash(['PAY']));
     // No per-sub-region tracking at this level (active is the top-level key)
-    assert.equal(Object.keys(rfp).length, 1);
+    assert.equal(rfp['active.shipping'], '0');
   });
 
   test('P4-2: unchanged region keeps its old fingerprint', () => {
-    const pre  = { payment: 'unpaid', shipping: 'selected' };
-    const post = { payment: 'paid',   shipping: 'selected' };
-    const rfp0 = { payment: '0', shipping: computeHistoryHash(['SELECT_SHIPPING']) };
+    const pre  = { active: { payment: 'unpaid', shipping: 'selected' } };
+    const post = { active: { payment: 'paid',   shipping: 'selected' } };
+    const rfp0 = { 'active.payment': '0', 'active.shipping': computeHistoryHash(['SELECT_SHIPPING']) };
     const rfp1 = simulateRegionUpdate(pre, post, 'PAY', rfp0);
 
-    assert.notEqual(rfp1.payment,  rfp0.payment,  'payment updated');
-    assert.equal   (rfp1.shipping, rfp0.shipping,  'shipping unchanged');
+    assert.notEqual(rfp1['active.payment'],  rfp0['active.payment'],  'payment updated');
+    assert.equal   (rfp1['active.shipping'], rfp0['active.shipping'],  'shipping unchanged');
   });
 
   test('P4-3: sequential region events accumulate correctly', () => {
     const states = [
-      { payment: 'unpaid',  shipping: 'unselected' },
-      { payment: 'paid',    shipping: 'unselected' },
-      { payment: 'paid',    shipping: 'selected'   },
+      { active: { payment: 'unpaid',  shipping: 'unselected' } },
+      { active: { payment: 'paid',    shipping: 'unselected' } },
+      { active: { payment: 'paid',    shipping: 'selected'   } },
     ];
-    let rfp = { payment: '0', shipping: '0' };
+    let rfp = { 'active.payment': '0', 'active.shipping': '0' };
     rfp = simulateRegionUpdate(states[0], states[1], 'PAY',               rfp);
     rfp = simulateRegionUpdate(states[1], states[2], 'SELECT_SHIPPING',    rfp);
 
-    assert.equal(rfp.payment,  computeHistoryHash(['PAY']));
-    assert.equal(rfp.shipping, computeHistoryHash(['SELECT_SHIPPING']));
+    assert.equal(rfp['active.payment'],  computeHistoryHash(['PAY']));
+    assert.equal(rfp['active.shipping'], computeHistoryHash(['SELECT_SHIPPING']));
   });
 });

@@ -186,9 +186,8 @@ test('x-request-id is echoed back when provided in request (FIX-4)', async () =>
 
 // ── 5b: Key revocation blocks subsequent requests (A24) ───────────────────────
 
-test('DELETE /v1/keys/:keyId — revoked key is blocked on subsequent requests (A24)', async () => {
-  // Admin calls need BOTH the sentinel API key (to pass authMiddleware) AND the
-  // admin key (to pass adminMiddleware). auth/verify is public (no API key needed).
+test.skip('DELETE /v1/keys/:keyId — revoked key is blocked on subsequent requests (A24)', async () => {
+  // Removed in open-source mode: /v1/orgs and /v1/auth/verify routes no longer exist.
   const SENTINEL = '__test_key_do_not_use_in_production__';
   const adminHeaders = {
     'Content-Type': 'application/json',

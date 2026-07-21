@@ -12,6 +12,7 @@ import { createCipheriv, createDecipheriv, randomBytes } from 'crypto';
 import { mkdirSync, readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
+import { isVersionedRegionFingerprintsPayload } from './regionFingerprintCodec.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -20,12 +21,6 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const DB_PATH = process.env.STATEKEEP_DB_PATH || './statekeep.db';
 
 const ENC_KEY_HEX = process.env.STATEKEEP_ENCRYPTION_KEY;
-if (!ENC_KEY_HEX || ENC_KEY_HEX.length !== 64) {
-  console.error(
-    '[db] WARNING: STATEKEEP_ENCRYPTION_KEY is not set or not 64 hex chars. ' +
-    'Data at rest will NOT be encrypted.'
-  );
-}
 const ENCRYPTION_KEY = ENC_KEY_HEX
   ? Buffer.from(ENC_KEY_HEX, 'hex')
   : null;
@@ -68,11 +63,21 @@ export function decrypt(ciphertext) {
   return Buffer.concat([decipher.update(enc), decipher.final()]);
 }
 
+// ── Postgres flag ─────────────────────────────────────────────────────────────
+// When STATEKEEP_DB_URL starts with "postgres", repo files switch to the async
+// Postgres path and getDb() is never called (it throws a clear error instead).
+export const isPostgres = (process.env.STATEKEEP_DB_URL ?? '').startsWith('postgres');
+
 // ── Database singleton ────────────────────────────────────────────────────────
 
 let _db = null;
 
 export function getDb() {
+  if (isPostgres) {
+    throw new Error(
+      '[db] STATEKEEP_DB_URL is a Postgres URL — use db-postgres.js (query/queryOne/transaction) instead of getDb().'
+    );
+  }
   if (_db) return _db;
 
   _db = new Database(DB_PATH, {
@@ -81,7 +86,7 @@ export function getDb() {
 
   // WAL mode, recommended pragmas
   _db.pragma('journal_mode = WAL');
-  _db.pragma('busy_timeout = 5000');   // wait up to 5s before SQLITE_BUSY
+  _db.pragma('busy_timeout = 15000');  // wait up to 15s before SQLITE_BUSY
   _db.pragma('synchronous  = NORMAL');
   _db.pragma('foreign_keys = ON');
   _db.pragma('cache_size   = -32000');   // 32 MB
@@ -478,6 +483,175 @@ export function getDb() {
     }
     _db.exec(`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (16, unixepoch());`);
     console.log('[db] Migration v16 applied: created_at added to definitions');
+  }
+
+  // v17 - Require versioned parallel region_fingerprints payloads.
+  // Legacy unversioned maps used raw region hashes and cannot be safely
+  // reinterpreted under keyed path+fingerprint semantics.
+  if (!appliedVersions.has(17)) {
+    const rows = _db.prepare(`
+      SELECT id, region_fingerprints
+      FROM actors
+      WHERE region_fingerprints IS NOT NULL
+    `).all();
+    const clear = _db.prepare(`
+      UPDATE actors
+      SET region_fingerprints = NULL, updated_at = ?
+      WHERE id = ?
+    `);
+    let cleared = 0;
+
+    _db.transaction(() => {
+      const ts = Date.now();
+      for (const row of rows) {
+        if (!isVersionedRegionFingerprintsPayload(row.region_fingerprints)) {
+          cleared += clear.run(ts, row.id).changes;
+        }
+      }
+    })();
+
+    _db.exec(`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (17, unixepoch());`);
+    console.log(`[db] Migration v17 applied: versioned region_fingerprints enforced (${cleared} legacy rows cleared)`);
+  }
+
+  // v18 — UNIQUE index on changepoints to prevent duplicate registration
+  if (!appliedVersions.has(18)) {
+    try {
+      _db.exec(`
+        BEGIN;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_changepoints_unique
+          ON changepoints(org_id, t_star, prefix_hash, refinement);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_par_changepoints_unique
+          ON par_changepoints(org_id, child_def_id);
+        INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (18, unixepoch());
+        COMMIT;
+      `);
+      console.log('[db] Migration v18 applied: unique indexes on changepoints tables');
+    } catch (e) {
+      _db.exec(`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (18, unixepoch());`);
+      console.warn('[db] Migration v18: unique index skipped (existing duplicates):', e.message);
+    }
+  }
+
+  // v19 — running_invokes: invoke restart recovery
+  if (!appliedVersions.has(19)) {
+    _db.exec(`
+      BEGIN;
+      CREATE TABLE IF NOT EXISTS running_invokes (
+        id             TEXT PRIMARY KEY,
+        actor_id       TEXT NOT NULL REFERENCES actors(id),
+        invoke_id      TEXT NOT NULL,
+        service_id     TEXT NOT NULL,
+        started_at     INTEGER NOT NULL,
+        timeout_at     INTEGER NOT NULL,
+        correlation_id TEXT NOT NULL,
+        idempotent     INTEGER NOT NULL DEFAULT 0,
+        status         TEXT NOT NULL DEFAULT 'running'
+                       CHECK(status IN ('running','done','failed'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_running_invokes_actor ON running_invokes(actor_id);
+      INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (19, unixepoch());
+      COMMIT;
+    `);
+    console.log('[db] Migration v19 applied: running_invokes table');
+  }
+
+  // v20 — action_jobs: durable action queue
+  if (!appliedVersions.has(20)) {
+    _db.exec(`
+      BEGIN;
+      CREATE TABLE IF NOT EXISTS action_jobs (
+        id            TEXT PRIMARY KEY,
+        actor_id      TEXT NOT NULL REFERENCES actors(id),
+        action_name   TEXT NOT NULL,
+        context_snap  BLOB,
+        event_snap    TEXT,
+        retry_count   INTEGER NOT NULL DEFAULT 0,
+        max_retries   INTEGER NOT NULL DEFAULT 3,
+        next_retry_at INTEGER NOT NULL,
+        status        TEXT NOT NULL DEFAULT 'pending'
+                      CHECK(status IN ('pending','running','done','failed')),
+        created_at    INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_action_jobs_pending
+        ON action_jobs(status, next_retry_at) WHERE status = 'pending';
+      CREATE INDEX IF NOT EXISTS idx_action_jobs_actor ON action_jobs(actor_id);
+      INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (20, unixepoch());
+      COMMIT;
+    `);
+    console.log('[db] Migration v20 applied: action_jobs table');
+  }
+
+  // v21 — migration_notifications: lazy hot-registry invalidation
+  if (!appliedVersions.has(21)) {
+    _db.exec(`
+      BEGIN;
+      CREATE TABLE IF NOT EXISTS migration_notifications (
+        id                 TEXT PRIMARY KEY,
+        actor_id           TEXT NOT NULL,
+        from_definition_id TEXT NOT NULL,
+        to_definition_id   TEXT NOT NULL,
+        created_at         INTEGER NOT NULL,
+        consumed_at        INTEGER
+      );
+      CREATE INDEX IF NOT EXISTS idx_migration_notifs_pending
+        ON migration_notifications(consumed_at) WHERE consumed_at IS NULL;
+      INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (21, unixepoch());
+      COMMIT;
+    `);
+    console.log('[db] Migration v21 applied: migration_notifications table');
+  }
+
+  // v22 — state_entry_id on actors: stale after: timer guard
+  if (!appliedVersions.has(22)) {
+    const hasStateEntryId = _db.prepare(
+      `SELECT COUNT(*) as cnt FROM pragma_table_info('actors') WHERE name='state_entry_id'`
+    ).get().cnt > 0;
+    if (!hasStateEntryId) {
+      _db.exec(`ALTER TABLE actors ADD COLUMN state_entry_id INTEGER NOT NULL DEFAULT 0;`);
+    }
+    _db.exec(`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (22, unixepoch());`);
+    console.log('[db] Migration v22 applied: state_entry_id on actors');
+  }
+
+  // v23 — compiled_json on definitions: compiled transition table
+  if (!appliedVersions.has(23)) {
+    const hasCompiledJson = _db.prepare(
+      `SELECT COUNT(*) as cnt FROM pragma_table_info('definitions') WHERE name='compiled_json'`
+    ).get().cnt > 0;
+    if (!hasCompiledJson) {
+      _db.exec(`ALTER TABLE definitions ADD COLUMN compiled_json TEXT;`);
+    }
+    _db.exec(`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (23, unixepoch());`);
+    console.log('[db] Migration v23 applied: compiled_json on definitions');
+  }
+
+  // v24 — Re-encrypt existing plaintext event_snap rows in action_jobs.
+  // Prior to this migration, event_snap was stored as plaintext JSON (TEXT column).
+  // Detection: better-sqlite3 returns TEXT rows as strings and BLOB rows as Buffers.
+  // A string event_snap is plaintext and must be re-encrypted. Only runs when
+  // ENCRYPTION_KEY is set — if no key, plaintext storage is intentional.
+  if (!appliedVersions.has(24)) {
+    if (ENCRYPTION_KEY) {
+      const rows = _db.prepare(
+        `SELECT id, event_snap FROM action_jobs WHERE status IN ('pending','failed') AND event_snap IS NOT NULL`
+      ).all();
+      const update = _db.prepare(`UPDATE action_jobs SET event_snap=? WHERE id=?`);
+      let reencrypted = 0;
+      _db.transaction(() => {
+        for (const row of rows) {
+          if (typeof row.event_snap === 'string') {
+            update.run(encrypt(Buffer.from(row.event_snap)), row.id);
+            reencrypted++;
+          }
+        }
+      })();
+      if (reencrypted > 0) {
+        console.log(`[db] Migration v24: re-encrypted ${reencrypted} plaintext event_snap rows`);
+      }
+    }
+    _db.exec(`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (24, unixepoch());`);
+    console.log('[db] Migration v24 applied: event_snap encryption in action_jobs');
   }
 
   // Graceful shutdown

@@ -147,6 +147,7 @@ describe('SC8-B: Confirming with valid token stores definition and tags stranded
     const { id: a } = (await spawnActor(v1Id)).body;
     await sendEvent(a, 'SCHEDULE');
     strandedActorId = a;
+    await new Promise(r => setTimeout(r, 100)); // wait for write buffer flush
 
     // Actor in 'idle' (exists in v2) — safe
     const { id: b } = (await spawnActor(v1Id)).body;
@@ -202,6 +203,7 @@ describe('SC8-C: needs_rescue actors return 409 on event with helpful error', ()
     const { id } = (await spawnActor(v1Id)).body;
     await sendEvent(id, 'SCHEDULE');  // → scheduled (removed in v2)
     strandedActorId = id;
+    await new Promise(r => setTimeout(r, 100)); // wait for write buffer flush
 
     // Get preview token and confirm
     const preview = await deploy(v2Id, MIGRATE_C_V2, v1Id);
@@ -296,6 +298,7 @@ describe('SC8-E: Expired token → 200 with fresh preview', () => {
     await deploy(v1Id, MIGRATE_C_V1);
     const { id } = (await spawnActor(v1Id)).body;
     await sendEvent(id, 'SCHEDULE');  // → scheduled (removed in v2)
+    await new Promise(r => setTimeout(r, 100)); // wait for write buffer flush
 
     // Submit with a fake/expired token
     const r = await deploy(v2Id, MIGRATE_C_V2, v1Id, 'aaaaaaaa-0000-0000-0000-000000000000');
@@ -329,6 +332,7 @@ describe('SC8-F: Token from one definition cannot be used for another', () => {
     await deploy(v1Id, MIGRATE_C_V1);
     const { id } = (await spawnActor(v1Id)).body;
     await sendEvent(id, 'SCHEDULE');
+    await new Promise(r => setTimeout(r, 100)); // wait for write buffer flush
 
     // Get a token for v2a
     const preview = await deploy(v2aId, MIGRATE_C_V2, v1Id);

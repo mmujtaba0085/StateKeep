@@ -6,40 +6,40 @@
  *   - computeAccessible() returns null → "stay put"
  *   - clockTick()          returns monotonically incrementing counter
  *   - All notifications are no-ops
+ *
+ * FNV-1a uses 32-bit Math.imul (same as fingerprintChain.js) instead of
+ * BigInt, keeping the fallback path on the native CPU integer path.
  */
 
-let _tick = 1n;
+const FNV32_PRIME  = 0x01000193;
+const FNV32_OFFSET = 0x811c9dc5;
+
+let _tick = 1;
 
 export const engine = {
   available: false,
 
-  /** Returns a new logical tick (BigInt). */
+  /** Returns a new logical tick (plain number). */
   clockTick() {
     return _tick++;
   },
 
   /**
    * Advance the fallback tick counter to at least `from + 1`.
-   * Called at server startup so that new deployments get t_star values
+   * Called at server startup so new deployments get t_star values
    * strictly greater than all historical changepoints stored in the DB.
    */
   seedTick(from) {
-    const target = BigInt(from) + 1n;
+    const target = Number(from) + 1;
     if (target > _tick) _tick = target;
   },
 
-  /**
-   * Register a changepoint. No-op in fallback mode.
-   * @returns {number} 0 (success)
-   */
+  /** Register a changepoint. No-op in fallback mode. */
   registerChangepoint(_tStar, _prefixHash, _refinement, _childDefId) {
     return 0;
   },
 
-  /**
-   * Compute migration target.
-   * @returns {null} — always "stay put"
-   */
+  /** Compute migration target. Always "stay put" in fallback mode. */
   computeAccessible(_prefixHash, _actorLogicalTime, _currentTime) {
     return null;
   },
@@ -56,24 +56,23 @@ export const engine = {
     return null;
   },
 
-  /** FNV-1a init — returns the standard offset basis as BigInt */
+  /** FNV-1a init — returns the 32-bit offset basis. */
   fnv1aInit() {
-    return 0xcbf29ce484222325n;
+    return FNV32_OFFSET;
   },
 
-  /** FNV-1a update — pure JS implementation, consistent with C version */
+  /** FNV-1a update — 32-bit Math.imul, consistent with fingerprintChain.js */
   fnv1aUpdate(hash, data) {
-    const FNV_PRIME  = 0x00000100000001B3n;
-    const UINT64_MAX = 0xFFFFFFFFFFFFFFFFn;
     const buf = Buffer.isBuffer(data) ? data : Buffer.from(String(data), 'utf8');
+    let h = hash;
     for (const byte of buf) {
-      hash = ((hash ^ BigInt(byte)) * FNV_PRIME) & UINT64_MAX;
+      h = Math.imul(h ^ byte, FNV32_PRIME) >>> 0;
     }
-    return hash;
+    return h;
   },
 
   fnv1aFinal(hash) {
-    return hash;
+    return hash >>> 0;
   },
 
   destroy() {},

@@ -3,16 +3,17 @@
  * GET /v1/metrics — Prometheus text format. No auth required.
  */
 
-import { getDb } from '../../registry/db.js';
+import { getDb, isPostgres } from '../../registry/db.js';
 
 export async function metricsRoutes(fastify) {
   fastify.get('/v1/metrics', async (_req, reply) => {
-    const db = getDb();
-
-    // Pull latest snapshot
-    const snap = db.prepare(
-      `SELECT * FROM metrics_snapshots ORDER BY captured_at DESC LIMIT 1`
-    ).get();
+    let snap;
+    if (isPostgres) {
+      const { queryOne } = await import('../../registry/db-postgres.js');
+      snap = await queryOne(`SELECT * FROM metrics_snapshots ORDER BY captured_at DESC LIMIT 1`, []);
+    } else {
+      snap = getDb().prepare(`SELECT * FROM metrics_snapshots ORDER BY captured_at DESC LIMIT 1`).get();
+    }
 
     const lines = [];
     const ts = snap?.captured_at ?? Date.now();

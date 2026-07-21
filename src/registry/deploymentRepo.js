@@ -1,10 +1,9 @@
 /**
  * src/registry/deploymentRepo.js
- * SQLite CRUD for the `deployments` table.
- * Every deployment belongs to exactly one org. orgId is always explicit.
+ * SQLite/Postgres CRUD for the `deployments` table.
  */
 
-import { getDb } from './db.js';
+import { getDb, isPostgres } from './db.js';
 import { randomUUID } from 'crypto';
 
 let stmts = null;
@@ -29,35 +28,78 @@ function getStmts() {
   return stmts;
 }
 
-export function createDeployment({ definitionId, affectedActors, orgId }) {
+export async function createDeployment({ definitionId, affectedActors, orgId }) {
   if (!orgId) throw new Error('orgId is required when creating a deployment');
   const id = randomUUID();
-  getStmts().insert.run({
-    id,
-    definition_id:   definitionId,
-    org_id:          orgId,
-    affected_actors: affectedActors,
-    started_at:      Date.now(),
-  });
+  const ts = Date.now();
+
+  if (isPostgres) {
+    const { query } = await import('./db-postgres.js');
+    await query(
+      `INSERT INTO deployments
+         (id, definition_id, org_id, status, affected_actors, migrated_count, failed_count, started_at)
+       VALUES ($1,$2,$3,'pending',$4,0,0,$5)`,
+      [id, definitionId, orgId, affectedActors, ts]
+    );
+    return id;
+  }
+
+  getStmts().insert.run({ id, definition_id: definitionId, org_id: orgId, affected_actors: affectedActors, started_at: ts });
   return id;
 }
 
-export function findDeploymentById(id) {
+export async function findDeploymentById(id) {
+  if (isPostgres) {
+    const { queryOne } = await import('./db-postgres.js');
+    return (await queryOne(`SELECT * FROM deployments WHERE id=$1`, [id])) ?? null;
+  }
   return getStmts().findById.get(id) ?? null;
 }
 
-export function findDeploymentsByDefinition(definitionId) {
+export async function findDeploymentsByDefinition(definitionId) {
+  if (isPostgres) {
+    const { queryAll } = await import('./db-postgres.js');
+    return queryAll(`SELECT * FROM deployments WHERE definition_id=$1 ORDER BY started_at DESC`, [definitionId]);
+  }
   return getStmts().findByDef.all(definitionId);
 }
 
-export function updateDeploymentStatus(id, status) {
-  getStmts().updateStatus.run({ id, status, completed_at: status === 'complete' || status === 'failed' ? Date.now() : null });
+export async function updateDeploymentStatus(id, status) {
+  const completedAt = (status === 'complete' || status === 'failed') ? Date.now() : null;
+  if (isPostgres) {
+    const { query } = await import('./db-postgres.js');
+    await query(`UPDATE deployments SET status=$1, completed_at=$2 WHERE id=$3`, [status, completedAt, id]);
+    return;
+  }
+  getStmts().updateStatus.run({ id, status, completed_at: completedAt });
 }
 
-export function incrementMigrated(id) { getStmts().incrementMigrated.run(id); }
-export function incrementFailed(id)   { getStmts().incrementFailed.run(id); }
+export async function incrementMigrated(id) {
+  if (isPostgres) {
+    const { query } = await import('./db-postgres.js');
+    await query(`UPDATE deployments SET migrated_count = migrated_count + 1 WHERE id=$1`, [id]);
+    return;
+  }
+  getStmts().incrementMigrated.run(id);
+}
 
-export function listDeployments({ limit = 50, offset = 0, orgId } = {}) {
+export async function incrementFailed(id) {
+  if (isPostgres) {
+    const { query } = await import('./db-postgres.js');
+    await query(`UPDATE deployments SET failed_count = failed_count + 1 WHERE id=$1`, [id]);
+    return;
+  }
+  getStmts().incrementFailed.run(id);
+}
+
+export async function listDeployments({ limit = 50, offset = 0, orgId } = {}) {
   if (!orgId) throw new Error('orgId is required');
+  if (isPostgres) {
+    const { queryAll } = await import('./db-postgres.js');
+    return queryAll(
+      `SELECT * FROM deployments WHERE org_id=$1 ORDER BY started_at DESC LIMIT $2 OFFSET $3`,
+      [orgId, limit, offset]
+    );
+  }
   return getStmts().listByOrg.all(orgId, limit, offset);
 }

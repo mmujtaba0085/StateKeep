@@ -10,41 +10,45 @@
  * Managed by statekeep-snapshot-worker.service (systemd).
  */
 
-import { getDb } from '../registry/db.js';
+import { getDb, isPostgres } from '../registry/db.js';
 import { startHeartbeat } from './heartbeat.js';
-import { updateActorState, findIdleActors } from '../registry/actorRepo.js';
 
-const INTERVAL_MS = 300_000;   // 5 minutes
+const INTERVAL_MS = 300_000;
 
 console.log('[snapshot-worker] Starting...');
-getDb();
+
+if (isPostgres) {
+  const { bootstrapSchema } = await import('../registry/db-postgres.js');
+  await bootstrapSchema();
+} else {
+  getDb();
+}
+
 startHeartbeat('snapshot');
 
 async function snapshotLoop() {
   while (true) {
     await new Promise(r => setTimeout(r, INTERVAL_MS));
 
-    const db = getDb();
     try {
-      // Verify that active actors have valid state_value (non-null)
-      // If any are null, it means they were created but never had an event
-      // processed — this is fine, just log a count.
-      const nullState = db.prepare(`
-        SELECT COUNT(*) as cnt FROM actors WHERE status = 'active' AND state_value IS NULL
-      `).get();
-
-      const active = db.prepare(`
-        SELECT COUNT(*) as cnt FROM actors WHERE status = 'active'
-      `).get();
-
-      console.log(
-        `[snapshot-worker] Snapshot check: ${active.cnt} active actors, ` +
-        `${nullState.cnt} with null state`
-      );
-
-      // Force a WAL checkpoint to minimize WAL file size
-      db.pragma('wal_checkpoint(PASSIVE)');
-
+      if (isPostgres) {
+        const { queryOne } = await import('../registry/db-postgres.js');
+        const nullState = await queryOne(`SELECT COUNT(*) as cnt FROM actors WHERE status='active' AND state_value IS NULL`, []);
+        const active    = await queryOne(`SELECT COUNT(*) as cnt FROM actors WHERE status='active'`, []);
+        console.log(
+          `[snapshot-worker] Snapshot check: ${Number(active?.cnt ?? 0)} active actors, ` +
+          `${Number(nullState?.cnt ?? 0)} with null state`
+        );
+      } else {
+        const db = getDb();
+        const nullState = db.prepare(`SELECT COUNT(*) as cnt FROM actors WHERE status = 'active' AND state_value IS NULL`).get();
+        const active    = db.prepare(`SELECT COUNT(*) as cnt FROM actors WHERE status = 'active'`).get();
+        console.log(
+          `[snapshot-worker] Snapshot check: ${active.cnt} active actors, ` +
+          `${nullState.cnt} with null state`
+        );
+        db.pragma('wal_checkpoint(PASSIVE)');
+      }
     } catch (err) {
       console.error('[snapshot-worker] Error:', err);
     }

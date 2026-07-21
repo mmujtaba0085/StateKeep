@@ -21,6 +21,11 @@ import { uniqueId, PUT, POST } from './helpers/api.js';
 const BASE    = process.env.STATEKEEP_URL ?? `http://localhost:${process.env.PORT ?? '3001'}`;
 const SENTINEL = '__test_key_do_not_use_in_production__';
 
+// Open-source mode: API key management routes (/v1/keys) are removed.
+test.beforeEach(async ({}, testInfo) => {
+  testInfo.skip(true, 'API key management removed in open-source mode');
+});
+
 /** Make a request with a specific raw API key. */
 async function withKey(method, path, key, body) {
   const headers = { 'x-api-key': key };

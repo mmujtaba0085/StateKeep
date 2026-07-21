@@ -7,12 +7,11 @@ const useApp = () => useContext(AppCtx);
 
 function AppProvider({ children }) {
   const [route, setRoute] = useState(() => (window.location.hash.replace(/^#/, "") || "command"));
-  const [org] = useState({ name: "StateKeep", tier: "Pro" });
+  const [org] = useState({ name: "StateKeep", tier: "Open Source" });
   const [selectedMachine, setSelectedMachine] = useState("loan");
   const [selectedActorId, setSelectedActorId] = useState(null);
   const [toasts, setToasts] = useState([]);
   const [modal, setModal] = useState(null);
-  const [apiKey, setApiKeyState] = useState(() => Api.key);
 
   useEffect(() => {
     const onHash = () => setRoute(window.location.hash.replace(/^#/, "") || "command");
@@ -20,11 +19,7 @@ function AppProvider({ children }) {
     return () => window.removeEventListener("hashchange", onHash);
   }, []);
 
-  useEffect(() => Api.onChange(k => setApiKeyState(k)), []);
-
   const navigate = (r) => { window.location.hash = "#" + r; };
-
-  const setApiKey = (k) => { Api.setKey(k); setApiKeyState(k); };
 
   const pushToast = (toast) => {
     const id = Math.random().toString(36).slice(2, 9);
@@ -40,7 +35,7 @@ function AppProvider({ children }) {
     selectedActorId, setSelectedActorId,
     toasts, pushToast, dismissToast,
     modal, setModal,
-    apiKey, setApiKey,
+    apiKey: true,  // open-source: always authenticated
   };
   return React.createElement(AppCtx.Provider, { value }, children);
 }
@@ -66,45 +61,7 @@ const NAV = [
 ];
 
 function Sidebar() {
-  const { route, navigate, org, pushToast, apiKey, setApiKey, setModal } = useApp();
-  const [copied, setCopied] = useState(false);
-  const last8 = apiKey ? ("..." + apiKey.slice(-8)) : "not set";
-
-  const onCopyKey = () => {
-    if (!apiKey) return openKeyModal();
-    navigator.clipboard?.writeText(apiKey).catch(() => {});
-    setCopied(true);
-    pushToast({ kind: "success", title: "API key copied", desc: "Last 8: " + apiKey.slice(-8) });
-    setTimeout(() => setCopied(false), 1200);
-  };
-
-  const openKeyModal = () => {
-    let draft = apiKey || "";
-    setModal({
-      title: "Set API Key",
-      body: React.createElement("div", null,
-        React.createElement("label", { className: "field-label" }, "API Key"),
-        React.createElement("input", {
-          className: "input mono",
-          placeholder: "sk_live_...",
-          defaultValue: apiKey,
-          autoFocus: true,
-          onChange: (e) => { draft = e.target.value; }
-        }),
-        React.createElement("div", { className: "muted", style: { fontSize: 11, marginTop: 8 } },
-          "Stored in your browser's localStorage. Used for all API requests.")
-      ),
-      footer: React.createElement(React.Fragment, null,
-        apiKey && React.createElement("button", { className: "btn btn-ghost", onClick: () => { setApiKey(""); setModal(null); pushToast({ kind: "info", title: "API key cleared" }); } }, "Clear"),
-        React.createElement("button", { className: "btn btn-ghost", onClick: () => setModal(null) }, "Cancel"),
-        React.createElement("button", { className: "btn btn-primary", onClick: () => {
-          setApiKey(draft.trim());
-          setModal(null);
-          pushToast({ kind: "success", title: "API key saved" });
-        }}, "Save")
-      )
-    });
-  };
+  const { route, navigate, org } = useApp();
 
   return React.createElement("aside", { className: "sidebar" },
     React.createElement("div", { className: "sb-brand" },
@@ -145,30 +102,7 @@ function Sidebar() {
         React.createElement("span", { className: "dot dot-blue" }),
         React.createElement("span", { style: { flex: 1 } }, "API Explorer"),
         Icons.ExternalLink({ size: 11, color: "#647080" })
-      ),
-      React.createElement("div", { style: { display: "flex", gap: 4, alignItems: "center" } },
-        React.createElement("div", {
-          className: "sb-apikey",
-          onClick: apiKey ? onCopyKey : openKeyModal,
-          title: apiKey ? "Copy API key" : "Set API key",
-          style: Object.assign({ flex: 1 }, !apiKey ? { color: "var(--amber)", borderColor: "rgba(245,158,11,0.3)" } : {})
-        },
-          React.createElement("span", null, last8),
-          apiKey
-            ? (copied ? Icons.Check({ size: 12, color: "#3ecf8e" }) : Icons.Copy({ size: 12 }))
-            : Icons.AlertTriangle({ size: 12, color: "var(--amber)" })
-        ),
-        apiKey && React.createElement("button", {
-          onClick: (e) => { e.stopPropagation(); openKeyModal(); },
-          title: "Change API key",
-          style: { padding: "4px 6px", background: "none", border: "none", cursor: "pointer", color: "var(--muted)", borderRadius: 4, lineHeight: 1 }
-        }, Icons.Edit({ size: 11 }))
-      ),
-      React.createElement("button", {
-        className: "btn btn-ghost",
-        style: { width: "100%", marginTop: 6, fontSize: 11, color: "var(--muted)" },
-        onClick: () => { Api.setKey(""); }
-      }, "Sign out")
+      )
     )
   );
 }

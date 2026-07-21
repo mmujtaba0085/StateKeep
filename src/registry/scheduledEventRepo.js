@@ -5,7 +5,7 @@
  * All writes use prepared-statement caching for efficiency.
  */
 
-import { getDb, encrypt, decrypt } from './db.js';
+import { getDb, encrypt, decrypt, isPostgres } from './db.js';
 
 let stmts = null;
 
@@ -83,28 +83,57 @@ function getStmts() {
   return stmts;
 }
 
-export function createScheduledEvent({ actorId, orgId, eventType, payload, fireAt }) {
-  const payloadEnc = payload != null
-    ? encrypt(JSON.stringify(payload))
-    : null;
+export async function createScheduledEvent({ actorId, orgId, eventType, payload, fireAt }) {
+  const payloadEnc = payload != null ? encrypt(JSON.stringify(payload)) : null;
+  if (isPostgres) {
+    const { queryOne } = await import('./db-postgres.js');
+    const row = await queryOne(
+      `INSERT INTO scheduled_events (actor_id, org_id, event_type, payload_enc, fire_at, status, created_at)
+       VALUES ($1,$2,$3,$4,$5,'pending',$6) RETURNING id`,
+      [actorId, orgId, eventType, payloadEnc, fireAt, Date.now()]
+    );
+    return row?.id;
+  }
   const s = getStmts();
   const info = s.insert.run({ actorId, orgId, eventType, payloadEnc, fireAt, createdAt: Date.now() });
   return info.lastInsertRowid;
 }
 
-export function findDueEvents(nowMs) {
-  return getStmts().findDue.all(nowMs, nowMs);
+export async function findDueEvents(nowMs) {
+  if (isPostgres) {
+    const { queryAll } = await import('./db-postgres.js');
+    return (await queryAll(
+      `SELECT * FROM scheduled_events WHERE status='pending' AND fire_at<=$1 AND (next_retry_at IS NULL OR next_retry_at<=$2) ORDER BY fire_at ASC LIMIT 500`,
+      [nowMs, nowMs]
+    )).map(decodeRow);
+  }
+  return getStmts().findDue.all(nowMs, nowMs).map(decodeRow);
 }
 
-export function markFired(id, firedAt) {
+export async function markFired(id, firedAt) {
+  if (isPostgres) {
+    const { query } = await import('./db-postgres.js');
+    const r = await query(`UPDATE scheduled_events SET status='fired', fired_at=$1 WHERE id=$2 AND status='pending'`, [firedAt, id]);
+    return r.rowCount;
+  }
   return getStmts().markFired.run(firedAt, id).changes;
 }
 
-export function markFailed(id, error) {
+export async function markFailed(id, error) {
+  if (isPostgres) {
+    const { query } = await import('./db-postgres.js');
+    const r = await query(`UPDATE scheduled_events SET status='failed', error=$1 WHERE id=$2 AND status='pending'`, [error, id]);
+    return r.rowCount;
+  }
   return getStmts().markFailed.run(error, id).changes;
 }
 
-export function markDispatchFailed(id, error) {
+export async function markDispatchFailed(id, error) {
+  if (isPostgres) {
+    const { query } = await import('./db-postgres.js');
+    const r = await query(`UPDATE scheduled_events SET status='failed', error=$1 WHERE id=$2 AND status='fired'`, [error, id]);
+    return r.rowCount;
+  }
   return getStmts().markDispatchFailed.run(error, id).changes;
 }
 
@@ -112,16 +141,34 @@ export function markDispatchFailed(id, error) {
  * Schedule a retry with exponential backoff: 30s, 60s, 120s (capped at 240s).
  * Returns true if retried, false if max_retries exhausted (caller should markFailed).
  */
-export function scheduleRetryOrFail(row, error) {
-  const s            = getStmts();
+export async function scheduleRetryOrFail(row, error) {
   const effectiveMax = parseInt(process.env.SCHEDULED_MAX_RETRIES ?? String(row.max_retries), 10);
+
+  if (isPostgres) {
+    const { query } = await import('./db-postgres.js');
+    if (row.retry_count < effectiveMax) {
+      const backoffMs  = Math.min(2 ** row.retry_count * 30_000, 240_000);
+      const nextRetry  = Date.now() + backoffMs;
+      await query(
+        `UPDATE scheduled_events SET status='pending', retry_count=retry_count+1, next_retry_at=$1, error=$2 WHERE id=$3`,
+        [nextRetry, error, row.id]
+      );
+      return true;
+    }
+    if (effectiveMax !== row.max_retries) {
+      await query(`UPDATE scheduled_events SET max_retries=$1 WHERE id=$2`, [effectiveMax, row.id]);
+    }
+    await query(`UPDATE scheduled_events SET status='failed', error=$1 WHERE id=$2`, [error, row.id]);
+    return false;
+  }
+
+  const s = getStmts();
   if (row.retry_count < effectiveMax) {
     const backoffMs  = Math.min(2 ** row.retry_count * 30_000, 240_000);
     const nextRetry  = Date.now() + backoffMs;
     s.scheduleRetry.run(nextRetry, error, row.id);
     return true;
   }
-  // If env var overrode max_retries, update the row so the dead-letter query matches.
   if (effectiveMax !== row.max_retries) {
     getDb().prepare('UPDATE scheduled_events SET max_retries = ? WHERE id = ?').run(effectiveMax, row.id);
   }
@@ -129,30 +176,62 @@ export function scheduleRetryOrFail(row, error) {
   return false;
 }
 
-export function findDeadLetter(limit = 100) {
+export async function findDeadLetter(limit = 100) {
+  if (isPostgres) {
+    const { queryAll } = await import('./db-postgres.js');
+    return (await queryAll(
+      `SELECT * FROM scheduled_events WHERE status='failed' AND retry_count>=max_retries ORDER BY fire_at DESC LIMIT $1`,
+      [limit]
+    )).map(decodeRow);
+  }
   return getStmts().findDeadLetter.all(limit).map(decodeRow);
 }
 
-export function cancelScheduledEvent(id, actorId, orgId) {
+export async function cancelScheduledEvent(id, actorId, orgId) {
+  if (isPostgres) {
+    const { query } = await import('./db-postgres.js');
+    const r = await query(`UPDATE scheduled_events SET status='cancelled' WHERE id=$1 AND actor_id=$2 AND org_id=$3 AND status='pending'`, [id, actorId, orgId]);
+    return r.rowCount;
+  }
   return getStmts().cancel.run(id, actorId, orgId).changes;
 }
 
-export function cancelAllPendingForActor(actorId, orgId) {
-  return getDb().prepare(`
-    UPDATE scheduled_events
-    SET status = 'cancelled'
-    WHERE actor_id = ? AND org_id = ? AND status = 'pending'
-  `).run(actorId, orgId).changes;
+export async function cancelAllPendingForActor(actorId, orgId) {
+  if (isPostgres) {
+    const { query } = await import('./db-postgres.js');
+    const r = await query(`UPDATE scheduled_events SET status='cancelled' WHERE actor_id=$1 AND org_id=$2 AND status='pending'`, [actorId, orgId]);
+    return r.rowCount;
+  }
+  return getDb().prepare(
+    `UPDATE scheduled_events SET status = 'cancelled' WHERE actor_id = ? AND org_id = ? AND status = 'pending'`
+  ).run(actorId, orgId).changes;
 }
 
-export function findByActor(actorId, orgId, status = 'all') {
+export async function findByActor(actorId, orgId, status = 'all') {
+  if (isPostgres) {
+    const { queryAll } = await import('./db-postgres.js');
+    let rows;
+    if (!status || status === 'all') {
+      rows = await queryAll(`SELECT * FROM scheduled_events WHERE actor_id=$1 AND org_id=$2 ORDER BY fire_at ASC`, [actorId, orgId]);
+    } else if (status === 'pending') {
+      rows = await queryAll(`SELECT * FROM scheduled_events WHERE actor_id=$1 AND org_id=$2 AND status='pending' ORDER BY fire_at ASC`, [actorId, orgId]);
+    } else {
+      rows = await queryAll(`SELECT * FROM scheduled_events WHERE actor_id=$1 AND org_id=$2 AND status=$3 ORDER BY fire_at ASC`, [actorId, orgId, status]);
+    }
+    return rows.map(decodeRow);
+  }
   const s = getStmts();
   if (!status || status === 'all') return s.findByActorAll.all(actorId, orgId).map(decodeRow);
   if (status === 'pending') return s.findByActor.all(actorId, orgId).map(decodeRow);
   return s.findByActorStatus.all(actorId, orgId, status).map(decodeRow);
 }
 
-export function findById(id) {
+export async function findById(id) {
+  if (isPostgres) {
+    const { queryOne } = await import('./db-postgres.js');
+    const row = await queryOne(`SELECT * FROM scheduled_events WHERE id=$1`, [id]);
+    return row ? decodeRow(row) : null;
+  }
   const row = getStmts().findById.get(id);
   return row ? decodeRow(row) : null;
 }
@@ -168,15 +247,17 @@ function decodeRow(row) {
     } catch { payload = null; }
   }
   return {
-    id:        row.id,
-    actorId:   row.actor_id,
-    orgId:     row.org_id,
-    eventType: row.event_type,
+    id:          row.id,
+    actorId:     row.actor_id,
+    orgId:       row.org_id,
+    eventType:   row.event_type,
     payload,
-    fireAt:    row.fire_at,
-    status:    row.status,
-    firedAt:   row.fired_at,
-    error:     row.error,
-    createdAt: row.created_at,
+    fireAt:      row.fire_at,
+    status:      row.status,
+    firedAt:     row.fired_at,
+    error:       row.error,
+    retry_count: row.retry_count,
+    max_retries: row.max_retries,
+    createdAt:   row.created_at,
   };
 }

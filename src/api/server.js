@@ -21,17 +21,16 @@ import { mkdirSync } from 'fs';
 import { randomUUID } from 'crypto';
 
 import { engineReady, getEngine } from '../ffi/engine.js';
-import { getDb } from '../registry/db.js';
+import { getDb, isPostgres } from '../registry/db.js';
 import { getMaxTStar } from '../registry/changepointRepo.js';
-import './adminKey.js';                                  // fails fast if STATEKEEP_ADMIN_KEY unset
+import { seedEngineRegistry, sendEvent } from '../runtime/actorManager.js';
+import { getGlobalRegistry, setGlobalRegistry, loadRegistry } from '../runtime/implementationRegistry.js';
+import { startActionJobWorker } from '../runtime/actionJobWorker.js';
 import { authMiddleware } from './middleware/auth.js';
 import { healthRoutes } from './routes/health.js';
 import { metricsRoutes } from './routes/metrics.js';
 import { actorRoutes } from './routes/actors.js';
 import { definitionRoutes } from './routes/definitions.js';
-import { keysRoutes } from './routes/keys.js';
-import { orgsRoutes } from './routes/orgs.js';
-import { authVerifyRoutes } from './routes/authVerify.js';
 import { exportRoutes }     from './routes/export.js';
 import { scheduledRoutes }  from './routes/scheduled.js';
 import { scenarioRoutes } from './routes/scenarios.js';
@@ -39,6 +38,8 @@ import { archiveRoutes } from './routes/archives.js';
 import { webhookRoutes } from './routes/webhooks.js';
 import { adminRoutes } from './routes/admin.js';
 import { internalRoutes } from './routes/internal.js';
+import { keysRoutes } from './routes/keys.js';
+import { orgsRoutes } from './routes/orgs.js';
 import { websocketRoutes } from './websocket.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -51,7 +52,6 @@ try { mkdirSync(LOG_DIR, { recursive: true }); } catch {}
 const fastify = Fastify({
   logger: {
     level: process.env.LOG_LEVEL ?? 'info',
-    redact: ['req.headers["x-api-key"]'],   // never log raw keys
     ...(process.env.NODE_ENV === 'production' ? {
       transport: {
         target: 'pino-roll',
@@ -81,29 +81,11 @@ await fastify.register(FastifySwagger, {
       contact:     { name: 'StateKeep', url: 'https://statekeep.io' },
       license:     { name: 'Proprietary' },
     },
-    components: {
-      securitySchemes: {
-        apiKey: {
-          type: 'apiKey',
-          in:   'header',
-          name: 'x-api-key',
-          description: 'API key issued via POST /v1/keys',
-        },
-        adminKey: {
-          type: 'apiKey',
-          in:   'header',
-          name: 'x-admin-key',
-          description: 'Admin key from STATEKEEP_ADMIN_KEY env var',
-        },
-      },
-    },
-    security: [{ apiKey: [] }],
     tags: [
       { name: 'actors',      description: 'Actor lifecycle — spawn, events, state, terminate' },
       { name: 'definitions', description: 'Machine definition deployment and migration' },
       { name: 'webhooks',    description: 'Outbound webhook subscriptions' },
-      { name: 'keys',        description: 'API key management' },
-      { name: 'admin',       description: 'Admin-only operations (require X-Admin-Key)' },
+      { name: 'admin',       description: 'Admin operations' },
       { name: 'health',      description: 'Health and metrics' },
     ],
   },
@@ -117,31 +99,21 @@ await fastify.register(FastifySwaggerUI, {
 
 await fastify.register(FastifyWebSocket);
 
-// Tier limit cache: rawApiKey → max-per-minute.
-// Populated by auth middleware after first successful key validation.
-// Avoids bcrypt in the hot-path rate-limit check.
-const _tierCache = new Map();
-export function cacheTierLimit(rawKey, tier) {
-  const TIER_LIMITS = { free: 300, pro: 1000, enterprise: 5000 };
-  _tierCache.set(rawKey, TIER_LIMITS[tier] ?? 1000);
+if (process.env.STATEKEEP_RATE_LIMIT !== 'false') {
+  await fastify.register(FastifyRateLimit, {
+    global:     true,
+    timeWindow: 60_000,
+    max:        parseInt(process.env.STATEKEEP_RATE_LIMIT_MAX ?? '5000', 10),
+    allowList:  (_req, _key) => process.env.NODE_ENV === 'test',
+    keyGenerator: (req) => req.ip,
+    errorResponseBuilder: (_req, context) => ({
+      error:      'Rate limit exceeded',
+      limit:      context.max,
+      timeWindow: context.after,
+      retryAfter: context.ttl,
+    }),
+  });
 }
-
-await fastify.register(FastifyRateLimit, {
-  global: true,
-  timeWindow: 60_000,
-  allowList: (_req, _key) => process.env.NODE_ENV === 'test',
-  // Per-org bucket: each API key gets its own counter. IP fallback for unauthenticated.
-  keyGenerator: (req) => req.headers['x-api-key'] ?? req.ip,
-  // max is a function so tier limits take effect without a separate hook.
-  // Defaults to enterprise (5000) on first request so tests and new keys aren't throttled before cache warms.
-  max: (_req, key) => _tierCache.get(key) ?? 5000,
-  errorResponseBuilder: (_req, context) => ({
-    error:      'Rate limit exceeded',
-    limit:      context.max,
-    timeWindow: context.after,
-    retryAfter: context.ttl,
-  }),
-});
 
 // ── x-request-id: echo or generate, attach to logger context, set response header ──
 fastify.addHook('onRequest', async (req, reply) => {
@@ -151,19 +123,8 @@ fastify.addHook('onRequest', async (req, reply) => {
   reply.header('X-Request-Id', id);
 });
 
-// ── Auth (global preHandler, skips public paths) ──────────────────────────────
+// ── Set orgId on every request ────────────────────────────────────────────────
 fastify.addHook('preHandler', authMiddleware);
-
-// ── Populate tier cache after auth resolves the key ──────────────────────────
-// The rate-limit plugin's max() function reads _tierCache synchronously.
-// First request from a new key gets the default (100/min); all subsequent
-// requests use the tier limit once auth has populated the cache here.
-fastify.addHook('preHandler', async (req) => {
-  const raw = req.headers['x-api-key'];
-  if (raw && req.apiKey?.tier && !_tierCache.has(raw)) {
-    cacheTierLimit(raw, req.apiKey.tier);
-  }
-});
 
 // ── Static dashboard ──────────────────────────────────────────────────────────
 // No caching for dashboard JS/JSX — every deploy should be visible immediately.
@@ -180,9 +141,6 @@ await fastify.register(healthRoutes);
 await fastify.register(metricsRoutes);
 await fastify.register(actorRoutes);
 await fastify.register(definitionRoutes);
-await fastify.register(keysRoutes);
-await fastify.register(orgsRoutes);
-await fastify.register(authVerifyRoutes);
 await fastify.register(exportRoutes);
 await fastify.register(scheduledRoutes);
 await fastify.register(scenarioRoutes);
@@ -190,6 +148,8 @@ await fastify.register(archiveRoutes);
 await fastify.register(webhookRoutes);
 await fastify.register(adminRoutes);
 await fastify.register(internalRoutes);
+await fastify.register(keysRoutes);
+await fastify.register(orgsRoutes);
 await fastify.register(websocketRoutes);
 
 // ── OpenAPI JSON alias (/openapi.json → /docs/json) ──────────────────────────
@@ -222,15 +182,8 @@ fastify.get('/api-explorer', { schema: { hide: true } }, async (_req, reply) => 
     layout: 'BaseLayout',
     deepLinking: true,
     persistAuthorization: true,
-    requestInterceptor: (req) => {
-      const k = localStorage.getItem('sk_api_key');
-      if (k) req.headers['x-api-key'] = k;
-      return req;
-    },
-    onComplete: () => {
-      const k = localStorage.getItem('sk_api_key');
-      if (k) ui.preauthorizeApiKey('apiKey', k);
-    }
+    requestInterceptor: (req) => req,
+    onComplete: () => {}
   });
 </script>
 </body></html>`;
@@ -242,7 +195,7 @@ async function shutdown(signal) {
   fastify.log.info(`Received ${signal} — shutting down gracefully`);
   try {
     await fastify.close();
-    getDb().close();
+    if (!isPostgres) getDb().close();
   } catch {}
   process.exit(0);
 }
@@ -252,14 +205,21 @@ process.on('SIGINT',  () => shutdown('SIGINT'));
 
 // ── Startup ───────────────────────────────────────────────────────────────────
 await engineReady;
-getDb();
+
+if (isPostgres) {
+  const { bootstrapSchema } = await import('../registry/db-postgres.js');
+  await bootstrapSchema();
+  console.log('[server] Postgres mode — SQLite single-writer warning suppressed');
+} else {
+  getDb();
+}
 
 // Seed APV clock from DB so new deployments get t_star values strictly greater
 // than all historical changepoints.  Without this, a server restart resets the
 // in-memory counter to 1, causing new definitions to get deployedAt=1 which
 // pre-dates all existing actors and breaks the engine's ordering logic.
 try {
-  const maxTStar = getMaxTStar();
+  const maxTStar = await getMaxTStar();
   if (maxTStar > 0) {
     const eng = getEngine();
     if (!eng.available) {
@@ -277,12 +237,47 @@ try {
   console.warn(`[server] Tick seeding failed (non-fatal): ${e.message}`);
 }
 
-if (!process.env.STATEKEEP_MULTI_INSTANCE_WARNED) {
+if (!isPostgres && !process.env.STATEKEEP_MULTI_INSTANCE_WARNED) {
   fastify.log.warn(
     'StateKeep uses SQLite — only one writer process should be running at a time. ' +
     'Set STATEKEEP_MULTI_INSTANCE_WARNED=true to suppress this warning.'
   );
 }
+
+await seedEngineRegistry();
+
+// ── Implementation registry ────────────────────────────────────────────────────
+// Load guards/actions/services from STATEKEEP_REGISTRY_PATH (if set).
+// Missing registry: warn once and continue (no-registry mode, guards silently disabled).
+// Bad registry path or invalid export: log the error and exit (misconfiguration, not degraded mode).
+{
+  const registryPath = process.env.STATEKEEP_REGISTRY_PATH;
+  if (registryPath) {
+    try {
+      const mod = await import(registryPath);
+      setGlobalRegistry(loadRegistry({
+        guards:   mod.guards   ?? mod.default?.guards   ?? {},
+        actions:  mod.actions  ?? mod.default?.actions  ?? {},
+        services: mod.services ?? mod.default?.services ?? {},
+      }));
+      fastify.log.info(`[server] Implementation registry loaded from ${registryPath}`);
+    } catch (err) {
+      fastify.log.error({ err }, `[server] Failed to load implementation registry from ${registryPath} — exiting`);
+      process.exit(1);
+    }
+  } else {
+    fastify.log.warn(
+      '[server] STATEKEEP_REGISTRY_PATH is not set — guards, actions, and invoke services are ' +
+      'disabled on the HTTP event path. Set STATEKEEP_REGISTRY_PATH to a JS module that exports ' +
+      '{ guards, actions, services }.'
+    );
+  }
+}
+
+startActionJobWorker(
+  (actorId, event) => sendEvent(actorId, event, Date.now(), {}),
+  getGlobalRegistry()
+);
 
 try {
   await fastify.listen({ port: PORT, host: '0.0.0.0' });

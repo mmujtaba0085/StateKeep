@@ -8,6 +8,10 @@
   "engines": {
     "node": ">=20.0.0"
   },
+  "exports": {
+    ".": "./src/api/server.js",
+    "./lib": "./src/lib/index.js"
+  },
   "bin": {
     "statekeep": "src/cli/index.js"
   },
@@ -30,6 +34,7 @@
     "test:coverage": "c8 node --test test/*.js",
     "test:c": "make -C test/c test",
     "build:mock": "make -C mock",
+    "build:addon": "node-gyp build --directory src/ffi",
     "test:statechart": "bash scripts/run-statechart-tests.sh",
     "test:sc1": "node --test test/statechart/sc1.valid.js",
     "test:sc2": "node --test test/statechart/sc2.structural.js",
@@ -41,6 +46,9 @@
     "test:sc8": "node --test test/statechart/sc8.confirmtoken.js",
     "test:sc9": "node --test test/statechart/sc9.unit.js",
     "test:sc9:http": "node --test test/statechart/sc9.migration-routing.js",
+    "test:sc13": "node --test test/statechart/sc13.parallel-state-paths.js",
+    "test:sc14": "node --test test/statechart/sc14.complex-migration-scenarios.js",
+    "test:sc15": "node --test test/statechart/sc15.xstate-app-workflows.js",
     "test:e2e": "playwright test",
     "test:e2e:api": "playwright test --project=api",
     "test:e2e:dashboard": "playwright test --project=dashboard",
@@ -49,6 +57,7 @@
   },
   "dependencies": {
     "@fastify/rate-limit": "^9.1.0",
+    "pg": "^8.13.0",
     "@fastify/static": "^7.0.4",
     "@fastify/swagger": "^8.15.0",
     "@fastify/swagger-ui": "^4.2.0",
@@ -65,6 +74,7 @@
   },
   "devDependencies": {
     "@playwright/test": "^1.44.0",
-    "c8": "^10.1.2"
+    "c8": "^10.1.2",
+    "node-addon-api": "^8.3.0"
   }
 }

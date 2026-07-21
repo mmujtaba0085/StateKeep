@@ -86,12 +86,5 @@ export const SAMPLE_MACHINE_V2 = {
 };
 
 // ── Seed API key into DB ──────────────────────────────────────────────────────
-
-export async function seedApiKey() {
-  const { getDb } = await import('../src/registry/db.js');
-  const { default: bcrypt } = await import('bcryptjs');
-  const db   = getDb();
-  const hash = await bcrypt.hash(TEST_KEY, 1);   // rounds=1 for speed in tests
-  db.prepare(`INSERT OR REPLACE INTO api_keys (key_hash, label, tier, org_id, created_at) VALUES (?, ?, ?, ?, ?)`)
-    .run(hash, 'test', 'enterprise', 'default', Date.now());
-}
+// Open-source mode: auth is removed, no seeding needed.
+export async function seedApiKey() {}

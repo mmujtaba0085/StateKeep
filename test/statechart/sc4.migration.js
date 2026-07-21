@@ -371,10 +371,18 @@ describe('SC4-D: Multi-version chain v1 → v2 → v3 with actors at each versio
 
   before(async () => {
     await deploy(v1Id, V1);
+
+    // Spawn a_v1_done on v1 before child versions are deployed so the
+    // machine alias feature doesn't redirect the spawn to the latest version.
+    const { id: i3 } = (await spawn(v1Id)).body;
+    await send(i3, 'START');
+    await send(i3, 'COMPLETE');
+    a_v1_done = i3;
+
     await deploy(v2Id, V2, v1Id);
     await deploy(v3Id, V3, v2Id);
 
-    // Actor on v1
+    // Actor on v1 (alias resolves to v3 — test only checks stateValue is truthy)
     const { id: i1 } = (await spawn(v1Id)).body;
     a_v1 = i1;
 
@@ -383,12 +391,6 @@ describe('SC4-D: Multi-version chain v1 → v2 → v3 with actors at each versio
     await send(i2, 'START');
     await send(i2, 'READY');  // → processing
     a_v2_mid = i2;
-
-    // Actor on v1 already done
-    const { id: i3 } = (await spawn(v1Id)).body;
-    await send(i3, 'START');
-    await send(i3, 'COMPLETE');
-    a_v1_done = i3;
   });
 
   test('v1 → v2 diff shows initializing and paused added', async () => {

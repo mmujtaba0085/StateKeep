@@ -171,8 +171,8 @@ test('restored actor disappears from GET /v1/archives', async () => {
 
 // ── 7: cross-org: org A cannot restore org B actor ────────────────────────────
 
-test('cross-org: org B cannot restore org A archived actor', async () => {
-  // Create a second org with its own key
+test.skip('cross-org: org B cannot restore org A archived actor', async () => {
+  // Open-source mode: /v1/orgs removed, cross-org isolation not applicable.
   const orgBRes = await fetch(`${BASE}/v1/orgs`, {
     method:  'POST',
     headers: {
@@ -212,8 +212,8 @@ test('cross-org: org B cannot restore org A archived actor', async () => {
 
 // ── 8: empty archives for org with no archives ────────────────────────────────
 
-test('GET /v1/archives for org with no archives returns empty array', async () => {
-  // Create a fresh org with its own key — no actors ever archived
+test.skip('GET /v1/archives for org with no archives returns empty array', async () => {
+  // Open-source mode: /v1/orgs removed; the default org always has actors.
   const orgRes = await fetch(`${BASE}/v1/orgs`, {
     method:  'POST',
     headers: { 'Content-Type': 'application/json', 'x-api-key': SENTINEL, 'x-admin-key': ADMIN_KEY },
