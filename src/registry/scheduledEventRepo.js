@@ -63,17 +63,17 @@ function getStmts() {
     `),
     findByActor: db.prepare(`
       SELECT * FROM scheduled_events
-      WHERE actor_id = ? AND org_id = ?
+      WHERE actor_id = ?
       ORDER BY fire_at ASC
     `),
     findByActorAll: db.prepare(`
       SELECT * FROM scheduled_events
-      WHERE actor_id = ? AND org_id = ?
+      WHERE actor_id = ?
       ORDER BY fire_at ASC
     `),
     findByActorStatus: db.prepare(`
       SELECT * FROM scheduled_events
-      WHERE actor_id = ? AND org_id = ? AND status = ?
+      WHERE actor_id = ? AND status = ?
       ORDER BY fire_at ASC
     `),
     findById: db.prepare(`
@@ -207,23 +207,23 @@ export async function cancelAllPendingForActor(actorId) {
   ).run(actorId).changes;
 }
 
-export async function findByActor(actorId, orgId, status = 'all') {
+export async function findByActor(actorId, status = 'all') {
   if (isPostgres) {
     const { queryAll } = await import('./db-postgres.js');
     let rows;
     if (!status || status === 'all') {
-      rows = await queryAll(`SELECT * FROM scheduled_events WHERE actor_id=$1 AND org_id=$2 ORDER BY fire_at ASC`, [actorId, orgId]);
+      rows = await queryAll(`SELECT * FROM scheduled_events WHERE actor_id=$1 ORDER BY fire_at ASC`, [actorId]);
     } else if (status === 'pending') {
-      rows = await queryAll(`SELECT * FROM scheduled_events WHERE actor_id=$1 AND org_id=$2 AND status='pending' ORDER BY fire_at ASC`, [actorId, orgId]);
+      rows = await queryAll(`SELECT * FROM scheduled_events WHERE actor_id=$1 AND status='pending' ORDER BY fire_at ASC`, [actorId]);
     } else {
-      rows = await queryAll(`SELECT * FROM scheduled_events WHERE actor_id=$1 AND org_id=$2 AND status=$3 ORDER BY fire_at ASC`, [actorId, orgId, status]);
+      rows = await queryAll(`SELECT * FROM scheduled_events WHERE actor_id=$1 AND status=$2 ORDER BY fire_at ASC`, [actorId, status]);
     }
     return rows.map(decodeRow);
   }
   const s = getStmts();
-  if (!status || status === 'all') return s.findByActorAll.all(actorId, orgId).map(decodeRow);
-  if (status === 'pending') return s.findByActor.all(actorId, orgId).map(decodeRow);
-  return s.findByActorStatus.all(actorId, orgId, status).map(decodeRow);
+  if (!status || status === 'all') return s.findByActorAll.all(actorId).map(decodeRow);
+  if (status === 'pending') return s.findByActor.all(actorId).map(decodeRow);
+  return s.findByActorStatus.all(actorId, status).map(decodeRow);
 }
 
 export async function findById(id) {
@@ -249,7 +249,6 @@ function decodeRow(row) {
   return {
     id:          row.id,
     actorId:     row.actor_id,
-    orgId:       row.org_id,
     eventType:   row.event_type,
     payload,
     fireAt:      row.fire_at,

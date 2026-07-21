@@ -37,7 +37,6 @@ const store = new Map();
  * @property {string}          definitionId   — the new definition being deployed
  * @property {string}          parentId       — its parent definition
  * @property {string}          definitionHash — SHA-256 hex of the definition JSON
- * @property {string}          orgId          — org that issued the token
  * @property {StrandedGroup[]} strandedGroups — state → count snapshot at preview time
  * @property {number}          totalStranded  — total stranded actor count at preview
  */
@@ -79,7 +78,7 @@ export function issueToken(payload) {
  * the token is invalidated (but not deleted — let it expire naturally).
  *
  * @param {string} token
- * @param {{ definitionId: string, currentStrandedCount: number, orgId: string }} opts
+ * @param {{ definitionId: string, currentStrandedCount: number }} opts
  * @returns {{ ok: true, payload: TokenPayload } | { ok: false, reason: string, newPreviewNeeded?: boolean }}
  */
 export function consumeToken(token, { definitionId, currentStrandedCount }) {
