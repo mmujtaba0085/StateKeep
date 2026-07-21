@@ -15,20 +15,48 @@ test-results/
 benchmarks/reports/
 benchmarks/matrix/reports/*.json
 benchmarks/node_modules/
-capsule-hub-skills/
-node
-statekeep@1.0.0
-*.sh.bak
 playwright-report/
 .claude/
-src/temp/
-src/dashboard-backup/
-ui/screenshots/
-ui/screenshots-new/
 test/e2e/reports/
+
+# Runtime / build artifacts
+src/ffi/build/
+*.node
+*.wasm
+
+# Proprietary APV engine source — never commit
+src/ffi/*.c
+src/ffi/*.h
+src/ffi/*.cc
+apv-engine.h
+mock/libapv-mock.c
+test/c/test_ffi_direct
+test/c/test_ffi_direct.c
+
+# VPS / infrastructure — not part of the open-source release
+vps-mcp/
+src/config/
+ecosystem.config.cjs
+litestream.yml
+seed-key.sh
+src/temp/
 prv-v2/
+
+# Internal / deprecated
+ui/
+sim/
 patches/
 xstate/
-run-webhook-*.sh
-run-sc8.sh
+statekeep@1.0.0
+capsule-hub-skills/
+src/dashboard-backup/
+
+# One-off debug scripts (keep scripts/ directory but not root-level noise)
+run-*.sh
+start-*.sh
+debug-*.sh
+benchmarks-*.sh
 sk-test.sh
+test-engine.mjs
+test-guard.mjs
+*.sh.bak
