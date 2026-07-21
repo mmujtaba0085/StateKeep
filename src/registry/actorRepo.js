@@ -4,7 +4,6 @@
  * All SQLite CRUD for the `actors` table.
  * context_json is stored AES-256-GCM encrypted.
  * history_fingerprint is stored as a hex string (uint64 → hex).
- * Every actor belongs to exactly one org (org_id). orgId is always explicit.
  */
 
 import { getDb, encrypt, decrypt, isPostgres } from './db.js';
@@ -364,20 +363,19 @@ export async function listActors({ limit = 50, offset = 0, status, definitionId 
   return s.listByDef.all({ definition_id: definitionId, limit, offset }).map(rowToActor);
 }
 
-export async function findStrandedActors(definitionId, validStates, orgId) {
-  if (!orgId) throw new Error('orgId is required');
+export async function findStrandedActors(definitionId, validStates) {
   let actors;
   if (isPostgres) {
     const { queryAll } = await import('./db-postgres.js');
     actors = await queryAll(
-      `SELECT id, state_value FROM actors WHERE definition_id=$1 AND org_id=$2 AND status='active'`,
-      [definitionId, orgId]
+      `SELECT id, state_value FROM actors WHERE definition_id=$1 AND status='active'`,
+      [definitionId]
     );
   } else {
     actors = getDb().prepare(`
       SELECT id, state_value FROM actors
-      WHERE definition_id = ? AND org_id = ? AND status = 'active'
-    `).all(definitionId, orgId);
+      WHERE definition_id = ? AND status = 'active'
+    `).all(definitionId);
   }
 
   const groups = new Map();
@@ -426,17 +424,16 @@ export async function bulkTagNeedsRescue(actorIds) {
   db.transaction(() => { for (const id of actorIds) upd.run(ts, id); })();
 }
 
-export async function findNeedsRescueActors({ definitionId, orgId, limit = 100, offset = 0 } = {}) {
-  if (!orgId) throw new Error('orgId is required');
+export async function findNeedsRescueActors({ definitionId, limit = 100, offset = 0 } = {}) {
   if (isPostgres) {
     const { queryAll } = await import('./db-postgres.js');
     let sql, params;
     if (definitionId) {
-      sql = `SELECT * FROM actors WHERE status='needs_rescue' AND org_id=$1 AND definition_id=$2 ORDER BY updated_at DESC LIMIT $3 OFFSET $4`;
-      params = [orgId, definitionId, limit, offset];
+      sql = `SELECT * FROM actors WHERE status='needs_rescue' AND definition_id=$1 ORDER BY updated_at DESC LIMIT $2 OFFSET $3`;
+      params = [definitionId, limit, offset];
     } else {
-      sql = `SELECT * FROM actors WHERE status='needs_rescue' AND org_id=$1 ORDER BY updated_at DESC LIMIT $2 OFFSET $3`;
-      params = [orgId, limit, offset];
+      sql = `SELECT * FROM actors WHERE status='needs_rescue' ORDER BY updated_at DESC LIMIT $1 OFFSET $2`;
+      params = [limit, offset];
     }
     return (await queryAll(sql, params)).map(rowToActor);
   }
@@ -444,15 +441,15 @@ export async function findNeedsRescueActors({ definitionId, orgId, limit = 100, 
   if (definitionId) {
     return db.prepare(`
       SELECT * FROM actors
-      WHERE status = 'needs_rescue' AND org_id = ? AND definition_id = ?
+      WHERE status = 'needs_rescue' AND definition_id = ?
       ORDER BY updated_at DESC LIMIT ? OFFSET ?
-    `).all(orgId, definitionId, limit, offset).map(rowToActor);
+    `).all(definitionId, limit, offset).map(rowToActor);
   }
   return db.prepare(`
     SELECT * FROM actors
-    WHERE status = 'needs_rescue' AND org_id = ?
+    WHERE status = 'needs_rescue'
     ORDER BY updated_at DESC LIMIT ? OFFSET ?
-  `).all(orgId, limit, offset).map(rowToActor);
+  `).all(limit, offset).map(rowToActor);
 }
 
 export async function deleteActor(id) {
@@ -467,15 +464,15 @@ export async function deleteActor(id) {
 export async function getActorIdentity(id) {
   if (isPostgres) {
     const { queryOne } = await import('./db-postgres.js');
-    const row = await queryOne(`SELECT id, org_id, status FROM actors WHERE id=$1`, [id]);
+    const row = await queryOne(`SELECT id, status FROM actors WHERE id=$1`, [id]);
     if (!row) return null;
-    return { id: row.id, orgId: row.org_id, status: row.status };
+    return { id: row.id, status: row.status };
   }
   const row = getDb().prepare(
-    `SELECT id, org_id, status FROM actors WHERE id = ?`
+    `SELECT id, status FROM actors WHERE id = ?`
   ).get(id);
   if (!row) return null;
-  return { id: row.id, orgId: row.org_id, status: row.status };
+  return { id: row.id, status: row.status };
 }
 
 export async function getActorDefinitionId(id) {

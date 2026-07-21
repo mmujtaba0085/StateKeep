@@ -2,7 +2,6 @@
  * src/registry/definitionRepo.js
  *
  * SQLite/Postgres CRUD for the `definitions` table.
- * Every definition belongs to exactly one org. orgId is always explicit.
  */
 
 import { getDb, isPostgres } from './db.js';
