@@ -12,6 +12,7 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 
+import { engineReady } from '../../src/ffi/engine.js';
 import { resolveLandingState } from '../../src/runtime/actorWorker.js';
 import {
   computeHistoryHash,
@@ -21,6 +22,8 @@ import {
   bigIntToHex,
   FNV_OFFSET,
 } from '../../src/ffi/hashUtils.js';
+
+await engineReady;
 
 // ── Tier 1: resolveLandingState with compound / parallel states ───────────────
 

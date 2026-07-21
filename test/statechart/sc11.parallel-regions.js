@@ -12,6 +12,7 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 
+import { engineReady } from '../../src/ffi/engine.js';
 import {
   computeHistoryHash,
   computeRegionHashes,
@@ -21,6 +22,8 @@ import {
   FNV_OFFSET,
 } from '../../src/ffi/hashUtils.js';
 import { updateRegionFingerprintsForTransition } from '../../src/runtime/statePaths.js';
+
+await engineReady;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 

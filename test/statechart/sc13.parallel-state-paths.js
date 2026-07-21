@@ -9,11 +9,14 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 
+import { engineReady } from '../../src/ffi/engine.js';
 import {
   computeHistoryHash,
   encodeRegionFingerprint,
   regionFingerprintsToArray,
 } from '../../src/ffi/hashUtils.js';
+
+await engineReady;
 import {
   extractParallelRegionPaths,
   flattenStateValue,
