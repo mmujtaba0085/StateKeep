@@ -82,7 +82,6 @@ async function deliverOne(delivery) {
     id:        delivery.id,
     webhookId: delivery.webhook_id,
     eventType: delivery.event_type,
-    orgId:     delivery.org_id,
     timestamp: Date.now(),
     data:      parsedPayload.data ?? {},
   });
@@ -166,12 +165,12 @@ async function pollAndDeliver() {
   if (isPostgres) {
     const { queryAll } = await import('../registry/db-postgres.js');
     pending = await queryAll(
-      `SELECT id, webhook_id, org_id, event_type, payload, attempts FROM webhook_deliveries WHERE status='pending' AND (next_retry_at IS NULL OR next_retry_at<=$1) ORDER BY created_at ASC LIMIT $2`,
+      `SELECT id, webhook_id, event_type, payload, attempts FROM webhook_deliveries WHERE status='pending' AND (next_retry_at IS NULL OR next_retry_at<=$1) ORDER BY created_at ASC LIMIT $2`,
       [now, MAX_CONCURRENT]
     );
   } else {
     pending = getDb().prepare(`
-      SELECT id, webhook_id, org_id, event_type, payload, attempts
+      SELECT id, webhook_id, event_type, payload, attempts
       FROM webhook_deliveries
       WHERE status = 'pending'
         AND (next_retry_at IS NULL OR next_retry_at <= ?)

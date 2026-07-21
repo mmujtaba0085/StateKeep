@@ -15,7 +15,6 @@ import { getEngine } from '../ffi/engine.js';
 import { compileMachine } from '../runtime/definitionCompiler.js';
 
 export async function deployDefinition(definitionJson, {
-  orgId    = 'default',
   parentId,
 } = {}) {
   try { createMachine(definitionJson); } catch (e) {
@@ -26,7 +25,7 @@ export async function deployDefinition(definitionJson, {
   const tStar = Number(eng.clockTick());
   const id    = randomUUID();
 
-  const machineId = await createDefinition({ id, parentId: parentId ?? null, orgId, definitionJson, deployedAt: tStar });
+  const machineId = await createDefinition({ id, parentId: parentId ?? null, definitionJson, deployedAt: tStar });
 
   // Compile and store compiled form so main-thread interpreter can process events
   try {
@@ -41,18 +40,17 @@ export async function deployDefinition(definitionJson, {
   }
 
   // Wildcard migration: all active actors on the same machine family
-  const affected = await findActorsByMachine(machineId, orgId);
+  const affected = await findActorsByMachine(machineId);
   if (affected.length === 0) {
     return { id, machineId, deployedAt: tStar, migrationJobs: 0 };
   }
 
-  const deploymentId = await createDeployment({ definitionId: id, affectedActors: affected.length, orgId });
+  const deploymentId = await createDeployment({ definitionId: id, affectedActors: affected.length });
   await updateDeploymentStatus(deploymentId, 'migrating');
 
   await enqueueJobs(affected.map(a => ({
     deployment_id: deploymentId,
     actor_id:      a.id,
-    org_id:        orgId,
     target_def_id: id,
   })));
 

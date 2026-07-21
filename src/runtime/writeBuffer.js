@@ -67,8 +67,8 @@ class WriteBuffer {
    * Queue creation of a scheduled event row (after: timer fired from interpreter).
    * payload is a plain object — will be JSON-stringified and encrypted on flush.
    */
-  queueScheduledCreate({ actorId, orgId, eventType, fireAt, payload }) {
-    this._scheduledCreates.push({ actorId, orgId, eventType, fireAt,
+  queueScheduledCreate({ actorId, eventType, fireAt, payload }) {
+    this._scheduledCreates.push({ actorId, eventType, fireAt,
       payload: JSON.stringify(payload) });
   }
 
@@ -159,7 +159,7 @@ class WriteBuffer {
         // Create new scheduled events for states with after:
         for (const row of scheduledCreates) {
           insertSched.run(
-            row.actorId, row.orgId, row.eventType,
+            row.actorId, row.eventType,
             encrypt(row.payload), row.fireAt, Date.now()
           );
         }
@@ -200,19 +200,19 @@ class WriteBuffer {
         for (const ev of events) {
           await client.query(
             `INSERT INTO events
-               (actor_id, org_id, event_type, event_payload, tick, processed_at, idempotency_key)
-             VALUES ($1,$2,$3,$4,$5,$6,$7)
-             ON CONFLICT (actor_id, org_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING`,
-            [ev.actor_id, ev.org_id, ev.event_type, ev.event_payload,
+               (actor_id, event_type, event_payload, tick, processed_at, idempotency_key)
+             VALUES ($1,$2,$3,$4,$5,$6)
+             ON CONFLICT (actor_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING`,
+            [ev.actor_id, ev.event_type, ev.event_payload,
              ev.tick, ev.processed_at, ev.idempotency_key ?? null]
           );
         }
         for (const dec of decisions) {
           await client.query(
             `INSERT INTO migration_decisions
-               (actor_id, org_id, deployment_id, trigger, evaluated_at, decision, reason,
+               (actor_id, deployment_id, trigger, evaluated_at, decision, reason,
                 from_definition_id, to_definition_id, actor_fingerprint, prefix_hash, created_at)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
             dec
           );
         }
@@ -228,9 +228,9 @@ class WriteBuffer {
         for (const row of scheduledCreates) {
           await client.query(
             `INSERT INTO scheduled_events
-               (actor_id, org_id, event_type, payload_enc, fire_at, status, created_at)
-             VALUES ($1,$2,$3,$4,$5,'pending',$6)`,
-            [row.actorId, row.orgId, row.eventType, encrypt(row.payload), row.fireAt, Date.now()]
+               (actor_id, event_type, payload_enc, fire_at, status, created_at)
+             VALUES ($1,$2,$3,$4,'pending',$5)`,
+            [row.actorId, row.eventType, encrypt(row.payload), row.fireAt, Date.now()]
           );
         }
       });
@@ -270,14 +270,14 @@ class WriteBuffer {
       `),
       event: db.prepare(`
         INSERT OR IGNORE INTO events
-          (actor_id, org_id, event_type, event_payload, tick, processed_at, idempotency_key)
-        VALUES (@actor_id, @org_id, @event_type, @event_payload, @tick, @processed_at, @idempotency_key)
+          (actor_id, event_type, event_payload, tick, processed_at, idempotency_key)
+        VALUES (@actor_id, @event_type, @event_payload, @tick, @processed_at, @idempotency_key)
       `),
       decision: db.prepare(`
         INSERT INTO migration_decisions
-          (actor_id, org_id, deployment_id, trigger, evaluated_at, decision, reason,
+          (actor_id, deployment_id, trigger, evaluated_at, decision, reason,
            from_definition_id, to_definition_id, actor_fingerprint, prefix_hash, created_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?)
       `),
       schedCancel: db.prepare(`
         UPDATE scheduled_events
@@ -286,8 +286,8 @@ class WriteBuffer {
       `),
       schedInsert: db.prepare(`
         INSERT INTO scheduled_events
-          (actor_id, org_id, event_type, payload_enc, fire_at, status, created_at)
-        VALUES (?, ?, ?, ?, ?, 'pending', ?)
+          (actor_id, event_type, payload_enc, fire_at, status, created_at)
+        VALUES (?, ?, ?, ?, 'pending', ?)
       `),
     };
     return this._stmts;

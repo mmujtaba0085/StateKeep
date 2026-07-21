@@ -91,35 +91,35 @@ async function syncRegistry() {
 
 await syncRegistry();
 
-async function insertEvent(actorId, orgId, eventType, payload, tick) {
+async function insertEvent(actorId, eventType, payload, tick) {
   const encPayload = encrypt(Buffer.from(JSON.stringify(payload)));
   if (isPostgres) {
     const { query } = await import('../registry/db-postgres.js');
     await query(
-      `INSERT INTO events (actor_id, org_id, event_type, event_payload, tick, processed_at) VALUES ($1,$2,$3,$4,$5,$6)`,
-      [actorId, orgId, eventType, encPayload, tick, Date.now()]
+      `INSERT INTO events (actor_id, event_type, event_payload, tick, processed_at) VALUES ($1,$2,$3,$4,$5)`,
+      [actorId, eventType, encPayload, tick, Date.now()]
     );
   } else {
     getDb().prepare(
-      `INSERT INTO events (actor_id, org_id, event_type, event_payload, tick, processed_at) VALUES (?, ?, ?, ?, ?, ?)`
-    ).run(actorId, orgId, eventType, encPayload, tick, Date.now());
+      `INSERT INTO events (actor_id, event_type, event_payload, tick, processed_at) VALUES (?, ?, ?, ?, ?)`
+    ).run(actorId, eventType, encPayload, tick, Date.now());
   }
 }
 
-async function insertDecision(actorId, orgId, deploymentId, tick, decision, reason, fromDefId, toDefId, fingerprint) {
+async function insertDecision(actorId, deploymentId, tick, decision, reason, fromDefId, toDefId, fingerprint) {
   try {
     if (isPostgres) {
       const { query } = await import('../registry/db-postgres.js');
       await query(
-        `INSERT INTO migration_decisions (actor_id, org_id, deployment_id, trigger, evaluated_at, decision, reason, from_definition_id, to_definition_id, actor_fingerprint, prefix_hash, created_at)
-         VALUES ($1,$2,$3,'batch_worker',$4,$5,$6,$7,$8,$9,'0',$10)`,
-        [actorId, orgId ?? 'default', deploymentId, tick, decision, reason, fromDefId, toDefId, fingerprint, Date.now()]
+        `INSERT INTO migration_decisions (actor_id, deployment_id, trigger, evaluated_at, decision, reason, from_definition_id, to_definition_id, actor_fingerprint, prefix_hash, created_at)
+         VALUES ($1,$2,'batch_worker',$3,$4,$5,$6,$7,$8,'0',$9)`,
+        [actorId, deploymentId, tick, decision, reason, fromDefId, toDefId, fingerprint, Date.now()]
       );
     } else {
       getDb().prepare(
-        `INSERT INTO migration_decisions (actor_id, org_id, deployment_id, trigger, evaluated_at, decision, reason, from_definition_id, to_definition_id, actor_fingerprint, prefix_hash, created_at)
+        `INSERT INTO migration_decisions (actor_id, deployment_id, trigger, evaluated_at, decision, reason, from_definition_id, to_definition_id, actor_fingerprint, prefix_hash, created_at)
          VALUES (?,?,'batch_worker',?,?,?,?,?,?,'0',?)`
-      ).run(actorId, orgId ?? 'default', deploymentId, tick, decision, reason, fromDefId, toDefId, fingerprint, Date.now());
+      ).run(actorId, deploymentId, tick, decision, reason, fromDefId, toDefId, fingerprint, Date.now());
     }
   } catch (e) {
     console.warn(`[migrate-worker] decision log failed for ${actorId}: ${e.message}`);
@@ -127,7 +127,7 @@ async function insertDecision(actorId, orgId, deploymentId, tick, decision, reas
 }
 
 async function processJob(job) {
-  const { id, actor_id, org_id, target_def_id, deployment_id } = job;
+  const { id, actor_id, target_def_id, deployment_id } = job;
 
   const actorBefore = await findActorById(actor_id);
   const fromState   = actorBefore?.stateValue ?? null;
@@ -165,7 +165,7 @@ async function processJob(job) {
 
     if (!recheck || recheck !== target_def_id) {
       await markFailed(id, 'cancelled: fingerprint_changed');
-      await insertDecision(actor_id, org_id, deployment_id, currentTick, 'cancelled', 'fingerprint_changed', fromDefId, target_def_id, actorBefore.historyFingerprint);
+      await insertDecision(actor_id, deployment_id, currentTick, 'cancelled', 'fingerprint_changed', fromDefId, target_def_id, actorBefore.historyFingerprint);
       await incrementFailed(deployment_id);
       return;
     }
@@ -175,7 +175,7 @@ async function processJob(job) {
 
   try {
     invalidateDefinitionCache(target_def_id);
-    const result = await migrateActor(actor_id, target_def_id, { priority: 'low', orgId: org_id ?? '_system' });
+    const result = await migrateActor(actor_id, target_def_id, { priority: 'low' });
 
     const targetDef     = await findDefinitionById(target_def_id);
     const migratedActor = await findActorById(actor_id);
@@ -187,7 +187,7 @@ async function processJob(job) {
       }
     }
 
-    await insertEvent(actor_id, org_id, 'MIGRATED', {
+    await insertEvent(actor_id, 'MIGRATED', {
       fromDefinitionId: fromDefId,
       toDefinitionId:   target_def_id,
       fromState,
@@ -212,7 +212,7 @@ async function processJob(job) {
       }
       evictFromApiCache(actor_id);
 
-      await insertEvent(actor_id, org_id, 'MIGRATION_FAILED', {
+      await insertEvent(actor_id, 'MIGRATION_FAILED', {
         fromDefinitionId: fromDefId,
         toDefinitionId:   target_def_id,
         reason:           err.code,

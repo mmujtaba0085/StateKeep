@@ -87,16 +87,14 @@ export async function createStateKeep({
 
   const { deployDefinition: _deploy } = await import('./deploy.js');
 
-  const orgId = 'default';
-
   return {
     async deployDefinition(definitionJson, options = {}) {
-      return _deploy(definitionJson, { orgId, ...options });
+      return _deploy(definitionJson, options);
     },
 
     async spawnActor({ definitionId, context, initialContext } = {}) {
       if (!definitionId) throw new Error('definitionId is required');
-      const result = await _spawn({ definitionId, orgId, initialContext: context ?? initialContext });
+      const result = await _spawn({ definitionId, initialContext: context ?? initialContext });
       return result;
     },
 
@@ -113,7 +111,7 @@ export async function createStateKeep({
 
     async terminateActor(actorId) {
       if (!actorId) throw new Error('actorId is required');
-      return _terminate(actorId, { orgId });
+      return _terminate(actorId, {});
     },
 
     async close() {

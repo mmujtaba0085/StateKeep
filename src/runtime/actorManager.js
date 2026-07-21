@@ -163,12 +163,12 @@ export function invalidateMigrationCacheForDefinition(definitionId) {
 // ── Decision log helper ───────────────────────────────────────────────────────
 
 function logDecision({
-  actorId, orgId = 'default', deploymentId = null, trigger, evaluatedAt,
+  actorId, deploymentId = null, trigger, evaluatedAt,
   decision, reason, fromDefinitionId, toDefinitionId,
   actorFingerprint, prefixHash = '0',
 }) {
   getWriteBuffer().queueDecision([
-    actorId, orgId, deploymentId ?? null, trigger, Number(evaluatedAt),
+    actorId, deploymentId ?? null, trigger, Number(evaluatedAt),
     decision, reason,
     fromDefinitionId ?? null, toDefinitionId ?? null,
     actorFingerprint, prefixHash, Date.now(),
@@ -195,7 +195,7 @@ function touch(id, entry) {
   hotRegistry.set(id, entry);
 }
 
-async function ensureInWorker(actorId, actor, priority = 'normal', orgId = '_system') {
+async function ensureInWorker(actorId, actor, priority = 'normal') {
   const pool = getWorkerPool();
   const def  = await cachedFindDefinition(actor.definitionId);
   if (!def) throw new Error(`Definition ${actor.definitionId} not found`);
@@ -209,7 +209,7 @@ async function ensureInWorker(actorId, actor, priority = 'normal', orgId = '_sys
     stateSnapshot:  actor.stateValue
       ? { value: actor.stateValue, context: actor.context, status: 'active' }
       : undefined,
-  }, { priority, orgId });
+  }, { priority });
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -217,14 +217,9 @@ async function ensureInWorker(actorId, actor, priority = 'normal', orgId = '_sys
 /**
  * Spawn a new actor from a definition.
  */
-export async function spawnActor({ definitionId, orgId, initialContext, logicalStartTick }) {
+export async function spawnActor({ definitionId, initialContext, logicalStartTick }) {
   const def = await cachedFindDefinition(definitionId);
   if (!def) throw new Error(`Definition not found: ${definitionId}`);
-  if (!orgId) throw new Error('orgId is required to spawn an actor');
-  if (def.orgId && def.orgId !== orgId) throw Object.assign(
-    new Error(`Definition ${definitionId} does not belong to your organisation`),
-    { statusCode: 404 }
-  );
 
   const pool    = getWorkerPool();
   const actorId = (await import('uuid')).v4();
@@ -234,7 +229,6 @@ export async function spawnActor({ definitionId, orgId, initialContext, logicalS
   await dbCreateActor({
     id: actorId,
     definitionId,
-    orgId,
     stateValue:         null,
     context:            initialContext ?? {},
     logicalStartTick:   actorLogicalTick,
@@ -264,7 +258,6 @@ export async function spawnActor({ definitionId, orgId, initialContext, logicalS
 
   touch(actorId, {
     definitionId,
-    orgId,
     stateValue:         workerResult.stateValue,
     context:            effectiveContext,
     historyFingerprint: '0',
@@ -295,7 +288,7 @@ export async function spawnActor({ definitionId, orgId, initialContext, logicalS
  *   both land in the same 50ms flush transaction.
  */
 export async function sendEvent(actorId, event, tick, opts = {}) {
-  const { eventData, priority = 'normal', orgId: optsOrgId, durability = 'buffered' } = opts;
+  const { eventData, priority = 'normal', durability = 'buffered' } = opts;
   const pool = getWorkerPool();
 
   // Load from hot registry or SQLite.
@@ -321,11 +314,9 @@ export async function sendEvent(actorId, event, tick, opts = {}) {
         { code: 'ACTOR_NEEDS_RESCUE', actorId, status: 'needs_rescue' }
       );
     }
-    const _ensureOrgId = optsOrgId ?? actor.orgId ?? '_system';
-    await ensureInWorker(actorId, actor, priority, _ensureOrgId);
+    await ensureInWorker(actorId, actor, priority);
     entry = {
       definitionId:       actor.definitionId,
-      orgId:              actor.orgId,
       stateValue:         actor.stateValue,
       context:            actor.context,
       historyFingerprint: actor.historyFingerprint,
@@ -408,7 +399,7 @@ export async function sendEvent(actorId, event, tick, opts = {}) {
           const targetDef = await cachedFindDefinition(targetDefId);
           if (targetDef && currentDef && Number(targetDef.deployedAt) <= Number(currentDef.deployedAt)) {
             logDecision({
-              actorId, orgId: entry.orgId, trigger: 'inline_event', evaluatedAt: currentTick,
+              actorId, trigger: 'inline_event', evaluatedAt: currentTick,
               decision: 'stayed', reason: 'backward_migration_blocked',
               fromDefinitionId: entry.definitionId, toDefinitionId: targetDefId,
               actorFingerprint: fp,
@@ -426,7 +417,7 @@ export async function sendEvent(actorId, event, tick, opts = {}) {
       // Version swap: migrate first, then process event on new definition
       // fromDefId is captured in outer scope above
       try {
-        await migrateActor(actorId, targetDefId, { priority, orgId: entry.orgId });
+        await migrateActor(actorId, targetDefId, { priority });
         // Evict ALL cached decisions for this actor/fromDef (key now includes fingerprint)
         const _prefix = `${actorId}:${fromDefId}:`;
         for (const key of migrationCheckCache.keys()) {
@@ -436,7 +427,7 @@ export async function sendEvent(actorId, event, tick, opts = {}) {
         entry = hotRegistry.get(actorId) ?? entry;
         migratedTo = targetDefId;
         logDecision({
-          actorId, orgId: entry.orgId, trigger: 'inline_event', evaluatedAt: currentTick,
+          actorId, trigger: 'inline_event', evaluatedAt: currentTick,
           decision: 'migrated', reason: 'fingerprint_match',
           fromDefinitionId: fromDefId, toDefinitionId: targetDefId,
           actorFingerprint: fp,
@@ -444,7 +435,7 @@ export async function sendEvent(actorId, event, tick, opts = {}) {
       } catch (migrateErr) {
         if (migrateErr.code === 'STATE_NOT_MAPPABLE') {
           logDecision({
-            actorId, orgId: entry.orgId, trigger: 'inline_event', evaluatedAt: currentTick,
+            actorId, trigger: 'inline_event', evaluatedAt: currentTick,
             decision: 'failed', reason: 'state_not_mappable',
             fromDefinitionId: fromDefId, toDefinitionId: targetDefId,
             actorFingerprint: fp,
@@ -464,15 +455,13 @@ export async function sendEvent(actorId, event, tick, opts = {}) {
     } else if (cachedResult === undefined) {
       // First evaluation, actor stays — log it once (cache prevents duplicate logs)
       logDecision({
-        actorId, orgId: entry.orgId, trigger: 'inline_event', evaluatedAt: currentTick,
+        actorId, trigger: 'inline_event', evaluatedAt: currentTick,
         decision: 'stayed', reason: targetDefId ? 'already_current' : 'fingerprint_mismatch',
         fromDefinitionId: entry.definitionId, toDefinitionId: null,
         actorFingerprint: fp,
       });
     }
   }
-
-  const _eventOrgId = optsOrgId ?? entry.orgId ?? '_system';
 
   // ── Main-thread event processing ─────────────────────────────────────────────
   const def = await cachedFindDefinition(entry.definitionId);
@@ -551,14 +540,14 @@ export async function sendEvent(actorId, event, tick, opts = {}) {
       startInvoke(
         actorId, serviceId, invokeFn, opts,
         { context: interpResult.context, event },
-        (targetId, ev) => sendEvent(targetId, ev, Date.now(), { orgId: entry.orgId })
+        (targetId, ev) => sendEvent(targetId, ev, Date.now(), {})
       ).catch(err => console.error(`[actorManager] startInvoke failed for ${actorId}:`, err.message));
     }
   }
 
   // Dispatch cross-actor sends collected by meta.send (deferred post-transition)
   for (const { targetId, event: pendingEv } of pendingSends) {
-    sendEvent(targetId, pendingEv, tick, { priority, orgId: _eventOrgId })
+    sendEvent(targetId, pendingEv, tick, { priority })
       .catch(err => console.error(`[actorManager] meta.send to ${targetId} failed:`, err.message));
   }
 
@@ -621,7 +610,6 @@ export async function sendEvent(actorId, event, tick, opts = {}) {
         for (const { eventType, delayMs } of op.entries) {
           buf.queueScheduledCreate({
             actorId,
-            orgId:   entry.orgId,
             eventType,
             fireAt:  Date.now() + delayMs,
             payload: { stateEntryId: op.newEntryId },
@@ -644,24 +632,21 @@ export async function sendEvent(actorId, event, tick, opts = {}) {
   }
 
   // Emit webhook events (never throws — emitWebhookEvent swallows errors)
-  const orgId = entry.orgId;
-  if (orgId) {
-    emitWebhookEvent(orgId, 'state.changed', {
+  emitWebhookEvent('state.changed', {
+    actorId,
+    fromState: _fromState,
+    toState:   result.stateValue,
+    event:     event.type ?? event,
+  });
+  if (migratedTo) {
+    emitWebhookEvent('actor.migrated', {
       actorId,
-      fromState: _fromState,
-      toState:   result.stateValue,
-      event:     event.type ?? event,
+      fromDef: fromDefId,
+      toDef:   migratedTo,
     });
-    if (migratedTo) {
-      emitWebhookEvent(orgId, 'actor.migrated', {
-        actorId,
-        fromDef: fromDefId,
-        toDef:   migratedTo,
-      });
-    }
-    if (result.done) {
-      emitWebhookEvent(orgId, 'actor.terminated', { actorId });
-    }
+  }
+  if (result.done) {
+    emitWebhookEvent('actor.terminated', { actorId });
   }
 
   return { ...result, migratedTo };
@@ -691,7 +676,7 @@ export async function getActorState(actorId, { priority = 'normal' } = {}) {
   if (hot) {
     const pool = getWorkerPool();
     try {
-      const snap = await pool.send(actorId, { type: 'SNAPSHOT', actorId }, { priority, orgId: actor.orgId ?? '_system' });
+      const snap = await pool.send(actorId, { type: 'SNAPSHOT', actorId }, { priority });
       if (snap) {
         touch(actorId, { ...hot, lastAccess: Date.now() });
         // Augment worker snapshot with registry metadata not held by the worker thread.
@@ -729,7 +714,7 @@ export async function getActorState(actorId, { priority = 'normal' } = {}) {
 /**
  * Terminate an actor.
  */
-export async function terminateActor(actorId, { priority = 'normal', orgId } = {}) {
+export async function terminateActor(actorId, { priority = 'normal' } = {}) {
   const pool = getWorkerPool();
 
   // Capture before removal so actorStopped gets accurate args
@@ -737,10 +722,9 @@ export async function terminateActor(actorId, { priority = 'normal', orgId } = {
   const fromDb = hot ? null : await findActorById(actorId);
   const fp     = hot?.historyFingerprint ?? fromDb?.historyFingerprint ?? '0';
   const lst    = hot?.logicalStartTick   ?? fromDb?.logicalStartTick   ?? 0;
-  const _orgId = orgId ?? hot?.orgId ?? fromDb?.orgId ?? '_system';
 
   try {
-    await pool.send(actorId, { type: 'TERMINATE', actorId }, { priority, orgId: _orgId });
+    await pool.send(actorId, { type: 'TERMINATE', actorId }, { priority });
   } catch {}
 
   hotRegistry.delete(actorId);
@@ -756,14 +740,14 @@ export async function terminateActor(actorId, { priority = 'normal', orgId } = {
     if (eng.available) eng.actorStopped(BigInt(lst), fingerprintToBigInt(fp));
   } catch {}
 
-  if (_orgId && _orgId !== '_system') emitWebhookEvent(_orgId, 'actor.terminated', { actorId });
+  emitWebhookEvent('actor.terminated', { actorId });
 }
 
 /**
  * Migrate an actor to a new definition (called by migrate-worker and inline).
  * Throws with code 'STATE_NOT_MAPPABLE' if the actor's state cannot be resolved.
  */
-export async function migrateActor(actorId, targetDefinitionId, { priority = 'normal', orgId } = {}) {
+export async function migrateActor(actorId, targetDefinitionId, { priority = 'normal' } = {}) {
   const pool   = getWorkerPool();
   const actor  = await findActorById(actorId);
   if (!actor) throw new Error(`Actor not found: ${actorId}`);
@@ -773,7 +757,6 @@ export async function migrateActor(actorId, targetDefinitionId, { priority = 'no
 
   const stateMapping     = targetDef.definitionJson._stateMapping    ?? {};
   const contextTransform = targetDef.definitionJson._contextTransform ?? null;
-  const _orgId           = orgId ?? actor.orgId ?? '_system';
 
   const result = await pool.send(actorId, {
     type:                 'HYDRATE',
@@ -786,7 +769,7 @@ export async function migrateActor(actorId, targetDefinitionId, { priority = 'no
     existingFingerprint:  actor.historyFingerprint,
     existingRegionFingerprints: actor.regionFingerprints ?? null,
     contextTransform,
-  }, { priority, orgId: _orgId });
+  }, { priority });
 
   if (result && result.error === 'STATE_NOT_MAPPABLE') {
     throw Object.assign(
@@ -848,13 +831,13 @@ export async function migrateActor(actorId, targetDefinitionId, { priority = 'no
         if (afters.length > 0) {
           const insertSched = db.prepare(
             `INSERT INTO scheduled_events
-               (actor_id, org_id, event_type, payload_enc, fire_at, status, created_at)
-             VALUES (?, ?, ?, ?, ?, 'pending', ?)`
+               (actor_id, event_type, payload_enc, fire_at, status, created_at)
+             VALUES (?, ?, ?, ?, 'pending', ?)`
           );
           const now = Date.now();
           for (const { delayMs, eventType } of afters) {
             insertSched.run(
-              actorId, actor.orgId, eventType,
+              actorId, eventType,
               encrypt(JSON.stringify({ stateEntryId: newEntryId })),
               now + delayMs, now
             );
@@ -889,9 +872,9 @@ export async function migrateActor(actorId, targetDefinitionId, { priority = 'no
           for (const { delayMs, eventType } of afters) {
             await query(
               `INSERT INTO scheduled_events
-                 (actor_id, org_id, event_type, payload_enc, fire_at, status, created_at)
-               VALUES ($1,$2,$3,$4,$5,'pending',$6)`,
-              [actorId, actor.orgId, eventType,
+                 (actor_id, event_type, payload_enc, fire_at, status, created_at)
+               VALUES ($1,$2,$3,$4,'pending',$5)`,
+              [actorId, eventType,
                encrypt(JSON.stringify({ stateEntryId: newEntryId })),
                now + delayMs, now]
             );
@@ -914,7 +897,6 @@ export async function migrateActor(actorId, targetDefinitionId, { priority = 'no
     const existing = hotRegistry.get(actorId);
     touch(actorId, {
       definitionId:       targetDefinitionId,
-      orgId:              existing?.orgId ?? actor.orgId,
       stateValue:         result.stateValue,
       context:            result.context,
       historyFingerprint: actor.historyFingerprint,

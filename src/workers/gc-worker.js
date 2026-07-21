@@ -54,7 +54,6 @@ async function runGC() {
     try {
       const archiveData = {
         id:                 actor.id,
-        orgId:              actor.orgId,
         definitionId:       actor.definitionId,
         stateValue:         actor.stateValue,
         context:            actor.context,
@@ -63,10 +62,10 @@ async function runGC() {
         archivedAt:         Date.now(),
       };
 
-      const filename = join(ARCHIVE_DIR, `${actor.orgId}_${actor.id}.json.gz`);
+      const filename = join(ARCHIVE_DIR, `${actor.id}.json.gz`);
       writeFileSync(filename, gzipSync(JSON.stringify(archiveData)));
 
-      await cancelAllPendingForActor(actor.id, actor.orgId);
+      await cancelAllPendingForActor(actor.id);
       await updateActorStatus(actor.id, 'archived');
 
       // Record archive metadata for lookup/restore
@@ -74,18 +73,18 @@ async function runGC() {
         if (isPostgres) {
           const { query } = await import('../registry/db-postgres.js');
           await query(
-            `INSERT INTO actor_archives (actor_id, org_id, machine_id, archived_at, file_path, state_value, definition_id)
-             VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (actor_id) DO UPDATE SET archived_at=EXCLUDED.archived_at, file_path=EXCLUDED.file_path, state_value=EXCLUDED.state_value`,
-            [actor.id, actor.orgId, null, archiveData.archivedAt, filename,
+            `INSERT INTO actor_archives (actor_id, machine_id, archived_at, file_path, state_value, definition_id)
+             VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (actor_id) DO UPDATE SET archived_at=EXCLUDED.archived_at, file_path=EXCLUDED.file_path, state_value=EXCLUDED.state_value`,
+            [actor.id, null, archiveData.archivedAt, filename,
              actor.stateValue ? JSON.stringify(actor.stateValue) : null, actor.definitionId]
           );
         } else {
           getDb().prepare(`
             INSERT OR REPLACE INTO actor_archives
-              (actor_id, org_id, machine_id, archived_at, file_path, state_value, definition_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+              (actor_id, machine_id, archived_at, file_path, state_value, definition_id)
+            VALUES (?, ?, ?, ?, ?, ?)
           `).run(
-            actor.id, actor.orgId, null, archiveData.archivedAt, filename,
+            actor.id, null, archiveData.archivedAt, filename,
             actor.stateValue ? JSON.stringify(actor.stateValue) : null, actor.definitionId
           );
         }

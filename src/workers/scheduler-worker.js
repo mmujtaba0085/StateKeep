@@ -64,13 +64,13 @@ async function tick() {
       if (isPostgres) {
         const { query } = await import('../registry/db-postgres.js');
         await query(
-          `INSERT INTO events (actor_id, org_id, event_type, event_payload, tick, processed_at) VALUES ($1,$2,'SCHEDULED_EVENT_FIRED',$3,$4,$5)`,
-          [row.actorId ?? row.actor_id, row.orgId ?? row.org_id, encPayload, clockTick, now]
+          `INSERT INTO events (actor_id, event_type, event_payload, tick, processed_at) VALUES ($1,'SCHEDULED_EVENT_FIRED',$2,$3,$4)`,
+          [row.actorId ?? row.actor_id, encPayload, clockTick, now]
         );
       } else {
         getDb().prepare(
-          `INSERT INTO events (actor_id, org_id, event_type, event_payload, tick, processed_at) VALUES (?, ?, 'SCHEDULED_EVENT_FIRED', ?, ?, ?)`
-        ).run(row.actorId ?? row.actor_id, row.orgId ?? row.org_id, encPayload, clockTick, now);
+          `INSERT INTO events (actor_id, event_type, event_payload, tick, processed_at) VALUES (?, 'SCHEDULED_EVENT_FIRED', ?, ?, ?)`
+        ).run(row.actorId ?? row.actor_id, encPayload, clockTick, now);
       }
 
     } catch (err) {
