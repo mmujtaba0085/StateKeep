@@ -654,6 +654,62 @@ export function getDb() {
     console.log('[db] Migration v24 applied: event_snap encryption in action_jobs');
   }
 
+  // v25 — Drop org_id from all data tables; drop orgs + api_keys tables entirely
+  if (!appliedVersions.has(25)) {
+    _db.transaction(() => {
+      // Drop indexes that reference org_id BEFORE dropping the column
+      _db.exec(`DROP INDEX IF EXISTS idx_actors_org`);
+      _db.exec(`DROP INDEX IF EXISTS idx_definitions_org`);
+      _db.exec(`DROP INDEX IF EXISTS idx_decisions_org`);
+      _db.exec(`DROP INDEX IF EXISTS idx_jobs_org`);
+      _db.exec(`DROP INDEX IF EXISTS idx_api_keys_org`);
+      _db.exec(`DROP INDEX IF EXISTS idx_events_org`);
+      _db.exec(`DROP INDEX IF EXISTS idx_sched_org`);
+      _db.exec(`DROP INDEX IF EXISTS idx_archives_org`);
+      _db.exec(`DROP INDEX IF EXISTS idx_webhooks_org`);
+      _db.exec(`DROP INDEX IF EXISTS idx_changepoints_org`);
+      _db.exec(`DROP INDEX IF EXISTS idx_par_cp_org`);
+      _db.exec(`DROP INDEX IF EXISTS idx_actors_def`);
+      // Unique indexes that included org_id
+      _db.exec(`DROP INDEX IF EXISTS idx_changepoints_unique`);
+      _db.exec(`DROP INDEX IF EXISTS idx_par_changepoints_unique`);
+
+      // Drop org_id column from all 13 data tables
+      const tables = [
+        'actors', 'definitions', 'deployments', 'migration_jobs',
+        'migration_decisions', 'metrics_snapshots', 'events',
+        'scheduled_events', 'actor_archives', 'webhooks',
+        'webhook_deliveries', 'changepoints', 'par_changepoints',
+      ];
+      for (const t of tables) {
+        try {
+          _db.exec(`ALTER TABLE ${t} DROP COLUMN org_id`);
+        } catch (e) {
+          // Column may not exist on fresh DBs that never had org_id — ignore
+          if (!e.message.includes('no such column') && !e.message.includes('no column')) throw e;
+        }
+      }
+
+      // Drop org and key tables entirely
+      _db.exec(`DROP TABLE IF EXISTS api_keys`);
+      _db.exec(`DROP TABLE IF EXISTS orgs`);
+
+      // Recreate indexes without org_id
+      _db.exec(`CREATE INDEX IF NOT EXISTS idx_actors_def ON actors(definition_id)`);
+      _db.exec(`
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_changepoints_unique
+          ON changepoints(t_star, prefix_hash, refinement)
+      `);
+      _db.exec(`
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_par_changepoints_unique
+          ON par_changepoints(child_def_id)
+      `);
+
+      _db.exec(`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (25, unixepoch())`);
+    })();
+    console.log('[db] Migration v25 applied: org_id columns dropped; orgs + api_keys tables removed');
+  }
+
   // Graceful shutdown
   process.on('exit',    () => { try { _db.close(); } catch {} });
   process.on('SIGINT',  () => { process.exit(0); });
