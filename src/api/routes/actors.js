@@ -382,6 +382,9 @@ export async function actorRoutes(fastify) {
     // `after` is the preferred cursor param; `afterId` is backward-compat alias
     const after = request.query.after ?? request.query.afterId ?? 0;
 
+    // Flush write buffer first so buffered events are visible in the DB query.
+    await getWriteBuffer().flush();
+
     // Fetch limit+1 to detect hasMore without a COUNT query
     let rows;
     if (isPostgres) {

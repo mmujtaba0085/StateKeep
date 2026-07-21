@@ -27,7 +27,7 @@
 import '../setup.js';
 import { test, describe, before } from 'node:test';
 import assert from 'node:assert/strict';
-import { seedApiKey, post, get, put } from '../setup.js';
+import { seedApiKey, post, get, put, del } from '../setup.js';
 import {
   VALID_LINEAR, VALID_HIERARCHICAL, VALID_PARALLEL,
   VALID_CYCLIC, COMPLEX_SAAS,
@@ -187,19 +187,12 @@ describe('SC6-D: Terminated actors do not prevent GC', () => {
   });
 
   test('manually delete all actors — definition becomes candidate for GC', async () => {
-    // Use DB-level termination (testing actorRepo directly)
-    const { updateActorStatus } = await import('../../src/registry/actorRepo.js').catch(() => null) ?? {};
-    if (!updateActorStatus) {
-      console.log('  actorRepo not importable (native module) — checking via API');
-      // Try DELETE via API instead
-      for (const id of actorIds) {
-        const r = await (await import('../setup.js')).del(`/v1/actors/${id}`);
-        assert.ok([204, 404].includes(r.status));
-      }
-    } else {
-      for (const id of actorIds) {
-        updateActorStatus(id, 'terminated');
-      }
+    // Terminate via API so the hot registry is updated alongside the DB.
+    // (Calling actorRepo.updateActorStatus directly only writes to DB and
+    // leaves the hot registry stale, causing getState to still show 'active'.)
+    for (const id of actorIds) {
+      const r = await del(`/v1/actors/${id}`);
+      assert.ok([200, 404].includes(r.status));
     }
 
     // Verify actors are gone / terminated
