@@ -7,7 +7,7 @@
 
 import { createMachine } from 'xstate';
 import { randomUUID } from 'crypto';
-import { createDefinition, findDefinitionById, updateCompiledJson } from '../registry/definitionRepo.js';
+import { createDefinition, updateCompiledJson } from '../registry/definitionRepo.js';
 import { createDeployment, updateDeploymentStatus } from '../registry/deploymentRepo.js';
 import { enqueueJobs } from '../registry/jobRepo.js';
 import { findActorsByMachine } from '../registry/actorRepo.js';
@@ -26,27 +26,24 @@ export async function deployDefinition(definitionJson, {
   const tStar = Number(eng.clockTick());
   const id    = randomUUID();
 
-  await createDefinition({ id, parentId: parentId ?? null, orgId, definitionJson, deployedAt: tStar });
-
-  const def = await findDefinitionById(id);
-  if (!def) throw new Error('Definition create failed');
+  const machineId = await createDefinition({ id, parentId: parentId ?? null, orgId, definitionJson, deployedAt: tStar });
 
   // Compile and store compiled form so main-thread interpreter can process events
   try {
-    const { runtimeDef: _rt, ...compiledForm } = compileMachine(def.definitionJson);
+    const { runtimeDef: _rt, ...compiledForm } = compileMachine(definitionJson);
     await updateCompiledJson(id, compiledForm);
   } catch (compileErr) {
     console.warn(`[deploy] Compile warning for ${id}:`, compileErr.message);
   }
 
   if (!parentId) {
-    return { id, machineId: def.machineId, deployedAt: tStar };
+    return { id, machineId, deployedAt: tStar };
   }
 
   // Wildcard migration: all active actors on the same machine family
-  const affected = await findActorsByMachine(def.machineId, orgId);
+  const affected = await findActorsByMachine(machineId, orgId);
   if (affected.length === 0) {
-    return { id, machineId: def.machineId, deployedAt: tStar, migrationJobs: 0 };
+    return { id, machineId, deployedAt: tStar, migrationJobs: 0 };
   }
 
   const deploymentId = await createDeployment({ definitionId: id, affectedActors: affected.length, orgId });
@@ -59,5 +56,5 @@ export async function deployDefinition(definitionJson, {
     target_def_id: id,
   })));
 
-  return { id, machineId: def.machineId, deployedAt: tStar, deploymentId, migrationJobs: affected.length };
+  return { id, machineId, deployedAt: tStar, deploymentId, migrationJobs: affected.length };
 }

@@ -50,11 +50,17 @@ function rowToDefinition(row) {
     parentId:       row.parent_id,
     machineId:      row.machine_id,
     orgId:          row.org_id,
-    definitionJson: JSON.parse(
-      Buffer.isBuffer(row.definition_json)
-        ? row.definition_json.toString('utf8')
-        : String(row.definition_json)
-    ),
+    definitionJson: (() => {
+      try {
+        return JSON.parse(
+          Buffer.isBuffer(row.definition_json)
+            ? row.definition_json.toString('utf8')
+            : String(row.definition_json)
+        );
+      } catch (e) {
+        throw new Error(`[StateKeep] definition_json parse error for definition ${row.id}: ${e.message}`);
+      }
+    })(),
     compiledJson,
     deployedAt:     row.deployed_at,
     createdAt:      row.created_at,
@@ -76,7 +82,7 @@ export async function createDefinition({ id, parentId, orgId, definitionJson, co
        VALUES ($1,$2,$3,$4,$5,$6,'active',$7,$8)`,
       [id, parentId ?? null, machineId, orgId, defJson, deployedAt, createdAt, compiledJson ? JSON.stringify(compiledJson) : null]
     );
-    return;
+    return machineId;
   }
 
   getStmts().insert.run({
@@ -89,6 +95,7 @@ export async function createDefinition({ id, parentId, orgId, definitionJson, co
     deployed_at:     deployedAt,
     created_at:      createdAt,
   });
+  return machineId;
 }
 
 export async function findDefinitionsByMachine(machineId, orgId) {
