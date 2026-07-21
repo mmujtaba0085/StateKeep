@@ -182,8 +182,10 @@ CREATE TABLE IF NOT EXISTS webhook_deliveries (
                  CHECK(status IN ('pending','delivered','failed')),
     attempts     INTEGER NOT NULL DEFAULT 0,
     created_at   BIGINT NOT NULL,
-    delivered_at BIGINT,
-    error        TEXT
+    delivered_at  BIGINT,
+    last_attempt  BIGINT,
+    response_code INTEGER,
+    error         TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_deliveries_webhook ON webhook_deliveries(webhook_id);
@@ -191,13 +193,14 @@ CREATE INDEX IF NOT EXISTS idx_deliveries_pending ON webhook_deliveries(status) 
 
 -- ── Actor archives ─────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS actor_archives (
-    id            TEXT PRIMARY KEY,
-    definition_id TEXT,
-    final_state   TEXT,
-    context_json  BYTEA,
-    terminated_at BIGINT,
-    created_at    BIGINT NOT NULL
+  actor_id       TEXT PRIMARY KEY,
+  machine_id     TEXT,
+  archived_at    BIGINT NOT NULL,
+  file_path      TEXT NOT NULL,
+  state_value    TEXT,
+  definition_id  TEXT
 );
+CREATE INDEX IF NOT EXISTS idx_archives_actor ON actor_archives(actor_id);
 
 -- ── Worker heartbeats ──────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS worker_heartbeats (
