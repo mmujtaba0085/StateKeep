@@ -72,6 +72,12 @@ const SUITES = [
   ['SC8: Confirm-Token + needs_rescue Flow',   'test/statechart/sc8.confirmtoken.js'],
   ['SC9: Migration Routing (unit)',             'test/statechart/sc9.unit.js'],
   ['SC9: Migration Routing (HTTP)',             'test/statechart/sc9.migration-routing.js'],
+  ['SC10: Parallel Hierarchical States',        'test/statechart/sc10.parallel-hierarchical.js'],
+  ['SC11: Parallel Regions',                   'test/statechart/sc11.parallel-regions.js'],
+  ['SC13: Parallel State Paths',               'test/statechart/sc13.parallel-state-paths.js'],
+  ['SC14: Complex Migration Scenarios',        'test/statechart/sc14.complex-migration-scenarios.js'],
+  ['SC15: XState App Workflows',               'test/statechart/sc15.xstate-app-workflows.js'],
+  ['SC16: Batch Events Endpoint',              'test/statechart/sc16.batch-events.js'],
 ];
 
 // ── Main ──────────────────────────────────────────────────────────────────────
