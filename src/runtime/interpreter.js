@@ -367,19 +367,24 @@ export function processEvent(entry, compiledJson, event, registry, pendingSends 
       }
     }
 
-    // Bug 3 fix: for parallel actors, isDone only when ALL regions are in final states.
-    const group = compiledJson.parallelGroups?.find(g => g.parent === _parallelRoot);
-    if (group) {
-      isDone = group.children.every(childRegion => {
-        const fullKey = regionFullKeys[childRegion];
-        return fullKey != null && (compiledJson.finalStates?.includes(fullKey) ?? false);
-      });
+    const exitedParallel = !newStateKey.startsWith(rootPrefix) && newStateKey !== _parallelRoot;
+    if (exitedParallel) {
+      // Transition exited the parallel region entirely (e.g. COMPLETE → 'done').
+      // Use the normal stateValue; parallel reconstruction does not apply.
+      isDone = compiledJson.finalStates?.includes(newStateKey) ?? false;
     } else {
-      // No parallelGroups metadata — cannot determine; conservatively not done.
-      isDone = false;
+      // Bug 3 fix: for parallel actors, isDone only when ALL regions are in final states.
+      const group = compiledJson.parallelGroups?.find(g => g.parent === _parallelRoot);
+      if (group) {
+        isDone = group.children.every(childRegion => {
+          const fullKey = regionFullKeys[childRegion];
+          return fullKey != null && (compiledJson.finalStates?.includes(fullKey) ?? false);
+        });
+      } else {
+        isDone = false;
+      }
+      returnStateValue = { [_parallelRoot]: newRegions };
     }
-
-    returnStateValue = { [_parallelRoot]: newRegions };
   }
 
   return {
