@@ -4,11 +4,9 @@
  */
 
 const BASE = process.env.STATEKEEP_URL ?? `http://localhost:${process.env.PORT ?? '3001'}`;
-const KEY  = process.env.STATEKEEP_API_KEY ?? '';
 
 export async function api(method, path, body) {
   const headers = { 'Content-Type': 'application/json' };
-  if (KEY) headers['x-api-key'] = KEY;
 
   const res = await fetch(`${BASE}${path}`, {
     method,

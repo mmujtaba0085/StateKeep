@@ -34,14 +34,12 @@ if (!process.env.STATEKEEP_ENGINE_PATH) {
 // ── HTTP client ───────────────────────────────────────────────────────────────
 
 export const BASE_URL = 'http://127.0.0.1:3099';
-export const TEST_KEY = '__test_key_do_not_use_in_production__';
 
 export async function request(method, path, body, headers = {}) {
   const res = await fetch(`${BASE_URL}${path}`, {
     method,
     headers: {
       'Content-Type':  'application/json',
-      'X-API-Key':     TEST_KEY,
       ...headers,
     },
     body: body != null ? JSON.stringify(body) : undefined,
