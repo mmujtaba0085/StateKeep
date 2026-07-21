@@ -318,7 +318,10 @@ export function processEvent(entry, compiledJson, event, registry, pendingSends 
   // For non-parallel actors this is the final answer; parallel block below may override (Bug 3 fix).
   let isDone = compiledJson.finalStates?.includes(newStateKey) ?? false;
 
-  const invokesToStart = (compiledJson.invokeStates?.[newStateKey] ?? []).map(inv => inv.src ?? inv.id);
+  const invokesToStart = (compiledJson.invokeStates?.[newStateKey] ?? []).map(inv => ({
+    id:  inv.id  ?? inv.src,   // used as done.invoke.${id} event name
+    src: inv.src ?? inv.id,    // used for registry.services[src] lookup
+  }));
 
   // Bug #2: reconstruct parallel stateValue and update regionFingerprints for the changed region.
   // Only the first-region transition is applied; all other regions remain unchanged.

@@ -13,6 +13,7 @@ coverage/
 .c8rc
 test-results/
 benchmarks/reports/
+benchmarks/matrix/reports/*.json
 benchmarks/node_modules/
 capsule-hub-skills/
 node

@@ -359,6 +359,54 @@ curl -X PUT http://localhost:3001/v1/definitions \
 
 ---
 
+## Windows Setup
+
+StateKeep runs natively on Windows (no WSL required). The only requirement is
+that `npm install` must be run from **Windows PowerShell or Command Prompt**,
+not from a WSL shell. This ensures `better-sqlite3` downloads the correct
+Windows prebuilt binary instead of the Linux one.
+
+```powershell
+# In Windows PowerShell — run once after cloning
+npm install
+
+# Generate the encryption key (replaces `openssl rand -hex 32`)
+node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+
+# Copy and edit .env
+copy .env.example .env
+# Set STATEKEEP_ENCRYPTION_KEY to the value from the command above
+
+# Start the server
+node src/api/server.js
+```
+
+If you previously ran `npm install` in WSL (you'll see `ERR_DLOPEN_FAILED` on
+startup), rebuild the native module from PowerShell:
+
+```powershell
+npm run rebuild
+```
+
+**Running tests on Windows:**
+
+```powershell
+# Hot-path compiler / interpreter / registry tests (all cross-platform)
+npm run test:hot-path
+
+# Full statechart suite SC1–SC9 (starts server automatically)
+npm run test:statechart
+
+# Individual suite
+npm run test:sc1
+```
+
+Tests that require the C FFI mock or bash scripts (`test:all`, `test:c`)
+still need WSL on Windows. The `test:statechart` and `test:hot-path` scripts
+are fully cross-platform.
+
+---
+
 ## Running Tests
 
 ```bash

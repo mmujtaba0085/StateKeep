@@ -1,55 +1,31 @@
 /**
  * src/ffi/hashUtils.js
  *
- * FNV-1a hash helpers that wrap the engine's apv_fnv1a_* functions
- * (or the JS fallback equivalents).
+ * Two hashing surfaces — do not confuse them:
  *
- * Two hashing surfaces exist here and must NOT be confused:
+ *   computeHash(items)       — one-shot WASM FNV-1a, used for prefix_hash / region fingerprints
+ *   computeHistoryHash(evts) — pure-JS chain matching actorWorker's incremental updateFingerprint
  *
- *   computeHash(items)
- *     Generic multi-item hash (calls fnv1aFinal once at the end).
- *     Used for computing prefix_hash when historyPath is absent
- *     and for other one-shot hash needs (region fingerprints).
- *
- *   computeHistoryHash(eventTypes)
- *     Mirrors exactly what actorWorker.js produces when processing a
- *     sequence of events incrementally.  No per-step fnv1aFinal call —
- *     only a single fnv1aFinal at the end, matching the worker loop.
- *     Used to compute prefix_hash for apv_register_changepoint when
- *     historyPath is provided.
- *
- * Actor fingerprints in the DB are produced by the worker's incremental
- * updateFingerprint (which chains fnv1aUpdate calls without per-step
- * finalization, starting from FNV32_OFFSET for the '0' sentinel).
- * computeHistoryHash replicates this so that:
- *
- *   actor.historyFingerprint === computeHistoryHash([evt1, evt2, ...evtN])
- *
- * for an actor that processed exactly evt1…evtN in that order.
- *
- * Type note: when the real C engine is loaded, fnv1aUpdate/fnv1aFinal return
- * BigInt (64-bit). In fallback mode they return plain numbers (32-bit).
- * bigIntToHex() handles both paths so callers are type-agnostic.
+ * Both produce 64-bit FNV-1a values as 16-char lowercase hex strings.
  */
 
 import { getEngine } from './engine.js';
 import {
-  FNV32_OFFSET,
+  FNV64_OFFSET,
   bigIntToHex64,
   computeHistoryFingerprint,
   updateFingerprint as updateFingerprintPure,
 } from './fingerprintChain.js';
 
-// Re-export as FNV_OFFSET for callers that import the old name
-export { FNV32_OFFSET as FNV_OFFSET };
-export { FNV32_OFFSET };
+export { FNV64_OFFSET };
+export { FNV64_OFFSET as FNV_OFFSET };
 
 // ── computeHash — generic one-shot hash ──────────────────────────────────────
 
 /**
  * Compute a FNV-1a hash over an array of string/Buffer items.
  * Calls fnv1aFinal once at the end.
- * Returns a lowercase hex string (16 chars when C engine; 8 chars in fallback).
+ * Returns a 16-char lowercase hex string.
  */
 export function computeHash(items) {
   const eng = getEngine();
@@ -67,7 +43,7 @@ export function computeHash(items) {
 /**
  * Compute the fingerprint that an actor would have after processing
  * `eventTypes` in sequence, starting from the '0' initial sentinel.
- * Returns an 8-char lowercase hex string (FNV-1a 32-bit).
+ * Returns a 16-char lowercase hex string (FNV-1a 64-bit).
  */
 export function computeHistoryHash(eventTypes) {
   return computeHistoryFingerprint(eventTypes);
@@ -83,9 +59,7 @@ export function updateFingerprint(currentHex, eventType) {
 // ── Conversion helpers ────────────────────────────────────────────────────────
 
 /**
- * Convert a hash value (BigInt from C engine, or number from fallback) to hex.
- * C engine → 16-char hex; fallback → 16-char hex (zero-padded).
- * Always returns 16 chars so region fingerprint consumers get a consistent width.
+ * Convert a BigInt hash value to a 16-char lowercase hex string.
  */
 export function bigIntToHex(bi) {
   if (typeof bi === 'bigint') {
@@ -103,7 +77,7 @@ export function bigIntToHex(bi) {
  *
  * Use fingerprintToBigInt when passing an actor's historyFingerprint
  * to apv_compute_accessible or apv_actor_started — '0' must map to
- * FNV32_OFFSET because 0n == APV_PREFIX_WILDCARD.
+ * FNV64_OFFSET because 0n == APV_PREFIX_WILDCARD.
  */
 export function hexToBigInt(hex) {
   if (!hex || hex === '0') return 0n;
@@ -112,7 +86,7 @@ export function hexToBigInt(hex) {
 
 /** Convert actor historyFingerprint hex to BigInt for engine calls. */
 export function fingerprintToBigInt(hex) {
-  if (!hex || hex === '0') return BigInt(FNV32_OFFSET);
+  if (!hex || hex === '0') return FNV64_OFFSET;
   return BigInt(`0x${hex.padStart(16, '0')}`);
 }
 
@@ -131,7 +105,7 @@ export function computeRegionHashes(eventsByRegion) {
 }
 
 function normalizeRegionFingerprintHex(hex) {
-  if (!hex || hex === '0') return bigIntToHex(BigInt(FNV32_OFFSET));
+  if (!hex || hex === '0') return bigIntToHex(FNV64_OFFSET);
   return String(hex).padStart(16, '0').toLowerCase();
 }
 

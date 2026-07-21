@@ -55,7 +55,7 @@ describe('compileMachine: simple transitions', () => {
 });
 
 describe('compileMachine: after: transformation', () => {
-  test('after: is stripped from runtimeDef and injected as on:', () => {
+  test('after: is stripped from runtimeDef and injected as on: (array form)', () => {
     const { afterTransitions, runtimeDef, transitions } = compileMachine({
       id: 'test', initial: 'waiting',
       states: {
@@ -66,6 +66,23 @@ describe('compileMachine: after: transformation', () => {
     assert.ok(afterTransitions['waiting']);
     assert.equal(afterTransitions['waiting'][0].delayMs, 5000);
     const eventType = '__SK_TIMEOUT_waiting_5000';
+    assert.equal(afterTransitions['waiting'][0].eventType, eventType);
+    assert.equal(runtimeDef.states.waiting.after, undefined, 'after: should be removed');
+    assert.ok(runtimeDef.states.waiting.on?.[eventType], 'on: handler should be injected');
+    assert.ok(transitions[`waiting:${eventType}`]);
+  });
+
+  test('after: map form { 500: "next" } is handled correctly', () => {
+    const { afterTransitions, runtimeDef, transitions } = compileMachine({
+      id: 'test', initial: 'waiting',
+      states: {
+        waiting: { after: { 500: 'timed_out' } },
+        timed_out: {},
+      }
+    });
+    assert.ok(afterTransitions['waiting']);
+    assert.equal(afterTransitions['waiting'][0].delayMs, 500);
+    const eventType = '__SK_TIMEOUT_waiting_500';
     assert.equal(afterTransitions['waiting'][0].eventType, eventType);
     assert.equal(runtimeDef.states.waiting.after, undefined, 'after: should be removed');
     assert.ok(runtimeDef.states.waiting.on?.[eventType], 'on: handler should be injected');

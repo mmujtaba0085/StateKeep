@@ -531,14 +531,16 @@ export async function sendEvent(actorId, event, tick, opts = {}) {
   }
 
   // Start invoke services for the new state
-  for (const serviceId of (interpResult.invokesToStart ?? [])) {
+  for (const invoke of (interpResult.invokesToStart ?? [])) {
+    const invokeId   = invoke.id  ?? invoke;   // id for done.invoke.${id} event name
+    const serviceSrc = invoke.src ?? invoke;   // src for registry.services[src] lookup
     const registry = getGlobalRegistry() ?? { guards: {}, actions: {}, services: {} };
-    const serviceFn = registry.services[serviceId];
+    const serviceFn = registry.services[serviceSrc];
     if (serviceFn) {
       const invokeFn = serviceFn.__sk_invoke ? serviceFn.__sk_invoke.originalFn : serviceFn;
       const opts     = serviceFn.__sk_invoke ?? {};
       startInvoke(
-        actorId, serviceId, invokeFn, opts,
+        actorId, invokeId, invokeFn, opts,
         { context: interpResult.context, event },
         (targetId, ev) => sendEvent(targetId, ev, Date.now(), {})
       ).catch(err => console.error(`[actorManager] startInvoke failed for ${actorId}:`, err.message));
@@ -557,13 +559,17 @@ export async function sendEvent(actorId, event, tick, opts = {}) {
     context:            interpResult.context,
     historyFingerprint: interpResult.historyFingerprint,
     regionFingerprints: entry.regionFingerprints ?? null,
+    stateEntryId:       interpResult.stateEntryId,
     done:               interpResult.done,
   };
 
   const newRegionFingerprints = result.regionFingerprints ?? entry.regionFingerprints ?? null;
 
-  // Context-diff: compare reference before mutating entry (no assign → same object)
-  const contextChanged = interpResult.context !== entry.context;
+  // Context-diff: compare reference before mutating entry (no assign → same object).
+  // Always write context on termination: getActorState reads from DB for terminated actors,
+  // and an in-place mutation (context.foo = val, returning undefined) shares the same reference
+  // so reference equality would miss the change.
+  const contextChanged = result.done || interpResult.context !== entry.context;
 
   // Capture pre-event state for webhook before mutating entry in-place
   const _fromState = entry.stateValue;
@@ -674,21 +680,11 @@ export async function getActorState(actorId, { priority = 'normal' } = {}) {
 
   const hot = hotRegistry.get(actorId);
   if (hot) {
-    const pool = getWorkerPool();
-    try {
-      const snap = await pool.send(actorId, { type: 'SNAPSHOT', actorId }, { priority });
-      if (snap) {
-        touch(actorId, { ...hot, lastAccess: Date.now() });
-        // Augment worker snapshot with registry metadata not held by the worker thread.
-        return {
-          ...snap,
-          definitionId:       hot.definitionId,
-          historyFingerprint: hot.historyFingerprint,
-          regionFingerprints: hot.regionFingerprints ?? null,
-          status:             hot.status ?? actor.status ?? 'active',
-        };
-      }
-    } catch {}
+    // After Track A, EVENT runs on the main thread and updates the hot registry directly.
+    // The worker's XState instance is only used for SPAWN/HYDRATE/TERMINATE — it never
+    // receives EVENT messages, so its state is stale after the first sendEvent call.
+    // The hot registry is the authoritative source of truth for live actors.
+    touch(actorId, { ...hot, lastAccess: Date.now() });
     return {
       actorId,
       stateValue:         hot.stateValue,

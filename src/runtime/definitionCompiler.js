@@ -52,7 +52,23 @@ function walkStates(statesMap, runtimeStatesMap, parentKey, acc) {
 
     // after: → __SK_TIMEOUT_ transformation
     if (cfg.after) {
-      const afters = Array.isArray(cfg.after) ? cfg.after : [cfg.after];
+      // Normalise all three XState v5 after: forms into an array of { delay, target }:
+      //   Map form:    { 500: 'next' } or { 500: { target, guard, actions } }
+      //   Array form:  [{ delay: 500, target: 'next' }]
+      //   Object form: { delay: 500, target: 'next' }
+      let afters;
+      if (Array.isArray(cfg.after)) {
+        afters = cfg.after;
+      } else if (typeof cfg.after === 'object' && !('delay' in cfg.after) && !('target' in cfg.after)) {
+        afters = Object.entries(cfg.after).map(([delayStr, val]) => {
+          const delay = Number(delayStr);
+          if (typeof val === 'string') return { delay, target: val };
+          return { delay, target: val.target ?? null, guard: val.guard ?? null, actions: val.actions ?? [] };
+        });
+      } else {
+        afters = [cfg.after];
+      }
+
       acc.afterTransitions[key] = [];
       rtCfg.on = rtCfg.on ?? {};
       for (const entry of afters) {

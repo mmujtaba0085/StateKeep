@@ -39,6 +39,7 @@ import {
   deprecateDefinition,
 } from '../../registry/definitionRepo.js';
 import { compileMachine } from '../../runtime/definitionCompiler.js';
+import { validateDefinitionAgainstRegistry, getGlobalRegistry } from '../../runtime/implementationRegistry.js';
 import {
   findDeploymentsByDefinition,
   createDeployment,
@@ -434,6 +435,32 @@ export async function definitionRoutes(fastify) {
       ...(hasContextTransform ? { _contextTransform: contextTransform } : {}),
     };
 
+    // ── Pre-deploy registry validation ────────────────────────────────────────
+    // Compile the definition before storing it. If any guard or action name
+    // referenced by the definition is absent from the loaded implementation
+    // registry, reject the deploy with 422 so the error surfaces at deploy
+    // time rather than silently failing at runtime per event.
+    // Skipped when no registry is loaded (e.g. tests that call the API without
+    // a setup file) so existing workflows without a registry are unaffected.
+    let _precompiledResult = null;
+    const _globalRegistry = getGlobalRegistry();
+    if (_globalRegistry) {
+      try {
+        const compileResult = compileMachine(definitionToStore);
+        const { runtimeDef: _rtDef, ...compiledForValidation } = compileResult;
+        const missing = validateDefinitionAgainstRegistry(compiledForValidation, _globalRegistry);
+        if (missing.length > 0) {
+          return reply.code(422).send({
+            error: `Definition references guards/actions not registered in the implementation registry: ${missing.join(', ')}`,
+            missing,
+          });
+        }
+        _precompiledResult = compileResult;
+      } catch (compileErr) {
+        request.log.warn({ err: compileErr, definitionId: id }, 'pre-deploy compile failed; skipping registry validation');
+      }
+    }
+
     // Refinement path: definition already exists but stateMapping changed.
     // Re-use the original t_star (deployedAt) so the changepoint location stays the same;
     // the engine updates r_max on the existing entry when we re-register below.
@@ -457,11 +484,11 @@ export async function definitionRoutes(fastify) {
       }
     }
 
-    // Compile the stored definition and save compiled form (best-effort; failure does not block deploy)
+    // Save compiled form — reuse the pre-compiled result from registry validation
+    // if available, otherwise compile now (registry absent path).
     try {
-      const { runtimeDef, ...compiledForm } = compileMachine(definitionToStore);
+      const { runtimeDef, ...compiledForm } = _precompiledResult ?? compileMachine(definitionToStore);
       await updateCompiledJson(id, compiledForm);
-      // If after: was present, update definitionJson to runtimeDef (after: stripped, __SK_TIMEOUT_ injected)
       if (Object.keys(compiledForm.afterTransitions).length > 0) {
         await updateDefinitionJson(id, runtimeDef);
       }
