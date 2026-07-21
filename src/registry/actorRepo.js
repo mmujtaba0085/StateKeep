@@ -32,7 +32,6 @@ function rowToActor(row) {
   return {
     id:                  row.id,
     definitionId:        row.definition_id,
-    orgId:               row.org_id,
     stateValue:          row.state_value ? JSON.parse(row.state_value) : null,
     context,
     logicalStartTick:    row.logical_start_tick,
@@ -56,11 +55,11 @@ function getStmts() {
   stmts = {
     insert: db.prepare(`
       INSERT INTO actors
-        (id, definition_id, org_id, state_value, context_json,
+        (id, definition_id, state_value, context_json,
          logical_start_tick, history_fingerprint, last_event_tick,
          state_entry_id, status, created_at, updated_at)
       VALUES
-        (@id, @definition_id, @org_id, @state_value, @context_json,
+        (@id, @definition_id, @state_value, @context_json,
          @logical_start_tick, @history_fingerprint, @last_event_tick,
          @state_entry_id, @status, @created_at, @updated_at)
     `),
@@ -93,8 +92,8 @@ function getStmts() {
           updated_at          = @updated_at
       WHERE id = @id
     `),
-    findByDefinitionAndOrg: db.prepare(`
-      SELECT * FROM actors WHERE definition_id = ? AND org_id = ? AND status = 'active'
+    findByDefinition: db.prepare(`
+      SELECT * FROM actors WHERE definition_id = ? AND status = 'active'
     `),
     findIdleAllOrgs: db.prepare(`
       SELECT * FROM actors
@@ -105,30 +104,26 @@ function getStmts() {
     countByStatus: db.prepare(`
       SELECT status, COUNT(*) as cnt FROM actors GROUP BY status
     `),
-    listByOrg: db.prepare(`
+    list: db.prepare(`
       SELECT * FROM actors
-      WHERE org_id = @org_id
       ORDER BY created_at DESC
       LIMIT @limit OFFSET @offset
     `),
-    searchByOrgStatus: db.prepare(`
+    listByStatus: db.prepare(`
       SELECT * FROM actors
-      WHERE org_id = @org_id
-        AND status = @status
+      WHERE status = @status
       ORDER BY created_at DESC
       LIMIT @limit OFFSET @offset
     `),
-    searchByOrgDef: db.prepare(`
+    listByDef: db.prepare(`
       SELECT * FROM actors
-      WHERE org_id = @org_id
-        AND definition_id = @definition_id
+      WHERE definition_id = @definition_id
       ORDER BY created_at DESC
       LIMIT @limit OFFSET @offset
     `),
-    searchByOrgBoth: db.prepare(`
+    listByBoth: db.prepare(`
       SELECT * FROM actors
-      WHERE org_id = @org_id
-        AND status = @status
+      WHERE status = @status
         AND definition_id = @definition_id
       ORDER BY created_at DESC
       LIMIT @limit OFFSET @offset
@@ -142,14 +137,12 @@ function getStmts() {
 export async function createActor({
   id = randomUUID(),
   definitionId,
-  orgId,
   stateValue,
   context,
   logicalStartTick = 0,
   historyFingerprint = '0',
   stateEntryId = 0,
 } = {}) {
-  if (!orgId) throw new Error('orgId is required when creating an actor');
   const ts = now();
   const encContext = context != null
     ? encrypt(Buffer.from(JSON.stringify(context)))
@@ -159,11 +152,11 @@ export async function createActor({
     const { query } = await import('./db-postgres.js');
     await query(
       `INSERT INTO actors
-         (id, definition_id, org_id, state_value, context_json,
+         (id, definition_id, state_value, context_json,
           logical_start_tick, history_fingerprint, last_event_tick,
           state_entry_id, status, created_at, updated_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
-      [id, definitionId, orgId,
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+      [id, definitionId,
        stateValue != null ? JSON.stringify(stateValue) : null,
        encContext, logicalStartTick, String(historyFingerprint),
        null, stateEntryId ?? 0, 'active', ts, ts]
@@ -175,7 +168,6 @@ export async function createActor({
   s.insert.run({
     id,
     definition_id:        definitionId,
-    org_id:               orgId,
     state_value:          stateValue != null ? JSON.stringify(stateValue) : null,
     context_json:         encContext,
     logical_start_tick:   logicalStartTick,
@@ -281,38 +273,36 @@ export async function migrateActorDefinition(id, { definitionId, stateValue, con
   });
 }
 
-export async function findActorsByDefinition(definitionId, orgId) {
-  if (!orgId) throw new Error('orgId is required');
+export async function findActorsByDefinition(definitionId) {
   if (isPostgres) {
     const { queryAll } = await import('./db-postgres.js');
     const rows = await queryAll(
-      `SELECT * FROM actors WHERE definition_id=$1 AND org_id=$2 AND status='active'`,
-      [definitionId, orgId]
+      `SELECT * FROM actors WHERE definition_id=$1 AND status='active'`,
+      [definitionId]
     );
     return rows.map(rowToActor);
   }
-  return getStmts().findByDefinitionAndOrg.all(definitionId, orgId).map(rowToActor);
+  return getStmts().findByDefinition.all(definitionId).map(rowToActor);
 }
 
-export async function findActorsByMachine(machineId, orgId) {
-  if (!orgId) throw new Error('orgId is required');
+export async function findActorsByMachine(machineId) {
   if (isPostgres) {
     const { queryAll } = await import('./db-postgres.js');
     const rows = await queryAll(
       `SELECT a.* FROM actors a
        JOIN definitions d ON a.definition_id = d.id
-       WHERE d.machine_id=$1 AND a.org_id=$2 AND a.status IN ('active','needs_rescue')
+       WHERE d.machine_id=$1 AND a.status IN ('active','needs_rescue')
        ORDER BY a.created_at ASC`,
-      [machineId, orgId]
+      [machineId]
     );
     return rows.map(rowToActor);
   }
   return getDb().prepare(`
     SELECT a.* FROM actors a
     JOIN definitions d ON a.definition_id = d.id
-    WHERE d.machine_id = ? AND a.org_id = ? AND a.status IN ('active', 'needs_rescue')
+    WHERE d.machine_id = ? AND a.status IN ('active', 'needs_rescue')
     ORDER BY a.created_at ASC
-  `).all(machineId, orgId).map(rowToActor);
+  `).all(machineId).map(rowToActor);
 }
 
 export async function findIdleActors(idleMs, limit = 100) {
@@ -342,37 +332,36 @@ export async function countByStatus() {
   return result;
 }
 
-export async function listActors({ limit = 50, offset = 0, status, definitionId, orgId } = {}) {
-  if (!orgId) throw new Error('orgId is required');
+export async function listActors({ limit = 50, offset = 0, status, definitionId } = {}) {
   if (isPostgres) {
     const { queryAll } = await import('./db-postgres.js');
     let sql, params;
     if (!status && !definitionId) {
-      sql = `SELECT * FROM actors WHERE org_id=$1 ORDER BY created_at DESC LIMIT $2 OFFSET $3`;
-      params = [orgId, limit, offset];
+      sql = `SELECT * FROM actors ORDER BY created_at DESC LIMIT $1 OFFSET $2`;
+      params = [limit, offset];
     } else if (status && definitionId) {
-      sql = `SELECT * FROM actors WHERE org_id=$1 AND status=$2 AND definition_id=$3 ORDER BY created_at DESC LIMIT $4 OFFSET $5`;
-      params = [orgId, status, definitionId, limit, offset];
+      sql = `SELECT * FROM actors WHERE status=$1 AND definition_id=$2 ORDER BY created_at DESC LIMIT $3 OFFSET $4`;
+      params = [status, definitionId, limit, offset];
     } else if (status) {
-      sql = `SELECT * FROM actors WHERE org_id=$1 AND status=$2 ORDER BY created_at DESC LIMIT $3 OFFSET $4`;
-      params = [orgId, status, limit, offset];
+      sql = `SELECT * FROM actors WHERE status=$1 ORDER BY created_at DESC LIMIT $2 OFFSET $3`;
+      params = [status, limit, offset];
     } else {
-      sql = `SELECT * FROM actors WHERE org_id=$1 AND definition_id=$2 ORDER BY created_at DESC LIMIT $3 OFFSET $4`;
-      params = [orgId, definitionId, limit, offset];
+      sql = `SELECT * FROM actors WHERE definition_id=$1 ORDER BY created_at DESC LIMIT $2 OFFSET $3`;
+      params = [definitionId, limit, offset];
     }
     return (await queryAll(sql, params)).map(rowToActor);
   }
   const s = getStmts();
   if (!status && !definitionId) {
-    return s.listByOrg.all({ org_id: orgId, limit, offset }).map(rowToActor);
+    return s.list.all({ limit, offset }).map(rowToActor);
   }
   if (status && definitionId) {
-    return s.searchByOrgBoth.all({ org_id: orgId, status, definition_id: definitionId, limit, offset }).map(rowToActor);
+    return s.listByBoth.all({ status, definition_id: definitionId, limit, offset }).map(rowToActor);
   }
   if (status) {
-    return s.searchByOrgStatus.all({ org_id: orgId, status, limit, offset }).map(rowToActor);
+    return s.listByStatus.all({ status, limit, offset }).map(rowToActor);
   }
-  return s.searchByOrgDef.all({ org_id: orgId, definition_id: definitionId, limit, offset }).map(rowToActor);
+  return s.listByDef.all({ definition_id: definitionId, limit, offset }).map(rowToActor);
 }
 
 export async function findStrandedActors(definitionId, validStates, orgId) {
@@ -513,35 +502,33 @@ export async function updateActorLogicalStartTick(id, tick) {
   ).run(tick, Date.now(), id);
 }
 
-export async function getActorCountsByStatus(orgId) {
+export async function getActorCountsByStatus() {
   if (isPostgres) {
     const { queryAll } = await import('./db-postgres.js');
     const rows = await queryAll(
-      `SELECT status, COUNT(*) as cnt FROM actors WHERE org_id=$1 GROUP BY status`,
-      [orgId]
+      `SELECT status, COUNT(*) as cnt FROM actors GROUP BY status`
     );
     const result = { active: 0, migrating: 0, terminated: 0, archived: 0, needs_rescue: 0 };
     for (const r of rows) result[r.status] = Number(r.cnt);
     return result;
   }
   const rows = getDb().prepare(`
-    SELECT status, COUNT(*) as cnt FROM actors WHERE org_id = ? GROUP BY status
-  `).all(orgId);
+    SELECT status, COUNT(*) as cnt FROM actors GROUP BY status
+  `).all();
   const result = { active: 0, migrating: 0, terminated: 0, archived: 0, needs_rescue: 0 };
   for (const r of rows) result[r.status] = r.cnt;
   return result;
 }
 
-export async function countActiveActors(orgId) {
+export async function countActiveActors() {
   if (isPostgres) {
     const { queryOne } = await import('./db-postgres.js');
     const row = await queryOne(
-      `SELECT COUNT(*) as cnt FROM actors WHERE org_id=$1 AND status='active'`,
-      [orgId]
+      `SELECT COUNT(*) as cnt FROM actors WHERE status='active'`
     );
     return Number(row?.cnt ?? 0);
   }
   return getDb().prepare(`
-    SELECT COUNT(*) as cnt FROM actors WHERE org_id = ? AND status = 'active'
-  `).get(orgId)?.cnt ?? 0;
+    SELECT COUNT(*) as cnt FROM actors WHERE status = 'active'
+  `).get()?.cnt ?? 0;
 }

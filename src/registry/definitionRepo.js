@@ -14,21 +14,20 @@ function getStmts() {
   const db = getDb();
   stmts = {
     insert: db.prepare(`
-      INSERT INTO definitions (id, parent_id, machine_id, org_id, definition_json, compiled_json, deployed_at, status, created_at)
-      VALUES (@id, @parent_id, @machine_id, @org_id, @definition_json, @compiled_json, @deployed_at, 'active', @created_at)
+      INSERT INTO definitions (id, parent_id, machine_id, definition_json, compiled_json, deployed_at, status, created_at)
+      VALUES (@id, @parent_id, @machine_id, @definition_json, @compiled_json, @deployed_at, 'active', @created_at)
     `),
-    findById:          db.prepare(`SELECT * FROM definitions WHERE id = ?`),
-    findByMachine:     db.prepare(`SELECT * FROM definitions WHERE machine_id = ? AND org_id = ? ORDER BY deployed_at ASC`),
+    findById:           db.prepare(`SELECT * FROM definitions WHERE id = ?`),
+    findByMachine:      db.prepare(`SELECT * FROM definitions WHERE machine_id = ? ORDER BY deployed_at ASC`),
     findLatestInFamily: db.prepare(`
       SELECT * FROM definitions
-      WHERE machine_id = ? AND org_id = ? AND status != 'deprecated' AND status != 'pruned'
-      ORDER BY deployed_at DESC, created_at DESC
-      LIMIT 1
+      WHERE machine_id = ? AND status NOT IN ('deprecated','pruned')
+      ORDER BY deployed_at DESC, created_at DESC LIMIT 1
     `),
     findByStatus:  db.prepare(`SELECT * FROM definitions WHERE status = ?`),
     deprecate:     db.prepare(`UPDATE definitions SET status = 'deprecated' WHERE id = ?`),
     prune:         db.prepare(`UPDATE definitions SET status = 'pruned' WHERE id = ?`),
-    listByOrg:     db.prepare(`SELECT * FROM definitions WHERE org_id = ? ORDER BY deployed_at DESC LIMIT ? OFFSET ?`),
+    list:          db.prepare(`SELECT * FROM definitions ORDER BY deployed_at DESC LIMIT ? OFFSET ?`),
     count:         db.prepare(`SELECT COUNT(*) as cnt FROM definitions`),
     updateJson:         db.prepare(`UPDATE definitions SET definition_json = @definition_json WHERE id = @id`),
     updateCompiledJson: db.prepare(`UPDATE definitions SET compiled_json = @compiled_json WHERE id = @id`),
@@ -49,7 +48,6 @@ function rowToDefinition(row) {
     id:             row.id,
     parentId:       row.parent_id,
     machineId:      row.machine_id,
-    orgId:          row.org_id,
     definitionJson: (() => {
       try {
         return JSON.parse(
@@ -68,8 +66,7 @@ function rowToDefinition(row) {
   };
 }
 
-export async function createDefinition({ id, parentId, orgId, definitionJson, compiledJson, deployedAt }) {
-  if (!orgId) throw new Error('orgId is required when creating a definition');
+export async function createDefinition({ id, parentId, definitionJson, compiledJson, deployedAt }) {
   const parent = parentId ? await findDefinitionById(parentId) : null;
   const machineId = parent?.machineId ?? parentId ?? id;
   const defJson = JSON.stringify(definitionJson);
@@ -78,9 +75,9 @@ export async function createDefinition({ id, parentId, orgId, definitionJson, co
   if (isPostgres) {
     const { query } = await import('./db-postgres.js');
     await query(
-      `INSERT INTO definitions (id, parent_id, machine_id, org_id, definition_json, deployed_at, status, created_at, compiled_json)
-       VALUES ($1,$2,$3,$4,$5,$6,'active',$7,$8)`,
-      [id, parentId ?? null, machineId, orgId, defJson, deployedAt, createdAt, compiledJson ? JSON.stringify(compiledJson) : null]
+      `INSERT INTO definitions (id, parent_id, machine_id, definition_json, deployed_at, status, created_at, compiled_json)
+       VALUES ($1,$2,$3,$4,$5,'active',$6,$7)`,
+      [id, parentId ?? null, machineId, defJson, deployedAt, createdAt, compiledJson ? JSON.stringify(compiledJson) : null]
     );
     return machineId;
   }
@@ -89,7 +86,6 @@ export async function createDefinition({ id, parentId, orgId, definitionJson, co
     id,
     parent_id:       parentId ?? null,
     machine_id:      machineId,
-    org_id:          orgId,
     definition_json: defJson,
     compiled_json:   compiledJson ? JSON.stringify(compiledJson) : null,
     deployed_at:     deployedAt,
@@ -98,32 +94,30 @@ export async function createDefinition({ id, parentId, orgId, definitionJson, co
   return machineId;
 }
 
-export async function findDefinitionsByMachine(machineId, orgId) {
-  if (!orgId) throw new Error('orgId is required');
+export async function findDefinitionsByMachine(machineId) {
   if (isPostgres) {
     const { queryAll } = await import('./db-postgres.js');
     const rows = await queryAll(
-      `SELECT * FROM definitions WHERE machine_id=$1 AND org_id=$2 ORDER BY deployed_at ASC`,
-      [machineId, orgId]
+      `SELECT * FROM definitions WHERE machine_id=$1 ORDER BY deployed_at ASC`,
+      [machineId]
     );
     return rows.map(rowToDefinition);
   }
-  return getStmts().findByMachine.all(machineId, orgId).map(rowToDefinition);
+  return getStmts().findByMachine.all(machineId).map(rowToDefinition);
 }
 
-export async function findLatestInFamily(machineId, orgId) {
-  if (!orgId) throw new Error('orgId is required');
+export async function findLatestInFamily(machineId) {
   if (isPostgres) {
     const { queryOne } = await import('./db-postgres.js');
     const row = await queryOne(
       `SELECT * FROM definitions
-       WHERE machine_id=$1 AND org_id=$2 AND status NOT IN ('deprecated','pruned')
+       WHERE machine_id=$1 AND status NOT IN ('deprecated','pruned')
        ORDER BY deployed_at DESC, created_at DESC LIMIT 1`,
-      [machineId, orgId]
+      [machineId]
     );
     return rowToDefinition(row);
   }
-  return rowToDefinition(getStmts().findLatestInFamily.get(machineId, orgId));
+  return rowToDefinition(getStmts().findLatestInFamily.get(machineId));
 }
 
 export async function findDefinitionById(id) {
@@ -162,15 +156,14 @@ export async function deprecateDefinition(id) {
   getStmts().deprecate.run(id);
 }
 
-export async function listDefinitions({ limit = 50, offset = 0, orgId } = {}) {
-  if (!orgId) throw new Error('orgId is required');
+export async function listDefinitions({ limit = 50, offset = 0 } = {}) {
   if (isPostgres) {
     const { queryAll } = await import('./db-postgres.js');
     const rows = await queryAll(
-      `SELECT * FROM definitions WHERE org_id=$1 ORDER BY deployed_at DESC LIMIT $2 OFFSET $3`,
-      [orgId, limit, offset]
+      `SELECT * FROM definitions ORDER BY deployed_at DESC LIMIT $1 OFFSET $2`,
+      [limit, offset]
     );
     return rows.map(rowToDefinition);
   }
-  return getStmts().listByOrg.all(orgId, limit, offset).map(rowToDefinition);
+  return getStmts().list.all(limit, offset).map(rowToDefinition);
 }

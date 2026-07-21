@@ -44,21 +44,21 @@ export async function getWildcardChildDef(definitionId, logicalStartTick) {
   return cp?.child_def_id ?? null;
 }
 
-export async function insertChangepoint({ orgId, tStar, prefixHash, refinement, childDefId }) {
+export async function insertChangepoint({ tStar, prefixHash, refinement, childDefId }) {
   if (isPostgres) {
     const { query } = await import('./db-postgres.js');
     await query(
-      `INSERT INTO changepoints (org_id, t_star, prefix_hash, refinement, child_def_id, created_at)
-       VALUES ($1,$2,$3,$4,$5,$6)`,
-      [orgId, tStar, String(prefixHash), refinement ?? 0, childDefId, NOW()]
+      `INSERT INTO changepoints (t_star, prefix_hash, refinement, child_def_id, created_at)
+       VALUES ($1,$2,$3,$4,$5)`,
+      [tStar, String(prefixHash), refinement ?? 0, childDefId, NOW()]
     );
     return;
   }
   const db = getDb();
   db.prepare(`
-    INSERT INTO changepoints (org_id, t_star, prefix_hash, refinement, child_def_id, created_at)
-    VALUES (?, ?, ?, ?, ?, ?)
-  `).run(orgId, tStar, String(prefixHash), refinement ?? 0, childDefId, NOW());
+    INSERT INTO changepoints (t_star, prefix_hash, refinement, child_def_id, created_at)
+    VALUES (?, ?, ?, ?, ?)
+  `).run(tStar, String(prefixHash), refinement ?? 0, childDefId, NOW());
 }
 
 export async function loadChangepoints() {
@@ -82,7 +82,7 @@ export async function loadChangepointsAfter(afterId) {
   return db.prepare('SELECT id, t_star, prefix_hash, refinement, child_def_id FROM changepoints WHERE id > ? ORDER BY id ASC').all(afterId);
 }
 
-export async function insertParChangepoint({ orgId, tStar, regionHashesHexMap, regionHashesHexArr, refinement, childDefId }) {
+export async function insertParChangepoint({ tStar, regionHashesHexMap, regionHashesHexArr, refinement, childDefId }) {
   if (regionHashesHexMap && regionHashesHexArr) {
     throw new Error('insertParChangepoint accepts either regionHashesHexMap or deprecated regionHashesHexArr, not both');
   }
@@ -91,17 +91,17 @@ export async function insertParChangepoint({ orgId, tStar, regionHashesHexMap, r
   if (isPostgres) {
     const { query } = await import('./db-postgres.js');
     await query(
-      `INSERT INTO par_changepoints (org_id, t_star, region_hashes, refinement, child_def_id, created_at)
-       VALUES ($1,$2,$3,$4,$5,$6)`,
-      [orgId, tStar, JSON.stringify(payload), refinement ?? 0, childDefId, NOW()]
+      `INSERT INTO par_changepoints (t_star, region_hashes, refinement, child_def_id, created_at)
+       VALUES ($1,$2,$3,$4,$5)`,
+      [tStar, JSON.stringify(payload), refinement ?? 0, childDefId, NOW()]
     );
     return;
   }
   const db = getDb();
   db.prepare(`
-    INSERT INTO par_changepoints (org_id, t_star, region_hashes, refinement, child_def_id, created_at)
-    VALUES (?, ?, ?, ?, ?, ?)
-  `).run(orgId, tStar, JSON.stringify(payload), refinement ?? 0, childDefId, NOW());
+    INSERT INTO par_changepoints (t_star, region_hashes, refinement, child_def_id, created_at)
+    VALUES (?, ?, ?, ?, ?)
+  `).run(tStar, JSON.stringify(payload), refinement ?? 0, childDefId, NOW());
 }
 
 export async function loadParChangepointsAfter(afterId) {

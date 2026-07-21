@@ -14,22 +14,21 @@ function getStmts() {
   stmts = {
     insert: db.prepare(`
       INSERT INTO deployments
-        (id, definition_id, org_id, status, affected_actors, migrated_count, failed_count, started_at)
+        (id, definition_id, status, affected_actors, migrated_count, failed_count, started_at)
       VALUES
-        (@id, @definition_id, @org_id, 'pending', @affected_actors, 0, 0, @started_at)
+        (@id, @definition_id, 'pending', @affected_actors, 0, 0, @started_at)
     `),
     findById:          db.prepare(`SELECT * FROM deployments WHERE id = ?`),
     findByDef:         db.prepare(`SELECT * FROM deployments WHERE definition_id = ? ORDER BY started_at DESC`),
     updateStatus:      db.prepare(`UPDATE deployments SET status = @status, completed_at = @completed_at WHERE id = @id`),
     incrementMigrated: db.prepare(`UPDATE deployments SET migrated_count = migrated_count + 1 WHERE id = ?`),
     incrementFailed:   db.prepare(`UPDATE deployments SET failed_count   = failed_count   + 1 WHERE id = ?`),
-    listByOrg:         db.prepare(`SELECT * FROM deployments WHERE org_id = ? ORDER BY started_at DESC LIMIT ? OFFSET ?`),
+    list:              db.prepare(`SELECT * FROM deployments ORDER BY started_at DESC LIMIT ? OFFSET ?`),
   };
   return stmts;
 }
 
-export async function createDeployment({ definitionId, affectedActors, orgId }) {
-  if (!orgId) throw new Error('orgId is required when creating a deployment');
+export async function createDeployment({ definitionId, affectedActors }) {
   const id = randomUUID();
   const ts = Date.now();
 
@@ -37,14 +36,14 @@ export async function createDeployment({ definitionId, affectedActors, orgId }) 
     const { query } = await import('./db-postgres.js');
     await query(
       `INSERT INTO deployments
-         (id, definition_id, org_id, status, affected_actors, migrated_count, failed_count, started_at)
-       VALUES ($1,$2,$3,'pending',$4,0,0,$5)`,
-      [id, definitionId, orgId, affectedActors, ts]
+         (id, definition_id, status, affected_actors, migrated_count, failed_count, started_at)
+       VALUES ($1,$2,'pending',$3,0,0,$4)`,
+      [id, definitionId, affectedActors, ts]
     );
     return id;
   }
 
-  getStmts().insert.run({ id, definition_id: definitionId, org_id: orgId, affected_actors: affectedActors, started_at: ts });
+  getStmts().insert.run({ id, definition_id: definitionId, affected_actors: affectedActors, started_at: ts });
   return id;
 }
 
@@ -92,14 +91,13 @@ export async function incrementFailed(id) {
   getStmts().incrementFailed.run(id);
 }
 
-export async function listDeployments({ limit = 50, offset = 0, orgId } = {}) {
-  if (!orgId) throw new Error('orgId is required');
+export async function listDeployments({ limit = 50, offset = 0 } = {}) {
   if (isPostgres) {
     const { queryAll } = await import('./db-postgres.js');
     return queryAll(
-      `SELECT * FROM deployments WHERE org_id=$1 ORDER BY started_at DESC LIMIT $2 OFFSET $3`,
-      [orgId, limit, offset]
+      `SELECT * FROM deployments ORDER BY started_at DESC LIMIT $1 OFFSET $2`,
+      [limit, offset]
     );
   }
-  return getStmts().listByOrg.all(orgId, limit, offset);
+  return getStmts().list.all(limit, offset);
 }

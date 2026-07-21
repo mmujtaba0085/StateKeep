@@ -13,9 +13,9 @@ function getStmts() {
   stmts = {
     insert: db.prepare(`
       INSERT INTO migration_jobs
-        (deployment_id, actor_id, org_id, target_def_id, status, created_at, updated_at)
+        (deployment_id, actor_id, target_def_id, status, created_at, updated_at)
       VALUES
-        (@deployment_id, @actor_id, @org_id, @target_def_id, 'pending', @ts, @ts)
+        (@deployment_id, @actor_id, @target_def_id, 'pending', @ts, @ts)
     `),
     claimBatch: db.prepare(`
       UPDATE migration_jobs
@@ -50,9 +50,9 @@ export async function enqueueJobs(jobs) {
       for (const j of jobs) {
         await client.query(
           `INSERT INTO migration_jobs
-             (deployment_id, actor_id, org_id, target_def_id, status, created_at, updated_at)
-           VALUES ($1,$2,$3,$4,'pending',$5,$5)`,
-          [j.deployment_id, j.actor_id, j.org_id, j.target_def_id, ts]
+             (deployment_id, actor_id, target_def_id, status, created_at, updated_at)
+           VALUES ($1,$2,$3,'pending',$4,$4)`,
+          [j.deployment_id, j.actor_id, j.target_def_id, ts]
         );
       }
     });
@@ -132,7 +132,7 @@ export async function resetProcessingJobs() {
 }
 
 export async function logDecision({
-  actorId, orgId, deploymentId = null, trigger, evaluatedAt,
+  actorId, deploymentId = null, trigger, evaluatedAt,
   decision, reason, fromDefinitionId = null, toDefinitionId = null,
   actorFingerprint, prefixHash = '0',
 }) {
@@ -141,10 +141,10 @@ export async function logDecision({
       const { query } = await import('./db-postgres.js');
       await query(
         `INSERT INTO migration_decisions
-           (actor_id, org_id, deployment_id, trigger, evaluated_at, decision, reason,
+           (actor_id, deployment_id, trigger, evaluated_at, decision, reason,
             from_definition_id, to_definition_id, actor_fingerprint, prefix_hash, created_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
-        [actorId, orgId ?? 'default', deploymentId ?? null, trigger, Number(evaluatedAt),
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+        [actorId, deploymentId ?? null, trigger, Number(evaluatedAt),
          decision, reason, fromDefinitionId ?? null, toDefinitionId ?? null,
          actorFingerprint, prefixHash, Date.now()]
       );
@@ -152,11 +152,11 @@ export async function logDecision({
     }
     getDb().prepare(`
       INSERT INTO migration_decisions
-        (actor_id, org_id, deployment_id, trigger, evaluated_at, decision, reason,
+        (actor_id, deployment_id, trigger, evaluated_at, decision, reason,
          from_definition_id, to_definition_id, actor_fingerprint, prefix_hash, created_at)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?)
     `).run(
-      actorId, orgId ?? 'default', deploymentId ?? null, trigger, Number(evaluatedAt),
+      actorId, deploymentId ?? null, trigger, Number(evaluatedAt),
       decision, reason,
       fromDefinitionId ?? null, toDefinitionId ?? null,
       actorFingerprint, prefixHash, Date.now()
@@ -166,20 +166,20 @@ export async function logDecision({
   }
 }
 
-export async function findDecisionsByActor(actorId, orgId, { limit = 50, offset = 0 } = {}) {
+export async function findDecisionsByActor(actorId, { limit = 50, offset = 0 } = {}) {
   if (isPostgres) {
     const { queryAll } = await import('./db-postgres.js');
     return queryAll(
-      `SELECT * FROM migration_decisions WHERE actor_id=$1 AND org_id=$2 ORDER BY evaluated_at DESC LIMIT $3 OFFSET $4`,
-      [actorId, orgId, limit, offset]
+      `SELECT * FROM migration_decisions WHERE actor_id=$1 ORDER BY evaluated_at DESC LIMIT $2 OFFSET $3`,
+      [actorId, limit, offset]
     );
   }
   return getDb().prepare(`
     SELECT * FROM migration_decisions
-    WHERE actor_id = ? AND org_id = ?
+    WHERE actor_id = ?
     ORDER BY evaluated_at DESC
     LIMIT ? OFFSET ?
-  `).all(actorId, orgId, limit, offset);
+  `).all(actorId, limit, offset);
 }
 
 export async function findDecisionsByDeployment(deploymentId, { limit = 100, offset = 0 } = {}) {

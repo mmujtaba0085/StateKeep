@@ -82,7 +82,7 @@ export function issueToken(payload) {
  * @param {{ definitionId: string, currentStrandedCount: number, orgId: string }} opts
  * @returns {{ ok: true, payload: TokenPayload } | { ok: false, reason: string, newPreviewNeeded?: boolean }}
  */
-export function consumeToken(token, { definitionId, currentStrandedCount, orgId }) {
+export function consumeToken(token, { definitionId, currentStrandedCount }) {
   const entry = store.get(token);
 
   if (!entry) {
@@ -92,10 +92,6 @@ export function consumeToken(token, { definitionId, currentStrandedCount, orgId 
   if (Date.now() > entry.expiresAt) {
     store.delete(token);
     return { ok: false, reason: 'Token has expired — re-submit without confirmToken to get a new preview', newPreviewNeeded: true };
-  }
-
-  if (entry.payload.orgId !== orgId) {
-    return { ok: false, reason: 'Token org mismatch' };
   }
 
   if (entry.payload.definitionId !== definitionId) {

@@ -14,8 +14,8 @@ function getStmts() {
   const db = getDb();
   stmts = {
     insert: db.prepare(`
-      INSERT INTO scheduled_events (actor_id, org_id, event_type, payload_enc, fire_at, status, created_at)
-      VALUES (@actorId, @orgId, @eventType, @payloadEnc, @fireAt, 'pending', @createdAt)
+      INSERT INTO scheduled_events (actor_id, event_type, payload_enc, fire_at, status, created_at)
+      VALUES (@actorId, @eventType, @payloadEnc, @fireAt, 'pending', @createdAt)
     `),
     findDue: db.prepare(`
       SELECT * FROM scheduled_events
@@ -59,7 +59,7 @@ function getStmts() {
     cancel: db.prepare(`
       UPDATE scheduled_events
       SET status = 'cancelled'
-      WHERE id = ? AND actor_id = ? AND org_id = ? AND status = 'pending'
+      WHERE id = ? AND actor_id = ? AND status = 'pending'
     `),
     findByActor: db.prepare(`
       SELECT * FROM scheduled_events
@@ -83,19 +83,19 @@ function getStmts() {
   return stmts;
 }
 
-export async function createScheduledEvent({ actorId, orgId, eventType, payload, fireAt }) {
+export async function createScheduledEvent({ actorId, eventType, payload, fireAt }) {
   const payloadEnc = payload != null ? encrypt(JSON.stringify(payload)) : null;
   if (isPostgres) {
     const { queryOne } = await import('./db-postgres.js');
     const row = await queryOne(
-      `INSERT INTO scheduled_events (actor_id, org_id, event_type, payload_enc, fire_at, status, created_at)
-       VALUES ($1,$2,$3,$4,$5,'pending',$6) RETURNING id`,
-      [actorId, orgId, eventType, payloadEnc, fireAt, Date.now()]
+      `INSERT INTO scheduled_events (actor_id, event_type, payload_enc, fire_at, status, created_at)
+       VALUES ($1,$2,$3,$4,'pending',$5) RETURNING id`,
+      [actorId, eventType, payloadEnc, fireAt, Date.now()]
     );
     return row?.id;
   }
   const s = getStmts();
-  const info = s.insert.run({ actorId, orgId, eventType, payloadEnc, fireAt, createdAt: Date.now() });
+  const info = s.insert.run({ actorId, eventType, payloadEnc, fireAt, createdAt: Date.now() });
   return info.lastInsertRowid;
 }
 
@@ -187,24 +187,24 @@ export async function findDeadLetter(limit = 100) {
   return getStmts().findDeadLetter.all(limit).map(decodeRow);
 }
 
-export async function cancelScheduledEvent(id, actorId, orgId) {
+export async function cancelScheduledEvent(id, actorId) {
   if (isPostgres) {
     const { query } = await import('./db-postgres.js');
-    const r = await query(`UPDATE scheduled_events SET status='cancelled' WHERE id=$1 AND actor_id=$2 AND org_id=$3 AND status='pending'`, [id, actorId, orgId]);
+    const r = await query(`UPDATE scheduled_events SET status='cancelled' WHERE id=$1 AND actor_id=$2 AND status='pending'`, [id, actorId]);
     return r.rowCount;
   }
-  return getStmts().cancel.run(id, actorId, orgId).changes;
+  return getStmts().cancel.run(id, actorId).changes;
 }
 
-export async function cancelAllPendingForActor(actorId, orgId) {
+export async function cancelAllPendingForActor(actorId) {
   if (isPostgres) {
     const { query } = await import('./db-postgres.js');
-    const r = await query(`UPDATE scheduled_events SET status='cancelled' WHERE actor_id=$1 AND org_id=$2 AND status='pending'`, [actorId, orgId]);
+    const r = await query(`UPDATE scheduled_events SET status='cancelled' WHERE actor_id=$1 AND status='pending'`, [actorId]);
     return r.rowCount;
   }
   return getDb().prepare(
-    `UPDATE scheduled_events SET status = 'cancelled' WHERE actor_id = ? AND org_id = ? AND status = 'pending'`
-  ).run(actorId, orgId).changes;
+    `UPDATE scheduled_events SET status = 'cancelled' WHERE actor_id = ? AND status = 'pending'`
+  ).run(actorId).changes;
 }
 
 export async function findByActor(actorId, orgId, status = 'all') {

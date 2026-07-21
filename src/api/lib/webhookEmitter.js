@@ -10,33 +10,33 @@
 import { getDb } from '../../registry/db.js';
 import { randomUUID } from 'crypto';
 
-export function emitWebhookEvent(orgId, eventType, data) {
+export function emitWebhookEvent(eventType, data) {
   try {
     const db = getDb();
 
-    // Find all active webhooks for this org that subscribe to this event type.
+    // Find all active webhooks that subscribe to this event type.
     // json_each() unpacks the stored JSON array so we can match individual values.
     const webhooks = db.prepare(`
       SELECT DISTINCT w.id
       FROM webhooks w, json_each(w.events) je
-      WHERE w.org_id = ? AND w.active = 1 AND je.value = ?
-    `).all(orgId, eventType);
+      WHERE w.active = 1 AND je.value = ?
+    `).all(eventType);
 
     if (webhooks.length === 0) return;
 
     const insert = db.prepare(`
       INSERT INTO webhook_deliveries
-        (id, webhook_id, org_id, event_type, payload, status, attempts, created_at)
-      VALUES (?, ?, ?, ?, ?, 'pending', 0, ?)
+        (id, webhook_id, event_type, payload, status, attempts, created_at)
+      VALUES (?, ?, ?, ?, 'pending', 0, ?)
     `);
 
     const now     = Date.now();
-    const payload = JSON.stringify({ eventType, orgId, timestamp: now, data });
+    const payload = JSON.stringify({ eventType, timestamp: now, data });
 
     for (const webhook of webhooks) {
-      insert.run(randomUUID(), webhook.id, orgId, eventType, payload, now);
+      insert.run(randomUUID(), webhook.id, eventType, payload, now);
     }
   } catch (err) {
-    console.error(`[webhookEmitter] Failed to emit ${eventType} for org ${orgId}:`, err.message);
+    console.error(`[webhookEmitter] Failed to emit ${eventType}:`, err.message);
   }
 }
