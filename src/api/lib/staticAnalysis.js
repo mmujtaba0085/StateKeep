@@ -9,8 +9,8 @@
  *   INVALID_INITIAL        — `initial` references a state that doesn't exist
  *   COMPOUND_NO_INITIAL    — a compound state is missing its own `initial`
  *   INVALID_TRANSITION     — a transition targets a state that doesn't exist
- *   UNDEFINED_INITIAL      — XState starts the machine but snapshot.value is undefined
- *   XSTATE_ERROR           — XState threw during createMachine / actor.start()
+ *   UNDEFINED_INITIAL      — initial state resolves to undefined after compilation
+ *   COMPILE_ERROR          — compileMachine threw during compilation
  *
  * Soft warnings (stored, returned in response but don't block):
  *   DEAD_END_STATE         — non-final state with no outgoing transitions
@@ -22,7 +22,9 @@
  * XState-level errors always take priority over static checks.
  */
 
-import { createMachine, createActor } from 'xstate';
+import { compileMachine, computeInitialSnapshot } from '../../runtime/machineRuntime.js';
+
+const _emptyRegistry = { guards: {}, actions: {}, services: {} };
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
@@ -93,26 +95,28 @@ export function analyseDefinition(definition) {
     }
   }
 
-  // ── XState runtime check ──────────────────────────────────────────────────
+  // ── Compile check ─────────────────────────────────────────────────────────
 
+  let compiledJson = null;
   if (errors.length === 0) {
-    // Only run XState if no pre-checks failed — avoids double-reporting
-    const xstateError = tryCreateMachine(definition);
-    if (xstateError) {
-      errors.push(issue('XSTATE_ERROR', xstateError));
-      return { errors, warnings };
+    const { compiled, error: compileError } = tryCompileMachine(definition);
+    if (compileError) {
+      errors.push(issue('COMPILE_ERROR', compileError));
+      return { errors, warnings, compiledJson: null };
     }
+    compiledJson = compiled;
 
-    // Check for the deferred-throw gap (snapshot.value === undefined after start)
-    const undefinedError = checkUndefinedInitial(definition);
-    if (undefinedError) {
-      errors.push(issue('UNDEFINED_INITIAL', undefinedError));
-      return { errors, warnings };
+    // Verify initial state resolves — catches deferred issues the structural
+    // checks above may not catch (e.g. transient-loop at initial state).
+    const initialError = checkInitialResolvable(compiledJson, definition);
+    if (initialError) {
+      errors.push(issue('UNDEFINED_INITIAL', initialError));
+      return { errors, warnings, compiledJson: null };
     }
   }
 
   // If there are hard errors, stop — no point running soft checks
-  if (errors.length > 0) return { errors, warnings };
+  if (errors.length > 0) return { errors, warnings, compiledJson: null };
 
   // ── Soft warnings (static graph analysis) ────────────────────────────────
 
@@ -166,7 +170,7 @@ export function analyseDefinition(definition) {
     }
   }
 
-  return { errors, warnings };
+  return { errors, warnings, compiledJson };
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -246,35 +250,31 @@ function bfsReachable(initial, states) {
   return visited;
 }
 
-/** Attempt createMachine — returns error string or null. */
-function tryCreateMachine(definition) {
+/** Attempt compileMachine — returns { compiled, error }. */
+function tryCompileMachine(definition) {
   try {
-    createMachine(definition);
-    return null;
+    return { compiled: compileMachine(definition), error: null };
   } catch (e) {
-    return e.message;
+    return { compiled: null, error: e.message };
   }
 }
 
 /**
- * Try start + getSnapshot to catch the deferred-throw gap.
- * Returns error string if snapshot.value is undefined, or null.
+ * Verify the initial state is reachable via computeInitialSnapshot.
+ * Catches issues like transient loops or missing initial paths.
+ * Returns error string on failure, null on success.
  */
-function checkUndefinedInitial(definition) {
-  let actor;
+function checkInitialResolvable(compiledJson, definitionJson) {
   try {
-    const machine = createMachine(definition);
-    actor = createActor(machine);
-    actor.start();
-    const snap = actor.getSnapshot();
-    if (snap.value === undefined || snap.value === null) {
+    const result = computeInitialSnapshot(compiledJson, definitionJson, {}, _emptyRegistry);
+    if (result.error) {
+      return `Machine initial state could not be resolved: ${result.error}`;
+    }
+    if (result.stateValue === undefined || result.stateValue === null) {
       return `Machine started but initial state resolved to undefined — check that "initial" matches a real state name`;
     }
     return null;
   } catch (e) {
     return e.message;
-  } finally {
-    // Always stop the actor to clean up — even if snapshot was undefined
-    try { actor?.stop(); } catch {}
   }
 }

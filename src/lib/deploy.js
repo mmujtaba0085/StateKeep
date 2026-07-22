@@ -5,7 +5,6 @@
  * Handles create (first version) and upgrade (new version from parent).
  */
 
-import { createMachine } from 'xstate';
 import { randomUUID } from 'crypto';
 import { createDefinition, updateCompiledJson } from '../registry/definitionRepo.js';
 import { createDeployment, updateDeploymentStatus } from '../registry/deploymentRepo.js';
@@ -17,7 +16,7 @@ import { compileMachine } from '../runtime/definitionCompiler.js';
 export async function deployDefinition(definitionJson, {
   parentId,
 } = {}) {
-  try { createMachine(definitionJson); } catch (e) {
+  try { compileMachine(definitionJson); } catch (e) {
     throw Object.assign(new Error(`Invalid definition: ${e.message}`), { code: 'INVALID_DEFINITION' });
   }
 
