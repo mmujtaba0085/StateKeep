@@ -162,7 +162,7 @@ StateKeep writes the following internal event types to an actor's event history.
 │   Custom interpreter    │   │   actors                  │
 │   SPAWN / HYDRATE       │◄──►   definitions             │
 │   TERMINATE             │   │   events    (immutable)   │
-│   FNV-32 fingerprinting │   │   deployments             │
+│   FNV-1a fingerprinting │   │   deployments             │
 │   LRU hot registry      │   │   migration_jobs          │
 └─────────────────────────┘   │   api_keys                │
                               │   metrics_snapshots       │
@@ -171,9 +171,9 @@ StateKeep writes the following internal event types to an actor's event history.
 │                         │
 │   migrate-worker        │   ┌───────────────────────────┐
 │   poll 500ms            │   │   APV Engine (WASM)       │
-│   claim up to 500 jobs  │   │   apv-engine.mjs +        │
-│   HYDRATE actors to     │   │   apv-engine.wasm         │
-│   new definitions       │   │   (Emscripten build)      │
+│   claim up to 500 jobs  │   │   src/ffi/apv-engine.mjs  │
+│   HYDRATE actors to     │   │   (WASM inlined via       │
+│   new definitions       │   │    Emscripten)            │
 │                         │   │                           │
 │   gc-worker             │   │   apv_registry_create/destroy
 │   poll 60s              │   │   apv_clock_tick          │
@@ -198,7 +198,7 @@ StateKeep writes the following internal event types to an actor's event history.
 
 **Deferred write buffer.** State updates, events, and migration decisions are collected in an in-process buffer and flushed to SQLite in a single transaction every 50ms. If 200 items accumulate before the timer fires, the buffer flushes immediately. Crash window is at most 50ms of unwritten state.
 
-**Fingerprint chain.** Every event processed by an actor updates its history fingerprint: `fp = fnv1aUpdate(fp, eventType)`. The fingerprint starts from `FNV_OFFSET` (the standard 64-bit FNV-1a offset basis, `0xcbf29ce484222325`). The sentinel `'0'` stored in the database for a freshly spawned actor maps to `FNV_OFFSET` when the chain starts. The computation is identical in the C engine and the JavaScript worker.
+**Fingerprint chain.** Every event processed by an actor updates its history fingerprint: `fp = fnv1aUpdate(fp, eventType)`. The fingerprint starts from `FNV_OFFSET` (the standard 64-bit FNV-1a offset basis, `0xcbf29ce484222325`). The sentinel `'0'` stored in the database for a freshly spawned actor maps to `FNV_OFFSET` when the chain starts. The computation is identical in the WASM engine and the JavaScript worker.
 
 ---
 
@@ -414,8 +414,8 @@ node --test test/statechart/sc9.unit.js   # migration routing unit tests
 # Property-based invariant tests — no server or DB required
 npm run test:properties
 
-# C FFI tests (requires: make -C mock)
-npm run test:c
+# Note: the C FFI test target (test:c) is not available in the open-source release.
+# The APV engine WASM binary (apv-engine.mjs) is built via: make wasm -C src/ffi
 
 # Full statechart test suite SC1–SC9 (server required)
 npm run test:statechart
