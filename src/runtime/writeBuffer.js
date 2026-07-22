@@ -168,6 +168,7 @@ class WriteBuffer {
           );
         }
       })();
+      return Promise.resolve();
     } catch (err) {
       console.error('[writeBuffer] flush error:', err.message);
       return Promise.reject(err);
