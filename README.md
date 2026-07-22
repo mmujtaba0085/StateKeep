@@ -252,8 +252,8 @@ cp .env.example .env
 #            STATEKEEP_DB_PATH=/var/lib/statekeep/db.sqlite
 
 # Start server and workers
-node src/api/server.js &
-node src/workers/migrate-worker.js &
+node --env-file=.env src/api/server.js &
+node --env-file=.env src/workers/migrate-worker.js &
 node src/workers/scheduler-worker.js &
 node src/workers/gc-worker.js &
 node src/workers/snapshot-worker.js &
@@ -340,7 +340,7 @@ curl -X PUT http://localhost:3001/v1/definitions \
 |---|---|---|---|
 | `STATEKEEP_DB_PATH` | Yes | — | SQLite database file path |
 | `STATEKEEP_ENCRYPTION_KEY` | Yes | — | 64-char hex (32 bytes) for AES-256-GCM context encryption |
-| `STATEKEEP_ENGINE_PATH` | No | — | Path override for the APV WASM engine module (`apv-engine.mjs`). Ships pre-built in `src/ffi/`; absent or file missing = fallback mode (no migration) |
+| `STATEKEEP_ENGINE_PATH` | No | — | Path override for the APV WASM engine module (`apv-engine.mjs`). Ships pre-built in `src/ffi/` — no separate installation required. Override only if rebuilding from source. |
 | `PORT` | No | `3001` | Fastify API server port |
 | `LOG_DIR` | No | `./logs` | Directory for daily rotating log files |
 | `LOG_LEVEL` | No | `info` | Pino log level (`trace`, `debug`, `info`, `warn`, `error`) |
@@ -375,7 +375,7 @@ copy .env.example .env
 # Set STATEKEEP_ENCRYPTION_KEY to the value from the command above
 
 # Start the server
-node src/api/server.js
+node --env-file=.env src/api/server.js
 ```
 
 If you previously ran `npm install` in WSL (you'll see `ERR_DLOPEN_FAILED` on

@@ -925,7 +925,7 @@ export async function migrateActor(actorId, targetDefinitionId, { priority = 'no
  * Call once at API server startup — the engine starts with an empty registry after
  * every process restart, so changepoints deployed before the restart must be re-registered.
  *
- * Also pre-warms the XState machine cache in every worker thread so the first
+ * Also pre-warms the compiled definition cache in every worker thread so the first
  * real SPAWN/HYDRATE for an active definition has zero compile cost.
  */
 export async function seedEngineRegistry() {

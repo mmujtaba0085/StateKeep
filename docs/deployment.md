@@ -472,7 +472,7 @@ rule_files:
 Key alerts:
 | Alert | Condition | Action |
 |-------|-----------|--------|
-| `APVEngineFallback` | Engine in fallback mode | Verify `src/ffi/apv-engine.mjs` is present and Node.js 20+ is installed |
+| ~~`APVEngineFallback`~~ | _(retired)_ — the server fails to start if `apv-engine.mjs` is missing; there is no fallback mode | Ensure `src/ffi/apv-engine.mjs` is present before starting the server |
 | `ActorMigrationFailed` | Migration failures in last 5m | Check `GET /v1/actors?status=needs_rescue` |
 | `APILatencyHigh` | P99 > 500ms for 5m | Increase `HOT_REGISTRY_SIZE` or `ACTORS_PER_WORKER` |
 | `PendingMigrationJobsStalling` | > 1000 jobs queued for 15m | Verify migrate-worker is running |
