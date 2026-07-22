@@ -24,7 +24,7 @@ Health check: `curl http://localhost:3001/v1/health` → `{"status":"ok","engine
 
 **Unit and integration tests** (requires WSL on Windows):
 ```bash
-node --test test/statechart/sc*.js
+node --test test/statechart/sc*.js test/crypto.spec.js
 ```
 
 **E2E tests** (Playwright, manages its own server on port 3001):
@@ -32,7 +32,12 @@ node --test test/statechart/sc*.js
 npx playwright test
 ```
 
-Expected: 432 tests, 2 skips, 0 failures.
+**All tests** (WSL only):
+```bash
+bash scripts/run-tests.sh
+```
+
+Expected: ~432 tests, 2 skips, 0 failures.
 
 ## Architecture overview
 
@@ -43,7 +48,7 @@ StateKeep runs actors (live state machine instances) via:
 3. **Custom interpreter** (`src/runtime/interpreter.js`) — processes events synchronously, returns state diff + side-effect list; zero async I/O
 4. **Worker pool** (`src/runtime/workerPool.js`) — worker threads handle SPAWN, HYDRATE, TERMINATE; four-tier priority queue (urgent/high/normal/low)
 5. **Write buffer** (`src/runtime/writeBuffer.js`) — deferred SQLite writes, flushed every 50 ms or at 200-item high-water mark
-6. **APV engine** (`src/ffi/engine.js`) — loads the pre-built WASM module (`src/ffi/apv-engine.mjs`) that computes migration routing decisions; server still runs in fallback mode if the WASM binary is absent
+6. **APV engine** (`src/ffi/engine.js`) — loads the pre-built WASM module (`src/ffi/apv-engine.mjs`) that computes migration routing decisions; `apv-engine.mjs` is required — the server fails to start if it is missing
 
 Key invariant: **EVENT processing is synchronous and on the main thread**. Workers handle lifecycle operations (SPAWN, HYDRATE, TERMINATE) only. This is the performance-critical design that keeps the event path fast.
 
