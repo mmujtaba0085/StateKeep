@@ -8,9 +8,10 @@ Production deployment checklist, Caddy/Nginx TLS termination config, and systemd
 
 - Linux x86_64 (Ubuntu 22.04+ or Debian 12+ recommended)
 - Node.js 20+ (`node --version`)
-- The compiled `libapv-engine.so` placed at `/opt/statekeep/lib/libapv-engine.so`
 - Nginx 1.18+ for TLS termination
 - A valid TLS certificate (Let's Encrypt via Certbot recommended)
+
+> **APV engine:** The WASM-compiled APV engine (`src/ffi/apv-engine.mjs`) is included in the repository. No separate binary installation is needed. If you modify the C source under `src/ffi/`, rebuild with `make wasm -C src/ffi` (requires [Emscripten](https://emscripten.org)).
 
 ---
 
@@ -20,10 +21,10 @@ Production deployment checklist, Caddy/Nginx TLS termination config, and systemd
 /opt/statekeep/
 ├── app/                  # Application source
 │   ├── src/
+│   │   └── ffi/
+│   │       └── apv-engine.mjs  # APV WASM engine (included in repo)
 │   ├── package.json
 │   └── ...
-├── lib/
-│   └── libapv-engine.so  # APV engine shared library (gitignored, never committed)
 ├── data/
 │   └── statekeep.db      # SQLite database (WAL mode)
 └── archives/             # Gzip-compressed actor snapshots (gc-worker output)
@@ -40,9 +41,6 @@ Copy `.env.example` to `/opt/statekeep/app/.env` and fill in all values:
 ```bash
 # 32-byte AES-256-GCM encryption key (hex-encoded, 64 chars)
 STATEKEEP_ENCRYPTION_KEY=$(node -e "console.log(require('crypto').randomBytes(32).toString('hex'))")
-
-# Path to the compiled APV engine
-STATEKEEP_ENGINE_PATH=/opt/statekeep/lib/libapv-engine.so
 
 # SQLite database path
 STATEKEEP_DB_PATH=/opt/statekeep/data/statekeep.db
@@ -340,21 +338,17 @@ nginx -t && systemctl reload nginx
 
 ---
 
-## `.so` Placement
+## APV Engine
 
-The APV engine is a proprietary compiled binary. It is **never** included in the git repository (`.gitignore` lists `*.so` and `src/temp/`).
+The APV WASM engine (`src/ffi/apv-engine.mjs`) is included in the repository and requires no separate installation. It is loaded automatically at startup via `src/ffi/engine.js`.
 
 ```bash
-# Copy the compiled .so to the production host
-scp libapv-engine.so user@host:/opt/statekeep/lib/libapv-engine.so
-chmod 755 /opt/statekeep/lib/libapv-engine.so
-
-# Verify it loads correctly
-STATEKEEP_ENGINE_PATH=/opt/statekeep/lib/libapv-engine.so \
-  node -e "import('./src/ffi/engine.js').then(m => m.engineReady).then(() => console.log('engine ok'))"
+# Verify the engine loads correctly
+node -e "import('./src/ffi/engine.js').then(m => m.engineReady).then(() => console.log('engine ok'))" \
+  --env-file=/opt/statekeep/app/.env
 ```
 
-The server logs `[ffi/engine] APV engine loaded from ...` on successful load, or `no-migration fallback mode active` if loading fails.
+The server logs `[ffi/engine] Loaded WASM APV engine` on successful load. If `apv-engine.mjs` is missing, the server will fail to start and print a build instruction.
 
 ---
 
@@ -375,7 +369,7 @@ curl https://statekeep.yourcompany.com/v1/health
 # Expected: {"status":"ok","engine":"real","db":"ok",...}
 ```
 
-`"engine":"real"` confirms the APV `.so` is loaded. `"engine":"fallback"` means migrations are disabled — check `STATEKEEP_ENGINE_PATH` and file permissions.
+`"engine":"real"` confirms the APV WASM engine is loaded and operational. `"engine":"fallback"` means migrations are disabled — check that `src/ffi/apv-engine.mjs` is present and `node --version` is 20+.
 
 ---
 
@@ -478,7 +472,7 @@ rule_files:
 Key alerts:
 | Alert | Condition | Action |
 |-------|-----------|--------|
-| `APVEngineFallback` | Engine in fallback mode | Check `STATEKEEP_ENGINE_PATH`, verify .so present |
+| `APVEngineFallback` | Engine in fallback mode | Verify `src/ffi/apv-engine.mjs` is present and Node.js 20+ is installed |
 | `ActorMigrationFailed` | Migration failures in last 5m | Check `GET /v1/actors?status=needs_rescue` |
 | `APILatencyHigh` | P99 > 500ms for 5m | Increase `HOT_REGISTRY_SIZE` or `ACTORS_PER_WORKER` |
 | `PendingMigrationJobsStalling` | > 1000 jobs queued for 15m | Verify migrate-worker is running |

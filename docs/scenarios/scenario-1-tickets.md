@@ -9,10 +9,10 @@ This scenario walks through the full StateKeep lifecycle using a help-desk ticke
 - Deploy v3 (breaking — removes `in_progress`, triggers rescue flow)
 - Deploy v3-fixed (with `stateMapping` to show the clean rescue path)
 
-**Set this once** before running any commands:
+**Set this once** before running any commands (replace with your own values):
 ```bash
-export API_KEY="sk_live_2b6cb4591bcac04c3caed5b2c37b3a6ed94b6c8c"
-export BASE="https://statekeep.161-97-163-210.nip.io"
+export API_KEY="sk_your_api_key"
+export BASE="https://your-statekeep-instance.com"
 ```
 
 ---
@@ -79,7 +79,7 @@ The script will print each actor ID as it creates and moves them. Watch the **Ac
 
 ## Step 3 — Verify in dashboard
 
-Open `https://statekeep.161-97-163-210.nip.io/dashboard/` and check:
+Open `https://your-statekeep-instance.com/dashboard/` and check:
 - **Command Centre**: actor count ≥ 20
 - **Machines**: shows `ticket-v1` machine family with actor counts
 - **Actor Explorer**: 20 actors, spread across states

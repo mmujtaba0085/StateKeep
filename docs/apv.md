@@ -15,7 +15,7 @@ A complete technical reference covering the formal model, implementation details
 5. [Determinism, Irreversibility, and GC Safety](#5-determinism-irreversibility-and-gc-safety)
 6. [Rescue Change-Points](#6-rescue-change-points)
 7. [The FNV-1a Fingerprint Chain](#7-the-fnv-1a-fingerprint-chain)
-8. [The C Engine (APV Registry)](#8-the-c-engine-apv-registry)
+8. [The APV Engine (APV Registry)](#8-the-apv-engine-apv-registry)
 9. [Scalar (Flat) Routing — End to End](#9-scalar-flat-routing--end-to-end)
 10. [Hierarchical (Compound) State Machine Routing](#10-hierarchical-compound-state-machine-routing)
 11. [Parallel State Machine Routing](#11-parallel-state-machine-routing)
@@ -218,9 +218,11 @@ This starts from `FNV_OFFSET` and chains `fnv1aUpdate` for each event type — i
 
 ---
 
-## 8. The C Engine (APV Registry)
+## 8. The APV Engine (APV Registry)
 
-The core routing logic runs in `libapv-engine.so`, a compiled C library loaded via the koffi FFI. The JavaScript layer (`src/ffi/engine.js`) wraps it into a unified object.
+The core routing logic runs in a WebAssembly module compiled from C via Emscripten. At startup, `src/ffi/engine.js` imports `src/ffi/apv-engine.mjs` (the Emscripten-generated loader with the WASM binary inlined), which initialises the WebAssembly instance and exposes the APV C functions as JavaScript-callable methods. The JavaScript layer wraps these into a unified object.
+
+**Build:** `make wasm -C src/ffi` (requires [Emscripten](https://emscripten.org)). The compiled `apv-engine.mjs` is included in the repository; rebuilding is only needed if modifying the C source in `src/ffi/`.
 
 ### The 13 Exported Symbols
 
@@ -242,7 +244,7 @@ The core routing logic runs in `libapv-engine.so`, a compiled C library loaded v
 
 ### Fallback Mode
 
-If `STATEKEEP_ENGINE_PATH` points to a missing or unloadable `.so`, the server continues running in **fallback mode** (`src/ffi/fallback.js`). In fallback mode `eng.available = false` and all routing calls return `null`. Actors can still send events and spawn; they just never migrate across definitions. The health endpoint reports `"engine": "fallback"`.
+If `apv-engine.mjs` is missing or fails to load, the server fails to start and logs a build instruction. The APV engine is required for the server to run. Rebuild it with `make wasm -C src/ffi` if the file is absent. The health endpoint reports `"engine": "real"` when the WASM engine is loaded successfully.
 
 ### Registering a Change-Point
 
@@ -293,7 +295,7 @@ In `src/api/routes/definitions.js`:
 
 1. `computeHistoryHash(['SUBMIT', 'VERIFY_DOCS', 'APPROVE'])` → produces a 64-bit hex fingerprint, e.g. `"a3f2c9018bd4e701"`
 2. `fingerprintToBigInt("a3f2c9018bd4e701")` → `BigInt("0xa3f2c9018bd4e701")`
-3. `eng.registerChangepoint(tStar, prefixHash, 1n, "loan-v2")` → stored in C engine in-memory registry
+3. `eng.registerChangepoint(tStar, prefixHash, 1n, "loan-v2")` → stored in APV engine in-memory registry
 4. `insertChangepoint({ tStar, prefixHash: "a3f2c9018bd4e701", refinement: 1, childDefId: "loan-v2" })` → persisted to `changepoints` table
 
 The `_historyPath: ["SUBMIT", "VERIFY_DOCS", "APPROVE"]` is embedded in the stored definition JSON so it survives restarts.
@@ -334,11 +336,11 @@ Actors whose fingerprint does not match `"a3f2c9018bd4e701"` get `null` from `co
 
 1. **Re-check eligibility** — the actor's fingerprint may have changed since the job was enqueued (actor processed more events). It calls `eng.computeAccessible` again with current data. If the fingerprint no longer matches the target, the job is cancelled and logged as `fingerprint_changed`.
 
-2. **HYDRATE** — sends a `HYDRATE` message to the worker pool with the target definition JSON, the actor's current context, and the state mapping. The worker thread creates a new XState actor on `loan-v2` at the appropriate landing state.
+2. **HYDRATE** — sends a `HYDRATE` message to the worker pool with the target definition JSON, the actor's current context, and the state mapping. The worker thread compiles the new definition and uses `restoreSnapshot()` to place the actor at the appropriate landing state in the new definition, without replaying any events.
 
 3. **Persist** — the actor row is updated: `definition_id → loan-v2`, `history_fingerprint` unchanged (the fingerprint is never recomputed from context — it represents the event chain, not the current state).
 
-4. **actorStarted** — notifies the C engine: `eng.actorStarted(targetDef.deployedAt, actorFp)`. The engine increments the live-count for the target prefix class, which feeds GC safety.
+4. **actorStarted** — notifies the APV engine: `eng.actorStarted(targetDef.deployedAt, actorFp)`. The engine increments the live-count for the target prefix class, which feeds GC safety.
 
 5. **MIGRATED event** — inserted into the immutable events log.
 
@@ -370,15 +372,16 @@ export function resolveLandingState(currentStateValue, newMachineStates, stateMa
     if (mappedKey) {
       return newMachineStates[mappedKey] ? mappedKey : null;
     }
-    // Top-level key exists in new machine: return full compound value so
-    // XState restores the complete sub-state hierarchy via resolveState
+    // Top-level key exists in new machine: return the full compound value
+    // so the interpreter's restoreSnapshot() can place the actor at the
+    // exact nested position without replaying events.
     if (newMachineStates[topLevel]) return currentStateValue;
     return null;
   }
 }
 ```
 
-If the top-level state name still exists in the new machine (e.g. `processing` is still a state in `loan-v2`), the full compound value `{ processing: "waiting_for_docs" }` is passed to XState's `resolveState`, which reconstructs the full sub-state hierarchy. The actor lands exactly where it was in the nested hierarchy.
+If the top-level state name still exists in the new machine (e.g. `processing` is still a state in `loan-v2`), the full compound value `{ processing: "waiting_for_docs" }` is returned as the landing state and passed to the interpreter's `restoreSnapshot()`, which places the actor at that exact nested position without replaying any events.
 
 If the old top-level state was renamed (e.g. `processing → under_review`), the `stateMapping` field handles the redirect:
 
@@ -482,7 +485,7 @@ For a machine with a top-level parallel state, this returns paths like `["paymen
 
 ### Path-Keyed Encoding
 
-A critical insight: if two regions happen to have identical event histories, they would produce identical fingerprints. Passing two identical uint64 values to the C engine would look like one region to the registry. To prevent false-positive cross-region matches, each region's fingerprint is **path-keyed** — the region's full dot-path is baked into the value before it's passed to the engine.
+A critical insight: if two regions happen to have identical event histories, they would produce identical fingerprints. Passing two identical uint64 values to the APV engine would look like one region to the registry. To prevent false-positive cross-region matches, each region's fingerprint is **path-keyed** — the region's full dot-path is baked into the value before it's passed to the engine.
 
 ```javascript
 // src/ffi/hashUtils.js
@@ -540,7 +543,7 @@ const regionArr = regionFingerprintsToArray(actor.regionFingerprints);
 targetDefId = eng.computeAccessibleParallel(regionArr, logicalTime, currentTick);
 ```
 
-The C engine checks whether *all* provided region fingerprints match the registered change-point. Only actors where the full vector matches are eligible.
+The APV engine checks whether *all* provided region fingerprints match the registered change-point. Only actors where the full vector matches are eligible.
 
 ### Versioned Storage Format
 
@@ -578,7 +581,7 @@ Parallel actors do not need to progress uniformly across all regions:
 
 **Stable snapshot rule:** A region's fingerprint advances *only if* the region was active both before and after the transition (`preRegion !== undefined` AND state changed). Newly active regions start from the '0' sentinel (`current?.[regionPath] ?? '0'`). Inactive regions are absent from the actor's regional prefix set (`if (postRegion === undefined) continue`). A selector cannot match a region that is not currently active.
 
-Migration is evaluated at stable logical ticks — after an event has been fully processed and a complete state snapshot exists, never in the middle of an internal XState transition.
+Migration is evaluated at stable logical ticks — after an event has been fully processed and a complete state snapshot exists, never in the middle of an internal interpreter transition.
 
 ### Parallel Determinism Theorem
 
@@ -658,7 +661,7 @@ Parallel change-points. One row per deployment that uses `historyRegions`.
 
 ### Registry Reconstruction on Restart
 
-When `migrate-worker.js` starts, it calls `syncRegistry()` which loads all changepoints from both tables and re-registers them with the C engine:
+When `migrate-worker.js` starts, it calls `syncRegistry()` which loads all changepoints from both tables and re-registers them with the APV engine:
 
 ```javascript
 const rows = loadChangepointsAfter(_lastChangepointId);
@@ -732,7 +735,7 @@ For each job:
   3. updateActorStatus(actor_id, 'migrating')
   4. migrateActor(actor_id, target_def_id, { priority: 'low' })
      → actorManager sends HYDRATE to worker pool
-     → worker creates new XState actor at landing state
+     → worker uses custom interpreter to restore actor at landing state
      → write buffer flushes updated actor row (new definitionId, same fingerprint)
   5. eng.actorStarted(targetDef.deployedAt, migratedActor.historyFingerprint)
   6. INSERT MIGRATED event into events log
@@ -763,7 +766,7 @@ The O(log n) prediction is confirmed empirically: doubling change-points from 1k
 
 ### Machine Cache
 
-Each worker thread maintains a compiled machine cache (`_machineCache`) capped at 512 entries. XState `createMachine` calls are expensive; caching them yields ~55 migration jobs/second throughput. The cache uses reference-counted eviction: entries with live actors pinned by `_definitionRefCounts` are never evicted, even under memory pressure.
+Each worker thread maintains a compiled definition cache (`_compiledCache`) capped at 512 entries. `compileMachine()` calls are relatively expensive; caching the compiled output yields ~55 migration jobs/second throughput. The cache uses reference-counted eviction: entries with live actors pinned by `_definitionRefCounts` are never evicted, even under memory pressure.
 
 ---
 
@@ -792,7 +795,7 @@ At a million actors the probability is roughly 1-in-37-million — negligible fo
 
 **Path-keyed encoding and regional fingerprints** add no additional collision risk relative to the global fingerprint. `encodeRegionFingerprint(regionPath, fp)` hashes the region path *into* the value, so even if two regions' raw event fingerprints are identical, their encoded values differ.
 
-**Mitigation:** The stored `historyFingerprint` is the actor's authoritative event-history summary. Collision probability is independent of the number of change-points registered — only the number of distinct prefix classes (actors with distinct histories) matters. For systems requiring higher assurance, changing `FNV_PRIME` and `FNV_OFFSET` in `src/ffi/fingerprintChain.js` to 128-bit constants would require corresponding changes in the C engine ABI.
+**Mitigation:** The stored `historyFingerprint` is the actor's authoritative event-history summary. Collision probability is independent of the number of change-points registered — only the number of distinct prefix classes (actors with distinct histories) matters. For systems requiring higher assurance, changing `FNV_PRIME` and `FNV_OFFSET` in `src/ffi/fingerprintChain.js` to 128-bit constants would require corresponding changes in the APV engine ABI.
 
 ---
 
@@ -861,7 +864,7 @@ An actor in `{ active: { setup: { payment: "verified", shipping: "pending" } } }
 
 **On migration**, both surfaces are handled independently then combined:
 
-**Step 1 — Landing state resolution** (`resolveLandingState`): `currentStateValue = { active: { setup: { payment: "verified", shipping: "pending" } } }`. The top-level key is `"active"`. If `"active"` exists in the new machine's states, the full compound value `{ active: { setup: ... } }` is passed to XState's `resolveState`. XState reconstructs the complete nested hierarchy including the parallel sub-state.
+**Step 1 — Landing state resolution** (`resolveLandingState`): `currentStateValue = { active: { setup: { payment: "verified", shipping: "pending" } } }`. The top-level key is `"active"`. If `"active"` exists in the new machine's states, the full compound value `{ active: { setup: ... } }` is used as the landing state and passed to `restoreSnapshot()`, which places the actor at that exact nested position in the new definition without replaying any events.
 
 **Step 2 — Region fingerprints** pass through unchanged. `initializeRegionFingerprints` is called on the new definition + new stateValue. It calls `extractParallelRegionPaths` on the new definition — if the new machine still has `active.setup.payment` and `active.setup.shipping`, those paths are re-extracted and the existing fingerprints `{ "active.setup.payment": "abc...", "active.setup.shipping": "000..." }` are carried over directly. If the new machine renamed the parallel structure (e.g. `active.setup → active.configure`), the old region paths don't match — region fingerprints start fresh from `'0'` for the new paths.
 
@@ -880,7 +883,7 @@ A machine can have both flat top-level states and a parallel sub-tree. An operat
 
 **These cannot be combined in a single deployment** — the API enforces mutual exclusion and returns HTTP 400 if both are provided.
 
-**Why this is a design choice, not a bug:** The C engine's two routing surfaces (`apv_compute_accessible` and `apv_compute_accessible_parallel`) are called sequentially in a three-tier check. Combining them would require a compound AND predicate not supported by the current engine ABI: a deployment would need to match both a scalar prefix AND a regional prefix vector simultaneously. That would require a new engine function and a corresponding DB column.
+**Why this is a design choice, not a bug:** The APV engine's two routing surfaces (`apv_compute_accessible` and `apv_compute_accessible_parallel`) are called sequentially in a three-tier check. Combining them would require a compound AND predicate not supported by the current engine ABI: a deployment would need to match both a scalar prefix AND a regional prefix vector simultaneously. That would require a new engine function and a corresponding DB column.
 
 **Workaround:** Use two sequential deployments. The first deployment (wildcard or `historyPath`) gets actors to an intermediate version. The second deployment uses `historyRegions` to further route. Because APV is a DAG (Theorem 5.2), the two-hop result is identical to what a single combined deployment would produce.
 
@@ -894,7 +897,7 @@ Section 11 defines a "well-formed" parallel change-point registry as one where n
 
 **StateKeep does not currently validate well-formedness at registration time.**
 
-`insertParChangepoint` and `registerChangepointParallel` insert rows without checking for conflicting parallel selectors. If an operator registers two parallel change-points at the same `tStar` with compatible selectors of equal specificity and equal refinement that point to different child definitions, `computeAccessibleParallel` in the C engine will return one of them — but which one is implementation-defined.
+`insertParChangepoint` and `registerChangepointParallel` insert rows without checking for conflicting parallel selectors. If an operator registers two parallel change-points at the same `tStar` with compatible selectors of equal specificity and equal refinement that point to different child definitions, `computeAccessibleParallel` in the APV engine will return one of them — but which one is implementation-defined.
 
 **In practice this is prevented by the API's `historyRegions` mutual-exclusion check** between `historyPath` and `historyRegions` on a single definition ID, and by the fact that each `PUT /v1/definitions` call produces exactly one change-point for one child definition. Two operators cannot register conflicting parallel change-points at the exact same APV clock tick unless they make simultaneous requests. The APV clock is a strict monotonic integer (`apv_clock_tick`), so simultaneous requests produce different ticks.
 
@@ -917,9 +920,9 @@ eng.actorStopped(actor.logicalStartTick, prefixHash);
 eng.vacatePrefix(actor.logicalStartTick, prefixHash);
 ```
 
-The call sequence is: (1) `actorStopped` decrements the live-count for the prefix class at `logicalStartTick`; (2) if the live-count reaches zero, `vacatePrefix` marks the prefix class as vacated in the C engine's registry, making all child versions at that location GC-eligible per Corollary 5.5.
+The call sequence is: (1) `actorStopped` decrements the live-count for the prefix class at `logicalStartTick`; (2) if the live-count reaches zero, `vacatePrefix` marks the prefix class as vacated in the APV engine's registry, making all child versions at that location GC-eligible per Corollary 5.5.
 
-In the current implementation, vacating is per-actor not per-prefix-class (i.e., it is called for each archived actor individually). The C engine internally aggregates: when the last actor carrying a prefix class is vacated, the GC trigger fires. The engine's internal live-count tracks this.
+In the current implementation, vacating is per-actor not per-prefix-class (i.e., it is called for each archived actor individually). The APV engine internally aggregates: when the last actor carrying a prefix class is vacated, the GC trigger fires. The engine's internal live-count tracks this.
 
 `gc-worker.js` runs on a 60-second loop, archiving actors idle for more than 24 hours per batch of 500.
 
@@ -952,4 +955,4 @@ In the current implementation, vacating is per-actor not per-prefix-class (i.e.,
 | `regionFingerprints` | Per-region fingerprint map for parallel machines |
 | `logicalStartTick` | APV clock value at actor spawn (= T in Acc) |
 | `tStar` | APV clock value at deployment (= t* in change-point) |
-| `prefixHash` | `BigInt(historyFingerprint)` — passed to C engine |
+| `prefixHash` | `BigInt(historyFingerprint)` — passed to APV engine |

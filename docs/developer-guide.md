@@ -461,13 +461,9 @@ try {
 
 ## Rate Limits
 
-| Tier | Requests/min | Max actors |
-|------|-------------|-----------|
-| Free | 100 | Unlimited |
-| Pro | 1,000 | Unlimited |
-| Enterprise | 10,000 | Unlimited |
+StateKeep does not impose built-in per-tier rate limits. Rate limiting is handled at the infrastructure layer — configure it in your reverse proxy (Nginx, Caddy) or API gateway as appropriate for your deployment.
 
-Rate-limit headers on every response: `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset`.
+The `@fastify/rate-limit` package is included in dependencies if you want to enable it in `src/api/server.js` for your self-hosted instance.
 
 ---
 

@@ -73,7 +73,7 @@ Stranded actors are frozen until you either deploy a rescue version or manually 
 All API requests require an `x-api-key` header:
 
 ```bash
-curl https://statekeep.161-97-163-210.nip.io/v1/health \
+curl https://your-statekeep-instance.com/v1/health \
   -H "x-api-key: YOUR_API_KEY"
 ```
 
@@ -81,14 +81,14 @@ Your API key is shown in the dashboard sidebar after login. You can also copy it
 
 The dashboard is available at:
 ```
-https://statekeep.161-97-163-210.nip.io/dashboard/
+https://your-statekeep-instance.com/dashboard/
 ```
 
 Login credentials are set by your server administrator (see `.env` `DASHBOARD_USERNAME` / `DASHBOARD_PASSWORD`).
 
 The API Explorer (Swagger UI with auto-auth) is at:
 ```
-https://statekeep.161-97-163-210.nip.io/api-explorer
+https://your-statekeep-instance.com/api-explorer
 ```
 
 ---
@@ -127,7 +127,7 @@ A state machine definition is a JSON object with `initial` and `states`. Here is
 ### Deploy it
 
 ```bash
-curl -X PUT https://statekeep.161-97-163-210.nip.io/v1/definitions \
+curl -X PUT https://your-statekeep-instance.com/v1/definitions \
   -H "x-api-key: YOUR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
@@ -178,7 +178,7 @@ If your definition has invalid transitions or a missing `initial`, you get a 400
 Once a definition is deployed, spawn actors against it:
 
 ```bash
-curl -X POST https://statekeep.161-97-163-210.nip.io/v1/actors \
+curl -X POST https://your-statekeep-instance.com/v1/actors \
   -H "x-api-key: YOUR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
@@ -208,7 +208,7 @@ curl -X POST https://statekeep.161-97-163-210.nip.io/v1/actors \
 Spawn up to 500 actors in one request:
 
 ```bash
-curl -X POST https://statekeep.161-97-163-210.nip.io/v1/actors/bulk \
+curl -X POST https://your-statekeep-instance.com/v1/actors/bulk \
   -H "x-api-key: YOUR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
@@ -239,7 +239,7 @@ curl -X POST https://statekeep.161-97-163-210.nip.io/v1/actors/bulk \
 Move an actor forward by sending it an event:
 
 ```bash
-curl -X POST https://statekeep.161-97-163-210.nip.io/v1/actors/ACTOR_ID/event \
+curl -X POST https://your-statekeep-instance.com/v1/actors/ACTOR_ID/event \
   -H "x-api-key: YOUR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
@@ -276,7 +276,7 @@ curl -X POST https://statekeep.161-97-163-210.nip.io/v1/actors/ACTOR_ID/event \
 ### Get a single actor
 
 ```bash
-curl https://statekeep.161-97-163-210.nip.io/v1/actors/ACTOR_ID \
+curl https://your-statekeep-instance.com/v1/actors/ACTOR_ID \
   -H "x-api-key: YOUR_API_KEY"
 ```
 
@@ -296,18 +296,18 @@ curl https://statekeep.161-97-163-210.nip.io/v1/actors/ACTOR_ID \
 
 ```bash
 # All actors
-curl "https://statekeep.161-97-163-210.nip.io/v1/actors?limit=50" \
+curl "https://your-statekeep-instance.com/v1/actors?limit=50" \
   -H "x-api-key: YOUR_API_KEY"
 
 # Filter by status
-curl "https://statekeep.161-97-163-210.nip.io/v1/actors?status=needs_rescue&limit=50" \
+curl "https://your-statekeep-instance.com/v1/actors?status=needs_rescue&limit=50" \
   -H "x-api-key: YOUR_API_KEY"
 ```
 
 ### Event history
 
 ```bash
-curl "https://statekeep.161-97-163-210.nip.io/v1/actors/ACTOR_ID/events?limit=20" \
+curl "https://your-statekeep-instance.com/v1/actors/ACTOR_ID/events?limit=20" \
   -H "x-api-key: YOUR_API_KEY"
 ```
 
@@ -335,7 +335,7 @@ An **additive** migration adds new states or transitions without removing any ex
 Deploy the new version with a `parentId` pointing to the previous version:
 
 ```bash
-curl -X PUT https://statekeep.161-97-163-210.nip.io/v1/definitions \
+curl -X PUT https://your-statekeep-instance.com/v1/definitions \
   -H "x-api-key: YOUR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
@@ -405,7 +405,7 @@ The definition is **not written** yet. This is a preview.
 Re-send the same request with `confirmToken` added:
 
 ```bash
-curl -X PUT https://statekeep.161-97-163-210.nip.io/v1/definitions \
+curl -X PUT https://your-statekeep-instance.com/v1/definitions \
   -H "x-api-key: YOUR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
@@ -436,7 +436,7 @@ The 8 stranded actors are now tagged `needs_rescue`. They can be seen in the das
 ### Rescuing an actor manually
 
 ```bash
-curl -X PATCH https://statekeep.161-97-163-210.nip.io/v1/actors/ACTOR_ID \
+curl -X PATCH https://your-statekeep-instance.com/v1/actors/ACTOR_ID \
   -H "x-api-key: YOUR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{ "status": "active" }'
@@ -455,7 +455,7 @@ By default, deploying a new version migrates **all** actors from the parent that
 You're adding a compliance review step. You only want actors who went through the income verification step (they have `INCOME_VERIFIED` in their history) to get the new compliance_review state. Older actors that skipped income check should stay on the current version.
 
 ```bash
-curl -X PUT https://statekeep.161-97-163-210.nip.io/v1/definitions \
+curl -X PUT https://your-statekeep-instance.com/v1/definitions \
   -H "x-api-key: YOUR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
@@ -496,7 +496,7 @@ Omitting `historyPath` (or providing an empty array) means all eligible actors m
 When you rename a state across versions, actors currently in the old state name would normally be stranded. `stateMapping` lets you declare the rename so actors are remapped instead.
 
 ```bash
-curl -X PUT https://statekeep.161-97-163-210.nip.io/v1/definitions \
+curl -X PUT https://your-statekeep-instance.com/v1/definitions \
   -H "x-api-key: YOUR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
@@ -529,7 +529,7 @@ Actors in `in_progress` on ticket-v2 will be placed into `assigned` on ticket-v3
 ## 11. The Dashboard
 
 ### Login
-Navigate to `https://statekeep.161-97-163-210.nip.io/dashboard/` and enter your credentials.
+Navigate to `https://your-statekeep-instance.com/dashboard/` and enter your credentials.
 
 ### Pages
 
@@ -556,7 +556,7 @@ Click **API Explorer** in the sidebar (or navigate to `/api-explorer`). This is 
 
 ## 12. API Quick Reference
 
-**Base URL:** `https://statekeep.161-97-163-210.nip.io`  
+**Base URL:** `https://your-statekeep-instance.com`  
 **Auth header:** `x-api-key: YOUR_KEY`  
 **Content-Type:** `application/json` for all POST/PUT requests
 

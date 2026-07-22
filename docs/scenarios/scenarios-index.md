@@ -8,7 +8,7 @@
 
 | Symbol | Meaning |
 |---|---|
-| ✅ | Tested end-to-end on live VPS |
+| ✅ | Tested end-to-end |
 | 📄 | Documentation written |
 | 🔵 | Planned — not yet tested |
 
@@ -122,7 +122,7 @@ Spawns 5,000 actors across a machine family, deploys a new version, and measures
 
 ## Notes
 
-- All tested scenarios were run against the live VPS at `https://statekeep.161-97-163-210.nip.io`
+- All tested scenarios were run against a local self-hosted instance (see deployment guide)
 - Actor simulation scripts: `scripts/spawn-tickets.js`, `scripts/spawn-loans.js`
 - Scenario curl commands: `docs/scenarios/scenario-1-tickets.md`, `docs/scenarios/scenario-2-loans.md`
 - DB is wiped between scenario runs using the inline sqlite3 wipe + `seed-key.mjs` pattern

@@ -9,10 +9,10 @@ This scenario demonstrates **historyPath-targeted migration** — the core APV d
 - Deploy loan-v3 (adds compliance review — even more targeted historyPath)
 - Observe: old actors (without income verification in their history) stay on their version; new actors get the full flow
 
-**Set this once** before running any commands:
+**Set this once** before running any commands (replace with your own values):
 ```bash
-export API_KEY="sk_live_2b6cb4591bcac04c3caed5b2c37b3a6ed94b6c8c"
-export BASE="https://statekeep.161-97-163-210.nip.io"
+export API_KEY="sk_your_api_key"
+export BASE="https://your-statekeep-instance.com"
 ```
 
 ---
