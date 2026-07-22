@@ -92,7 +92,7 @@ Only actors whose history includes the buggy path migrate to the fix. All other 
 
 Every definition is validated against two layers before any database write.
 
-**Hard errors (400, definition not stored):** `EMPTY_STATES`, `INVALID_INITIAL` (initial references nonexistent state), `INVALID_TRANSITION` (transition targets nonexistent state), `COMPOUND_NO_INITIAL` (compound state has children but no `initial`), `XSTATE_ERROR` (XState threw during construction), `UNDEFINED_INITIAL` (XState accepted the definition but the machine started with `value = undefined`, the deferred-throw gap).
+**Hard errors (400, definition not stored):** `EMPTY_STATES`, `INVALID_INITIAL` (initial references nonexistent state), `INVALID_TRANSITION` (transition targets nonexistent state), `COMPOUND_NO_INITIAL` (compound state has children but no `initial`), `COMPILE_ERROR` (the compiler threw during compilation), `UNDEFINED_INITIAL` (the definition compiled but the initial state resolved to undefined).
 
 **Soft warnings (201, definition stored, warnings in response):** `DEAD_END_STATE` (non-final state with no outgoing transitions), `UNREACHABLE_STATE` (no path from initial), `NO_TERMINAL_STATE` (no final states in the machine).
 
@@ -159,10 +159,10 @@ StateKeep writes the following internal event types to an actor's event history.
 ┌────────▼────────────────┐   ┌────────▼──────────────────┐
 │   Worker Pool           │   │   SQLite (WAL mode)        │
 │   N threads (CPU-1)     │   │                           │
-│   XState v5 actors      │   │   actors                  │
-│   createMachine()       │◄──►   definitions             │
-│   actor.send()          │   │   events    (immutable)   │
-│   FNV-1a fingerprinting │   │   deployments             │
+│   Custom interpreter    │   │   actors                  │
+│   SPAWN / HYDRATE       │◄──►   definitions             │
+│   TERMINATE             │   │   events    (immutable)   │
+│   FNV-32 fingerprinting │   │   deployments             │
 │   LRU hot registry      │   │   migration_jobs          │
 └─────────────────────────┘   │   api_keys                │
                               │   metrics_snapshots       │
@@ -170,16 +170,16 @@ StateKeep writes the following internal event types to an actor's event history.
 │   Background Workers    │   └───────────────────────────┘
 │                         │
 │   migrate-worker        │   ┌───────────────────────────┐
-│   poll 500ms            │   │   libapv-engine.so        │
-│   claim up to 100 jobs  │   │   (C, koffi dlopen)       │
-│   HYDRATE actors to     │   │                           │
-│   new definitions       │   │   apv_registry_create/destroy
-│                         │   │   apv_clock_tick          │
-│   gc-worker             │   │   apv_register_changepoint│
-│   poll 60s              │   │   apv_compute_accessible  │
-│   archive idle actors   │   │   apv_actor_started/stopped
-│   vacate prefixes       │◄──►   apv_vacate_prefix       │
-│                         │   │   apv_fnv1a_{init,update,final}
+│   poll 500ms            │   │   APV Engine (WASM)       │
+│   claim up to 500 jobs  │   │   apv-engine.mjs +        │
+│   HYDRATE actors to     │   │   apv-engine.wasm         │
+│   new definitions       │   │   (Emscripten build)      │
+│                         │   │                           │
+│   gc-worker             │   │   apv_registry_create/destroy
+│   poll 60s              │   │   apv_clock_tick          │
+│   archive idle actors   │   │   apv_register_changepoint│
+│   vacate prefixes       │◄──►   apv_compute_accessible  │
+│                         │   │   apv_actor_started/stopped
 │   snapshot-worker       │   └───────────────────────────┘
 │   periodic DB snapshots │
 │                         │
@@ -190,9 +190,9 @@ StateKeep writes the following internal event types to an actor's event history.
 
 **SQLite as the backbone.** The entire operational state lives in one WAL-mode SQLite file. This is a deliberate architectural choice: ACID guarantees with no distributed system, zero external dependencies, directly queryable with SQL, backed up with `cp`, inspectable with any SQLite client. WAL mode allows multiple concurrent readers while a single writer holds the lock, which is sufficient for the access pattern of this system.
 
-**Worker pool.** Actor execution runs in worker threads to avoid blocking the event loop. Each thread manages up to `ACTORS_PER_WORKER` XState actor instances. The LRU hot registry keeps recently-accessed actors in the pool. Cold actors (not recently accessed) are evicted from memory and their state is spilled to SQLite synchronously; they are rehydrated into a thread on next event arrival.
+**Worker pool.** Actor execution runs in worker threads to avoid blocking the event loop. Each thread manages up to `ACTORS_PER_WORKER` actors using StateKeep's custom interpreter. The LRU hot registry keeps recently-accessed actors in the pool. Cold actors (not recently accessed) are evicted from memory and their state is spilled to SQLite synchronously; they are rehydrated into a thread on next event arrival.
 
-**Priority queue.** Each worker slot holds a three-tier queue: `high` (dashboard requests, `X-Priority: high`), `normal` (default API calls), and `low` (background migrate-worker jobs). The scheduler serves 3 high → 2 normal → 1 low per round. Within each tier, requests are served in per-org round-robin so a single org's burst cannot starve other orgs at the same priority level. Queue stats are exposed at `GET /v1/health/queues`.
+**Priority queue.** Each worker slot holds a four-tier queue: `urgent` (dashboard manual actions — get state, send event, terminate), `high` (dashboard background polling, `X-Priority: high`), `normal` (default API calls), and `low` (background migrate-worker jobs). In burst mode, urgent requests get exclusive access for the first 5 s of continuous load, then fall to one urgent slot per round interleaved with a 3H:2N:1L cycle. Within each tier, per-org round-robin prevents one org's burst from starving others. Queue stats are exposed at `GET /v1/health/queues`.
 
 **Event coalescing.** When a worker slot finishes a job, it looks ahead in the same-org, same-tier queue for consecutive EVENT messages targeting the same actor. Up to 8 are batched into a single `BATCH_EVENTS` dispatch. This reduces inter-thread IPC and lets fingerprint chaining happen in-worker across the batch in a single pass.
 
@@ -204,7 +204,7 @@ StateKeep writes the following internal event types to an actor's event history.
 
 ## The APV Engine Contract
 
-StateKeep treats `libapv-engine.so` as an oracle. It does not attempt to understand how the engine makes routing decisions internally. The contract is defined by the six function groups in `apv-engine.h`.
+StateKeep treats the APV WASM engine as an oracle. It does not attempt to understand how the engine makes routing decisions internally. The contract is defined by the six function groups exported from `apv-engine.mjs`.
 
 `apv_clock_tick` returns a global monotonic counter. Every definition deployment and every actor spawn is stamped with a tick value. This is the APV logical time — independent of wall clock time.
 
@@ -216,7 +216,7 @@ StateKeep treats `libapv-engine.so` as an oracle. It does not attempt to underst
 
 `apv_vacate_prefix(reg, t_star, prefix_hash)` explicitly declares that no future actor will carry a particular prefix at a particular time, allowing the engine to prune that subtree of its changepoint graph.
 
-If `libapv-engine.so` is absent or fails to load, StateKeep replaces it with a JS fallback where `computeAccessible` always returns `null` (stay) and all other functions are no-ops or identity. The rest of the system is completely unaffected.
+If `apv-engine.mjs` is absent or fails to load, StateKeep replaces it with a JS fallback where `computeAccessible` always returns `null` (stay) and all other functions are no-ops or identity. The rest of the system is completely unaffected.
 
 ---
 
@@ -245,9 +245,6 @@ For a platform builder whose customers are the ones defining workflows — loan 
 ```bash
 # Install dependencies
 npm install
-
-# Build the development mock engine
-make -C mock
 
 # Configure environment
 cp .env.example .env
@@ -343,7 +340,7 @@ curl -X PUT http://localhost:3001/v1/definitions \
 |---|---|---|---|
 | `STATEKEEP_DB_PATH` | Yes | — | SQLite database file path |
 | `STATEKEEP_ENCRYPTION_KEY` | Yes | — | 64-char hex (32 bytes) for AES-256-GCM context encryption |
-| `STATEKEEP_ENGINE_PATH` | No | — | Path to `libapv-engine.so`. Absent = fallback mode (no migration) |
+| `STATEKEEP_ENGINE_PATH` | No | — | Path override for the APV WASM engine module (`apv-engine.mjs`). Ships pre-built in `src/ffi/`; absent or file missing = fallback mode (no migration) |
 | `PORT` | No | `3001` | Fastify API server port |
 | `LOG_DIR` | No | `./logs` | Directory for daily rotating log files |
 | `LOG_LEVEL` | No | `info` | Pino log level (`trace`, `debug`, `info`, `warn`, `error`) |
@@ -426,8 +423,8 @@ npm run test:statechart
 # Full suite (all levels)
 npm run test:all
 
-# With real APV engine
-STATEKEEP_ENGINE_PATH=/path/to/libapv-engine.so npm run test:all
+# With real APV engine (WASM binary must be present at src/ffi/apv-engine.mjs)
+npm run test:all
 
 # Load tests (resource intensive)
 STRESS=1 npm run test:stress
