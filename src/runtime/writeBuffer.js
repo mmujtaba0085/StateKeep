@@ -21,7 +21,7 @@ const FLUSH_MS   = parseInt(process.env.STATEKEEP_WRITE_BUFFER_MS ?? '50', 10);
 const HIGH_WATER = 200;
 
 class WriteBuffer {
-  constructor() {
+  constructor(_dbOverride = null) {
     this._states            = new Map();
     this._events            = [];
     this._decisions         = [];
@@ -29,10 +29,13 @@ class WriteBuffer {
     this._scheduledCreates  = [];
     this._pending           = new Set();
     this._stmts             = null;
+    this._dbOverride        = _dbOverride;
     this._flushing          = false;
     this._flushChain        = Promise.resolve();   // Postgres: serialise concurrent flush cycles
     this._timer             = setInterval(() => { this.flush().catch(() => {}); }, FLUSH_MS).unref();
   }
+
+  _getDb() { return this._dbOverride ?? getDb(); }
 
   queueState(actorId, data) {
     const row      = this._serialize(actorId, data);
@@ -43,13 +46,13 @@ class WriteBuffer {
       row.context_json = existing.context_json;
     }
     this._states.set(actorId, row);
-    if (this._states.size + this._events.length >= HIGH_WATER) this.flush();
+    if (this._states.size + this._events.length >= HIGH_WATER) this.flush().catch(() => {});
   }
 
   queueEvent(row) {
     this._events.push(row);
     if (row.idempotency_key) this._pending.add(`${row.actor_id}:${row.idempotency_key}`);
-    if (this._states.size + this._events.length >= HIGH_WATER) this.flush();
+    if (this._states.size + this._events.length >= HIGH_WATER) this.flush().catch(() => {});
   }
 
   queueDecision(args) {
@@ -104,10 +107,11 @@ class WriteBuffer {
     try {
       const stmts = this._getStmts();
       (row.context_json === undefined ? stmts.stateNoCtx : stmts.state).run(row);
+      return Promise.resolve();
     } catch (err) {
       console.error(`[writeBuffer] flushActor(${actorId}) error:`, err.message);
+      return Promise.reject(err);
     }
-    return Promise.resolve();
   }
 
   flush() {
@@ -142,7 +146,7 @@ class WriteBuffer {
     try {
       const { state: stateStmt, stateNoCtx: stateNoCtxStmt, event: eventStmt, decision: decisionStmt,
               schedCancel: cancelStmt, schedInsert: insertSched } = this._getStmts();
-      getDb().transaction(() => {
+      this._getDb().transaction(() => {
         for (const row of rows) {
           if (row.context_json === undefined) {
             stateNoCtxStmt.run(row);
@@ -166,8 +170,8 @@ class WriteBuffer {
       })();
     } catch (err) {
       console.error('[writeBuffer] flush error:', err.message);
+      return Promise.reject(err);
     }
-    return Promise.resolve();
   }
 
   _flushPostgres(rows, events, decisions, scheduledCancels = [], scheduledCreates = []) {
@@ -246,7 +250,7 @@ class WriteBuffer {
 
   _getStmts() {
     if (this._stmts) return this._stmts;
-    const db = getDb();
+    const db = this._getDb();
     this._stmts = {
       state: db.prepare(`
         UPDATE actors
@@ -310,6 +314,8 @@ class WriteBuffer {
     };
   }
 }
+
+export { WriteBuffer };
 
 let _buf = null;
 export function getWriteBuffer() {
