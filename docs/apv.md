@@ -222,7 +222,7 @@ This starts from `FNV_OFFSET` and chains `fnv1aUpdate` for each event type — i
 
 The core routing logic runs in a WebAssembly module compiled from C via Emscripten. At startup, `src/ffi/engine.js` imports `src/ffi/apv-engine.mjs` (the Emscripten-generated loader with the WASM binary inlined), which initialises the WebAssembly instance and exposes the APV C functions as JavaScript-callable methods. The JavaScript layer wraps these into a unified object.
 
-**Build:** `make wasm -C src/ffi` (requires [Emscripten](https://emscripten.org)). The compiled `apv-engine.mjs` is included in the repository; rebuilding is only needed if modifying the C source in `src/ffi/`.
+The pre-built WASM engine (`src/ffi/apv-engine.mjs`) is included in the repository — no build step is required. Rebuilding the engine requires proprietary C source not included in the open-source release.
 
 ### The 13 Exported Symbols
 
@@ -242,9 +242,9 @@ The core routing logic runs in a WebAssembly module compiled from C via Emscript
 | `apv_register_changepoint_parallel` | Register a parallel (multi-region) change-point |
 | `apv_compute_accessible_parallel` | Route an actor by its per-region fingerprint array |
 
-### Fallback Mode
+### Engine Requirement
 
-If `apv-engine.mjs` is missing or fails to load, the server fails to start and logs a build instruction. The APV engine is required for the server to run. Rebuild it with `make wasm -C src/ffi` if the file is absent. The health endpoint reports `"engine": "real"` when the WASM engine is loaded successfully.
+`apv-engine.mjs` is required — if it is missing, the server fails to start. There is no fallback mode. The health endpoint reports `"engine": "wasm"` when the WASM engine is loaded successfully.
 
 ### Registering a Change-Point
 

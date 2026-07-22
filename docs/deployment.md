@@ -11,7 +11,7 @@ Production deployment checklist, Caddy/Nginx TLS termination config, and systemd
 - Nginx 1.18+ for TLS termination
 - A valid TLS certificate (Let's Encrypt via Certbot recommended)
 
-> **APV engine:** The WASM-compiled APV engine (`src/ffi/apv-engine.mjs`) is included in the repository. No separate binary installation is needed. If you modify the C source under `src/ffi/`, rebuild with `make wasm -C src/ffi` (requires [Emscripten](https://emscripten.org)).
+> **APV engine:** The pre-built WASM engine (`src/ffi/apv-engine.mjs`) is included in the repository — no build step is required. Rebuilding the engine requires proprietary C source not included in the open-source release.
 
 ---
 
@@ -366,10 +366,10 @@ certbot --nginx -d statekeep.yourcompany.com
 
 ```bash
 curl https://statekeep.yourcompany.com/v1/health
-# Expected: {"status":"ok","engine":"real","db":"ok",...}
+# Expected: {"status":"ok","engine":"wasm","db":"ok",...}
 ```
 
-`"engine":"real"` confirms the APV WASM engine is loaded and operational. `"engine":"fallback"` means migrations are disabled — check that `src/ffi/apv-engine.mjs` is present and `node --version` is 20+.
+`"engine":"wasm"` confirms the APV WASM engine is loaded and operational. If `apv-engine.mjs` is missing, the server fails to start — there is no fallback mode.
 
 ---
 
@@ -531,7 +531,7 @@ curl -X DELETE https://statekeep.yourcompany.com/v1/health/workers/<workerId> \
 ### Health verification checklist (after any deploy)
 
 ```bash
-curl -s .../v1/health          | jq '.status,.engine'     # "ok","real"
+curl -s .../v1/health          | jq '.status,.engine'     # "ok","wasm"
 curl -s .../v1/health/workers  | jq '.healthy'            # true
 pm2 status                                                 # all "online"
 ls -lh /opt/statekeep/data/statekeep.db                   # DB accessible

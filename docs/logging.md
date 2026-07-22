@@ -60,7 +60,7 @@ In development (`NODE_ENV=development` or unset), logs go to stdout as pretty-pr
 | `actorId`      | string  | Set on actor-specific log lines                      |
 | `definitionId` | string  | Set on definition deployment log lines               |
 | `orgId`        | string  | Organisation context for all authenticated requests  |
-| `engine`       | string  | `real` or `fallback` — APV engine state              |
+| `engine`       | string  | `wasm` — APV WASM engine loaded and operational      |
 | `migrated`     | number  | Count of actors migrated in a deployment batch       |
 | `failed`       | number  | Count of failed migration jobs                       |
 | `workerIndex`  | number  | Actor worker thread index                            |

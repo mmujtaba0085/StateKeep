@@ -1,6 +1,6 @@
 # StateKeep API Reference
 
-**Base URL:** `https://statekeep.161-97-163-210.nip.io`  
+**Base URL:** `https://your-statekeep-instance.com`  
 **Auth header:** `x-api-key: sk_<keyId>_<secret>`  
 **Content-Type:** `application/json` for all POST/PUT/PATCH requests
 
