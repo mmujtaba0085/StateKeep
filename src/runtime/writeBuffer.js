@@ -29,7 +29,8 @@ class WriteBuffer {
     this._scheduledCreates  = [];
     this._pending           = new Set();
     this._stmts             = null;
-    this._flushing          = false;   // Postgres-mode concurrent-flush guard
+    this._flushing          = false;
+    this._flushChain        = Promise.resolve();   // Postgres: serialise concurrent flush cycles
     this._timer             = setInterval(() => { this.flush().catch(() => {}); }, FLUSH_MS).unref();
   }
 
@@ -78,29 +79,27 @@ class WriteBuffer {
 
   flushActor(actorId) {
     const row = this._states.get(actorId);
-    if (!row) return;
+    if (!row) return Promise.resolve();
     this._states.delete(actorId);
     if (isPostgres) {
-      // Fire-and-forget; caller (terminateActor) awaits the subsequent updateActorStatus.
-      import('./db-postgres.js').then(({ query }) => {
-        const skipCtx = row.context_json === undefined;
-        const sql = skipCtx
-          ? `UPDATE actors SET state_value=$1, history_fingerprint=$2,
-              region_fingerprints=$3, last_event_tick=$4, status=$5, updated_at=$6,
-              state_entry_id=$7 WHERE id=$8`
-          : `UPDATE actors SET state_value=$1, context_json=$2, history_fingerprint=$3,
-              region_fingerprints=$4, last_event_tick=$5, status=$6, updated_at=$7,
-              state_entry_id=$8 WHERE id=$9`;
-        const args = skipCtx
-          ? [row.state_value, row.history_fingerprint,
-             row.region_fingerprints, row.last_event_tick, row.status, row.updated_at,
-             row.state_entry_id, row.id]
-          : [row.state_value, row.context_json, row.history_fingerprint,
-             row.region_fingerprints, row.last_event_tick, row.status, row.updated_at,
-             row.state_entry_id, row.id];
-        query(sql, args).catch(e => console.error(`[writeBuffer] flushActor PG ${actorId}:`, e.message));
-      });
-      return;
+      const skipCtx = row.context_json === undefined;
+      const sql = skipCtx
+        ? `UPDATE actors SET state_value=$1, history_fingerprint=$2,
+            region_fingerprints=$3, last_event_tick=$4, status=$5, updated_at=$6,
+            state_entry_id=$7 WHERE id=$8`
+        : `UPDATE actors SET state_value=$1, context_json=$2, history_fingerprint=$3,
+            region_fingerprints=$4, last_event_tick=$5, status=$6, updated_at=$7,
+            state_entry_id=$8 WHERE id=$9`;
+      const args = skipCtx
+        ? [row.state_value, row.history_fingerprint,
+           row.region_fingerprints, row.last_event_tick, row.status, row.updated_at,
+           row.state_entry_id, row.id]
+        : [row.state_value, row.context_json, row.history_fingerprint,
+           row.region_fingerprints, row.last_event_tick, row.status, row.updated_at,
+           row.state_entry_id, row.id];
+      return import('../registry/db-postgres.js').then(({ query }) =>
+        query(sql, args).catch(e => console.error(`[writeBuffer] flushActor PG ${actorId}:`, e.message))
+      );
     }
     try {
       const stmts = this._getStmts();
@@ -108,6 +107,7 @@ class WriteBuffer {
     } catch (err) {
       console.error(`[writeBuffer] flushActor(${actorId}) error:`, err.message);
     }
+    return Promise.resolve();
   }
 
   flush() {
@@ -170,9 +170,14 @@ class WriteBuffer {
     return Promise.resolve();
   }
 
-  async _flushPostgres(rows, events, decisions, scheduledCancels = [], scheduledCreates = []) {
-    if (this._flushing) return;
-    this._flushing = true;
+  _flushPostgres(rows, events, decisions, scheduledCancels = [], scheduledCreates = []) {
+    this._flushChain = this._flushChain.then(() =>
+      this._doFlushPostgres(rows, events, decisions, scheduledCancels, scheduledCreates)
+    );
+    return this._flushChain;
+  }
+
+  async _doFlushPostgres(rows, events, decisions, scheduledCancels = [], scheduledCreates = []) {
     try {
       const { transaction } = await import('../registry/db-postgres.js');
       await transaction(async (client) => {
@@ -236,8 +241,6 @@ class WriteBuffer {
       });
     } catch (err) {
       console.error('[writeBuffer] Postgres flush error:', err.message);
-    } finally {
-      this._flushing = false;
     }
   }
 

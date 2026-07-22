@@ -18,7 +18,7 @@ const _warnedParallel = new Set();
 // ── State key helpers ─────────────────────────────────────────────────────────
 
 /** Extract the canonical string key from a stateValue (flat or compound). */
-function stateKeyOf(stateValue) {
+export function stateKeyOf(stateValue) {
   if (typeof stateValue === 'string') return stateValue;
   if (stateValue && typeof stateValue === 'object') {
     // Compound: { flow: 'step1' } → 'flow.step1'
@@ -35,7 +35,7 @@ function stateKeyOf(stateValue) {
 }
 
 /** Build stateValue object from a dot-separated key. 'flow.step1' → { flow: 'step1' } */
-function keyToStateValue(key) {
+export function keyToStateValue(key) {
   const parts = key.split('.');
   if (parts.length === 1) return key;
   // Build nested object: ['flow', 'step1'] → { flow: 'step1' }

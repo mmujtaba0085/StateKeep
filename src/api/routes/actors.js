@@ -19,12 +19,24 @@ import { getDb, isPostgres, encrypt, decrypt } from '../../registry/db.js';
 import { getEngine } from '../../ffi/engine.js';
 import { notifyStateChange } from '../websocket.js';
 
-const latencies = [];
+const LATENCY_SIZE = 10000;
+const _latencyBuf  = new Int32Array(LATENCY_SIZE);
+let   _latencyPtr  = 0;
+let   _latencyFill = 0;
+
 function recordLatency(ms) {
-  latencies.push(ms);
-  if (latencies.length > 10000) latencies.shift();
+  _latencyBuf[_latencyPtr] = ms;
+  _latencyPtr = (_latencyPtr + 1) % LATENCY_SIZE;
+  if (_latencyFill < LATENCY_SIZE) _latencyFill++;
 }
-export function getLatencies() { return latencies; }
+
+export function getLatencies() {
+  if (_latencyFill < LATENCY_SIZE) return Array.from(_latencyBuf.subarray(0, _latencyFill));
+  return [
+    ...Array.from(_latencyBuf.subarray(_latencyPtr)),
+    ...Array.from(_latencyBuf.subarray(0, _latencyPtr)),
+  ];
+}
 
 export async function actorRoutes(fastify) {
 
