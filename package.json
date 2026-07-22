@@ -71,12 +71,12 @@
     "package.json": "^2.0.1",
     "pino": "^9.1.0",
     "pino-roll": "^1.0.0",
-    "uuid": "^10.0.0",
-    "xstate": "^5.14.0"
+    "uuid": "^10.0.0"
   },
   "devDependencies": {
     "@playwright/test": "^1.44.0",
     "c8": "^10.1.2",
-    "node-addon-api": "^8.3.0"
+    "node-addon-api": "^8.3.0",
+    "xstate": "^5.14.0"
   }
 }
