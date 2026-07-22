@@ -422,6 +422,19 @@ export function processEvent(entry, compiledJson, event, registry, pendingSends 
       && !Array.isArray(_regionMap) && Object.keys(_regionMap).length >= 2)
       || compiledJson.parallelStates?.includes(_topKey);
     if (isParallel) {
+      // Check for a direct root-level transition first (e.g., parallel root has
+      // on: { COMPLETE: 'done' } — exits the entire parallel block).
+      // The per-region dispatch would find this via bubble-up but then
+      // incorrectly interpret the target as a sub-region leaf state.
+      const rootTx = transitions?.[`${_topKey}:${event.type}`];
+      if (rootTx?.length > 0) {
+        // Delegate to the flat path using the parallel root key as "current state"
+        // so exit/entry action lookups and transition selection are correct.
+        return processEvent(
+          { ...entry, stateValue: _topKey },
+          compiledJson, event, registry, pendingSends
+        );
+      }
       const ctx = entry.context;
       const tier2 = [], durable = [], schedOps = [];
       return _processParallelEvent(

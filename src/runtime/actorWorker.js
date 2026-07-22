@@ -1,36 +1,38 @@
 /**
  * src/runtime/actorWorker.js
  *
- * Worker thread entry point. Each instance manages up to ACTORS_PER_WORKER
- * XState v5 actor instances in memory.
+ * Worker thread entry point. Manages actor state snapshots for SPAWN, HYDRATE,
+ * and TERMINATE operations. Events are processed on the main thread via interpreter.js.
  *
  * Message protocol:
  *   Inbound  { id, type, ...payload }
  *   Outbound { id, ok, result?, error? }
  *
  * Supported message types:
- *   SPAWN      { actorId, definitionJson, stateSnapshot? }
- *   EVENT      { actorId, event, currentSnapshot, historyFingerprint }
- *   SNAPSHOT   { actorId }
- *   HYDRATE    { actorId, targetDefinitionJson, oldContext }
- *   TERMINATE  { actorId }
- *   PING       {}
+ *   SPAWN        { actorId, definitionId, definitionJson, stateSnapshot?, initialContext? }
+ *   EVENT        { actorId, event, historyFingerprint, regionFingerprints }
+ *   SNAPSHOT     { actorId }
+ *   HYDRATE      { actorId, targetDefinitionId, targetDefinitionJson, oldContext, ... }
+ *   TERMINATE    { actorId }
+ *   PING         {}
+ *   PRECOMPILE   { definitionId, definitionJson }
+ *   BATCH_EVENTS { actorId, events }
  */
 
-import { workerData, parentPort } from 'worker_threads';
-import { createMachine, createActor } from 'xstate';
+import { parentPort }             from 'worker_threads';
+import {
+  processEvent,
+  computeInitialSnapshot,
+  restoreSnapshot,
+  compileMachine,
+}                                 from './machineRuntime.js';
 import {
   initializeRegionFingerprints,
   updateRegionFingerprintsForTransition,
-} from './statePaths.js';
-import { updateFingerprint } from '../ffi/fingerprintChain.js';
+}                                 from './statePaths.js';
 
 // ── Context transform helpers ─────────────────────────────────────────────────
 
-/**
- * Get a nested value from an object using dot-notation path.
- * Returns undefined if any segment of the path is missing. Never throws.
- */
 export function getNestedValue(obj, path) {
   if (!obj || typeof obj !== 'object' || !path) return undefined;
   return String(path).split('.').reduce(
@@ -39,10 +41,6 @@ export function getNestedValue(obj, path) {
   );
 }
 
-/**
- * Set a nested value in an object using dot-notation path.
- * Creates intermediate objects as needed. Mutates and returns the object. Never throws.
- */
 export function setNestedValue(obj, path, value) {
   if (!obj || typeof obj !== 'object' || !path) return obj;
   const keys = String(path).split('.');
@@ -56,26 +54,13 @@ export function setNestedValue(obj, path, value) {
   return obj;
 }
 
-/**
- * Apply a declarative field mapping to an actor context.
- *
- * transform = { "newPath": "oldPath" }  (dot-notation)
- *
- * Rules:
- * - New fields are SET from old values (additive, not destructive)
- * - Old fields are PRESERVED — migrated actors have both old and new shapes
- * - Missing old paths are silently skipped (no undefined set)
- * - Returns a deep copy when transform is non-empty; original reference when empty
- * - Throws if input context is not a non-null object
- */
 export function applyContextTransform(context, transform) {
   if (!transform || typeof transform !== 'object' || Object.keys(transform).length === 0) {
-    return context;  // no-op — return original reference
+    return context;
   }
   if (context == null || typeof context !== 'object') {
     throw new Error('applyContextTransform: context must be a non-null object');
   }
-  // Deep clone via JSON round-trip (context is always JSON-serialisable — stored in SQLite)
   const result = JSON.parse(JSON.stringify(context));
   for (const [newPath, oldPath] of Object.entries(transform)) {
     if (typeof newPath !== 'string' || typeof oldPath !== 'string') continue;
@@ -87,50 +72,23 @@ export function applyContextTransform(context, transform) {
 
 // ── Actor store ───────────────────────────────────────────────────────────────
 
-/** Map<actorId, { actor, machine, definitionId }> */
+/**
+ * Map<actorId, { stateValue, context, historyFingerprint, stateEntryId,
+ *                regionFingerprints, definitionId, done }>
+ */
 const actors = new Map();
 
-// ── Guard / action stub helpers ───────────────────────────────────────────────
+// ── Compiled machine cache ────────────────────────────────────────────────────
 
-/**
- * Recursively collect all guard names referenced in a machine definition JSON.
- * Guards without implementations throw in XState v5 — providing stubs that
- * return false lets the fallback (non-guarded) branch fire instead.
- */
-function extractGuardNames(obj, guards = new Set()) {
-  if (!obj || typeof obj !== 'object') return guards;
-  if (Array.isArray(obj)) {
-    for (const item of obj) extractGuardNames(item, guards);
-  } else {
-    if (typeof obj.guard === 'string') guards.add(obj.guard);
-    else if (obj.guard && typeof obj.guard === 'object' && typeof obj.guard.type === 'string') {
-      guards.add(obj.guard.type);
-    }
-    for (const val of Object.values(obj)) {
-      if (val && typeof val === 'object') extractGuardNames(val, guards);
-    }
-  }
-  return guards;
-}
-
-function buildDefaultGuards(definitionJson) {
-  const names = extractGuardNames(definitionJson);
-  const guards = {};
-  for (const name of names) guards[name] = () => false;
-  return guards;
-}
-
-// Compiled machine cache — keyed by definition ID (string).
-// XState machines are immutable once created, so per-worker caching is safe.
-const MACHINE_CACHE_MAX = 512;
-const _machineCache = new Map();
-const _definitionJsonCache = new Map();
-const _definitionRefCounts = new Map();
+const MACHINE_CACHE_MAX     = 512;
+const _compiledCache        = new Map();   // definitionId → compiledJson
+const _definitionJsonCache  = new Map();   // definitionId → definitionJson
+const _definitionRefCounts  = new Map();
 
 function evictOldestCacheEntry() {
-  for (const definitionId of _machineCache.keys()) {
+  for (const definitionId of _compiledCache.keys()) {
     if ((_definitionRefCounts.get(definitionId) ?? 0) > 0) continue;
-    _machineCache.delete(definitionId);
+    _compiledCache.delete(definitionId);
     _definitionJsonCache.delete(definitionId);
     return true;
   }
@@ -138,7 +96,7 @@ function evictOldestCacheEntry() {
 }
 
 function trimMachineCache() {
-  while (_machineCache.size >= MACHINE_CACHE_MAX) {
+  while (_compiledCache.size >= MACHINE_CACHE_MAX) {
     if (!evictOldestCacheEntry()) return;
   }
 }
@@ -172,90 +130,123 @@ function removeActorEntry(actorId) {
   return previous;
 }
 
-function getOrCacheMachine(cacheKey, definitionJson) {
-  if (cacheKey && _machineCache.has(cacheKey)) return _machineCache.get(cacheKey);
-  const machine = createMachine(definitionJson).provide({ guards: buildDefaultGuards(definitionJson) });
+function getOrCompileDefinition(cacheKey, definitionJson) {
+  if (cacheKey && _compiledCache.has(cacheKey)) {
+    return {
+      compiledJson:  _compiledCache.get(cacheKey),
+      definitionJson: _definitionJsonCache.get(cacheKey) ?? definitionJson,
+    };
+  }
+  const compiledJson = compileMachine(definitionJson);
   if (cacheKey) {
     trimMachineCache();
-    _machineCache.set(cacheKey, machine);
+    _compiledCache.set(cacheKey, compiledJson);
     _definitionJsonCache.set(cacheKey, definitionJson);
   }
-  return machine;
+  return { compiledJson, definitionJson };
+}
+
+const emptyRegistry = { guards: {}, actions: {}, services: {} };
+
+// ── Serialization ─────────────────────────────────────────────────────────────
+
+function serializeEntry(entry, actorId) {
+  return {
+    actorId,
+    stateValue:         entry.stateValue,
+    context:            entry.context,
+    historyFingerprint: entry.historyFingerprint,
+    regionFingerprints: entry.regionFingerprints ?? null,
+    status:             entry.done ? 'done' : 'active',
+    done:               entry.done ?? false,
+  };
 }
 
 // ── Handlers ──────────────────────────────────────────────────────────────────
 
 function handleSpawn({ actorId, definitionId, definitionJson, stateSnapshot, initialContext, existingRegionFingerprints }) {
-  if (actors.has(actorId)) return getSnapshot(actorId);
+  if (actors.has(actorId)) return serializeEntry(actors.get(actorId), actorId);
 
-  const machine = getOrCacheMachine(definitionId, definitionJson);
-  let actor;
+  const { compiledJson, definitionJson: defJson } = getOrCompileDefinition(definitionId, definitionJson);
+
+  let stateValue, context, historyFingerprint, stateEntryId, done;
 
   if (stateSnapshot) {
-    // Hydrate from persisted snapshot
-    try {
-      const resolvedSnapshot = machine.resolveState(stateSnapshot);
-      actor = createActor(machine, { snapshot: resolvedSnapshot });
-    } catch {
-      actor = createActor(machine);
-    }
-  } else if (initialContext && Object.keys(initialContext).length > 0) {
-    // New actor with initial context — seed via resolved snapshot so XState holds it
-    try {
-      const initialValue = typeof definitionJson.initial === 'string'
-        ? definitionJson.initial
-        : (definitionJson.initial?.target ?? Object.keys(definitionJson.states ?? {})[0]);
-      const snap = machine.resolveState({ value: initialValue, context: initialContext });
-      actor = createActor(machine, { snapshot: snap });
-    } catch {
-      actor = createActor(machine);
-    }
+    // Re-loading evicted actor from persisted snapshot — no entry actions
+    const r = restoreSnapshot(compiledJson, stateSnapshot.value, stateSnapshot.context);
+    if (r.error) return { error: r.error };
+    stateValue         = r.stateValue;
+    context            = r.context;
+    historyFingerprint = '0';
+    stateEntryId       = 0;
+    done               = false;
   } else {
-    actor = createActor(machine);
+    // Fresh spawn — runs entry actions and chases transient chains
+    const r = computeInitialSnapshot(compiledJson, defJson, initialContext ?? {}, emptyRegistry);
+    if (r.error) return { error: r.error };
+    stateValue         = r.stateValue;
+    context            = r.context;
+    historyFingerprint = r.historyFingerprint;
+    stateEntryId       = r.stateEntryId ?? 0;
+    done               = r.done;
   }
 
-  actor.start();
-  setActorEntry(actorId, { actor, machine, definitionId });
+  const regionFingerprints = initializeRegionFingerprints(defJson, stateValue, existingRegionFingerprints ?? null);
+  setActorEntry(actorId, { stateValue, context, historyFingerprint, stateEntryId, regionFingerprints, definitionId, done });
 
-  const snapshot = actor.getSnapshot();
-  return {
-    ...serializeSnapshot(snapshot, actorId),
-    regionFingerprints: initializeRegionFingerprints(
-      definitionJson,
-      snapshot.value,
-      existingRegionFingerprints ?? null
-    ),
-  };
+  return { actorId, stateValue, context, historyFingerprint, regionFingerprints, status: done ? 'done' : 'active', done };
 }
 
 function handleEvent({ actorId, event, historyFingerprint, regionFingerprints }) {
   const entry = actors.get(actorId);
   if (!entry) throw new Error(`Actor ${actorId} not in worker`);
 
-  const { actor, definitionId } = entry;
-  const definitionJson = _definitionJsonCache.get(definitionId);
-  if (!definitionJson) throw new Error(`Definition ${definitionId} not in worker cache`);
+  const { definitionId } = entry;
+  const compiledJson = _compiledCache.get(definitionId);
+  if (!compiledJson) throw new Error(`Definition ${definitionId} not compiled in worker cache`);
+  const defJson = _definitionJsonCache.get(definitionId);
 
-  // Capture pre-event state for per-region diff (parallel machines only)
-  const preSV = actor.getSnapshot().value;
-
-  actor.send(event);
-
-  const snapshot       = actor.getSnapshot();
-  const newFingerprint = updateFingerprint(historyFingerprint, event.type);
-
-  const newRegionFingerprints = updateRegionFingerprintsForTransition(
-    definitionJson,
-    preSV,
-    snapshot.value,
-    event.type,
-    regionFingerprints ?? null
+  const preSV = entry.stateValue;
+  const result = processEvent(
+    {
+      stateValue:         entry.stateValue,
+      context:            entry.context,
+      historyFingerprint: historyFingerprint ?? entry.historyFingerprint,
+      stateEntryId:       entry.stateEntryId,
+      regionFingerprints: regionFingerprints ?? entry.regionFingerprints,
+    },
+    compiledJson,
+    event,
+    emptyRegistry,
+    [],
   );
 
-  return {
-    ...serializeSnapshot(snapshot, actorId),
-    historyFingerprint: newFingerprint,
+  const newRegionFingerprints = updateRegionFingerprintsForTransition(
+    defJson,
+    preSV,
+    result.stateValue,
+    event.type,
+    regionFingerprints ?? entry.regionFingerprints ?? null,
+  );
+
+  setActorEntry(actorId, {
+    ...entry,
+    stateValue:         result.stateValue,
+    context:            result.context,
+    historyFingerprint: result.historyFingerprint,
+    stateEntryId:       result.stateEntryId,
     regionFingerprints: newRegionFingerprints,
+    done:               result.done,
+  });
+
+  return {
+    actorId,
+    stateValue:         result.stateValue,
+    context:            result.context,
+    historyFingerprint: result.historyFingerprint,
+    regionFingerprints: newRegionFingerprints,
+    status:             result.done ? 'done' : 'active',
+    done:               result.done,
   };
 }
 
@@ -264,8 +255,7 @@ function handleEvent({ actorId, event, historyFingerprint, regionFingerprints })
  *
  * For flat machines: returns the landing state name (string).
  * For compound/parallel machines: returns the full compound state value object
- *   when the top-level key exists in newMachineStates, so XState can restore
- *   the full sub-state via resolveState({ value: landingState }).
+ *   when the top-level key exists in newMachineStates.
  *
  * stateMapping keys are always top-level state names (strings).
  * Returns null if no mapping is possible (actor needs_rescue).
@@ -280,17 +270,13 @@ export function resolveLandingState(currentStateValue, newMachineStates, stateMa
     return null;
   }
 
-  // Compound or parallel state value object
   if (currentStateValue && typeof currentStateValue === 'object') {
     const topLevel = Object.keys(currentStateValue)[0];
     if (!topLevel) return null;
     const mappedKey = stateMapping[topLevel];
     if (mappedKey) {
-      // Explicit override: land at mapped state (flat string)
       return newMachineStates[mappedKey] ? mappedKey : null;
     }
-    // Top-level key exists in new machine: return full compound value so
-    // XState restores the complete sub-state hierarchy via resolveState
     if (newMachineStates[topLevel]) return currentStateValue;
     return null;
   }
@@ -309,17 +295,11 @@ function handleHydrate({
   existingRegionFingerprints,
   contextTransform,
 }) {
-  // Stop existing actor if present
-  const existing = actors.get(actorId);
-  if (existing) {
-    try { existing.actor.stop(); } catch {}
-    removeActorEntry(actorId);
-  }
+  removeActorEntry(actorId);
 
-  const machine   = getOrCacheMachine(targetDefinitionId, targetDefinitionJson);
+  const { compiledJson, definitionJson } = getOrCompileDefinition(targetDefinitionId, targetDefinitionJson);
   const newStates = targetDefinitionJson.states ?? {};
 
-  // Apply context transform — errors here must abort migration (INVARIANT 3)
   let transformedContext;
   try {
     transformedContext = applyContextTransform(oldContext ?? {}, contextTransform);
@@ -327,104 +307,62 @@ function handleHydrate({
     return { error: 'CONTEXT_TRANSFORM_FAILED', message: err.message };
   }
 
-  // Resolve landing state when we have the actor's current position
+  let landingStateValue;
   if (currentStateValue != null) {
     const landingState = resolveLandingState(currentStateValue, newStates, stateMapping ?? {});
-    if (!landingState) {
-      return { error: 'STATE_NOT_MAPPABLE', currentStateValue };
-    }
-
-    let actor;
-    try {
-      const baseSnapshot = machine.resolveState({
-        value:   landingState,
-        context: transformedContext,
-        status:  'active',
-      });
-      actor = createActor(machine, { snapshot: baseSnapshot });
-    } catch {
-      actor = createActor(machine, { input: transformedContext });
-    }
-
-    actor.start();
-    setActorEntry(actorId, { actor, machine, definitionId: targetDefinitionId });
-    const snap = serializeSnapshot(actor.getSnapshot(), actorId);
-    // INVARIANT 1: fingerprint passes through unchanged — never recomputed from context
-    return {
-      ...snap,
-      historyFingerprint: existingFingerprint ?? null,
-      regionFingerprints: initializeRegionFingerprints(
-        targetDefinitionJson,
-        snap.stateValue,
-        existingRegionFingerprints ?? null
-      ),
-    };
+    if (!landingState) return { error: 'STATE_NOT_MAPPABLE', currentStateValue };
+    landingStateValue = landingState;
+  } else {
+    // Fallback: no current position, land at initial
+    landingStateValue = typeof targetDefinitionJson.initial === 'string'
+      ? targetDefinitionJson.initial
+      : (targetDefinitionJson.initial?.target ?? Object.keys(newStates)[0]);
   }
 
-  // Fallback: no current state provided, land at initial (legacy path)
-  let actor;
-  try {
-    const baseSnapshot = machine.resolveState({
-      value:   machine.initial,
-      context: transformedContext,
-      status:  'active',
-    });
-    actor = createActor(machine, { snapshot: baseSnapshot });
-  } catch {
-    actor = createActor(machine, { input: transformedContext });
-  }
+  const snapResult = restoreSnapshot(compiledJson, landingStateValue, transformedContext);
+  if (snapResult.error) return { error: snapResult.error, currentStateValue };
 
-  actor.start();
-  setActorEntry(actorId, { actor, machine, definitionId: targetDefinitionId });
-  const snap = serializeSnapshot(actor.getSnapshot(), actorId);
-  return {
-    ...snap,
+  const regionFingerprints = initializeRegionFingerprints(
+    targetDefinitionJson,
+    snapResult.stateValue,
+    existingRegionFingerprints ?? null,
+  );
+
+  setActorEntry(actorId, {
+    stateValue:         snapResult.stateValue,
+    context:            snapResult.context,
     historyFingerprint: existingFingerprint ?? null,
-    regionFingerprints: initializeRegionFingerprints(
-      targetDefinitionJson,
-      snap.stateValue,
-      existingRegionFingerprints ?? null
-    ),
+    stateEntryId:       0,
+    regionFingerprints,
+    definitionId:       targetDefinitionId,
+    done:               false,
+  });
+
+  return {
+    actorId,
+    stateValue:         snapResult.stateValue,
+    context:            snapResult.context,
+    historyFingerprint: existingFingerprint ?? null,
+    regionFingerprints,
+    status:             'active',
+    done:               false,
   };
 }
 
 function handleSnapshot({ actorId }) {
   const entry = actors.get(actorId);
   if (!entry) return null;
-  return serializeSnapshot(entry.actor.getSnapshot(), actorId);
+  return serializeEntry(entry, actorId);
 }
 
 function handleTerminate({ actorId }) {
-  const entry = actors.get(actorId);
+  const entry = removeActorEntry(actorId);
   if (!entry) return null;
-  const snap = serializeSnapshot(entry.actor.getSnapshot(), actorId);
-  try { entry.actor.stop(); } catch {}
-  removeActorEntry(actorId);
-  return snap;
-}
-
-// ── Serialization ─────────────────────────────────────────────────────────────
-
-function serializeSnapshot(snapshot, actorId) {
-  return {
-    actorId,
-    stateValue: snapshot.value,
-    context:    snapshot.context ?? null,
-    status:     snapshot.status,
-    done:       snapshot.status === 'done',
-  };
-}
-
-function getSnapshot(actorId) {
-  const entry = actors.get(actorId);
-  if (!entry) return null;
-  return serializeSnapshot(entry.actor.getSnapshot(), actorId);
+  return serializeEntry(entry, actorId);
 }
 
 // ── Message dispatch ──────────────────────────────────────────────────────────
 
-/* Guard: parentPort is null when the file is imported outside a worker context
- * (e.g. in unit tests importing resolveLandingState directly). */
 if (parentPort) parentPort.on('message', (msg) => {
   const { id, type } = msg;
 
@@ -440,18 +378,13 @@ if (parentPort) parentPort.on('message', (msg) => {
       case 'TERMINATE': result = handleTerminate(msg); break;
       case 'PING':      result = { alive: true, actorCount: actors.size }; break;
       case 'PRECOMPILE':
-        // Pre-compile an XState machine into the worker cache so the first
-        // real SPAWN or HYDRATE call for this definition has zero compile cost.
-        getOrCacheMachine(msg.definitionId, msg.definitionJson);
+        getOrCompileDefinition(msg.definitionId, msg.definitionJson);
         result = { ok: true };
         break;
       case 'BATCH_EVENTS': {
-        // Chain fingerprints across events so each one builds on the previous result.
-        // Ignore the per-event historyFingerprint sent by the pool (may be stale when
-        // multiple requests were in-flight simultaneously) — use the running value instead.
         const results = [];
-        let fp  = msg.events[0]?.historyFingerprint  ?? '0';
-        let rfp = msg.events[0]?.regionFingerprints  ?? null;
+        let fp  = msg.events[0]?.historyFingerprint ?? '0';
+        let rfp = msg.events[0]?.regionFingerprints ?? null;
         for (const evData of msg.events) {
           const r = handleEvent({ actorId: msg.actorId, event: evData.event, historyFingerprint: fp, regionFingerprints: rfp });
           results.push(r);
@@ -461,7 +394,7 @@ if (parentPort) parentPort.on('message', (msg) => {
         result = { results };
         break;
       }
-      default:          error  = `Unknown message type: ${type}`;
+      default: error = `Unknown message type: ${type}`;
     }
   } catch (err) {
     error = err.message;
@@ -470,5 +403,4 @@ if (parentPort) parentPort.on('message', (msg) => {
   parentPort.postMessage({ id, ok: !error, result, error });
 });
 
-// Signal readiness (only when running as a real worker)
 if (parentPort) parentPort.postMessage({ id: '__ready__', ok: true });
