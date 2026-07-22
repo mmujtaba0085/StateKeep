@@ -11,7 +11,9 @@ import { fingerprintToBigInt, regionFingerprintsToArray } from '../ffi/hashUtils
 import { getEngine } from '../ffi/engine.js';
 import { getWorkerPool } from './workerPool.js';
 import { getWriteBuffer } from './writeBuffer.js';
-import { processEvent }      from './interpreter.js';
+import { processEvent, computeInitialSnapshot } from './interpreter.js';
+import { compileMachine }    from './definitionCompiler.js';
+import { initializeRegionFingerprints } from './statePaths.js';
 import { getGlobalRegistry } from './implementationRegistry.js';
 import { startInvoke, detachActorInvokes, recoverInvokes } from './invokeRegistry.js';
 import { loadRunningInvokes } from '../registry/invokeRepo.js';
@@ -20,7 +22,6 @@ import {
   findActorById,
   updateActorState,
   updateActorStatus,
-  migrateActorDefinition,
   findIdleActors,
 } from '../registry/actorRepo.js';
 import { findDefinitionById } from '../registry/definitionRepo.js';
@@ -30,6 +31,7 @@ import { serializeRegionFingerprints } from '../registry/regionFingerprintCodec.
 import { emitWebhookEvent } from '../api/lib/webhookEmitter.js';
 import { getWildcardChildDef, loadChangepointsAfter, loadParChangepointsAfter } from '../registry/changepointRepo.js';
 import { insertActionJob } from '../registry/actionJobRepo.js';
+import { cancelAllPendingForActor } from '../registry/scheduledEventRepo.js';
 
 const HOT_REGISTRY_SIZE  = parseInt(process.env.HOT_REGISTRY_SIZE    ?? '10000',  10);
 const IDLE_TIMEOUT_MS    = parseInt(process.env.IDLE_TIMEOUT_SECONDS  ?? '300',    10) * 1000;
@@ -217,54 +219,58 @@ async function ensureInWorker(actorId, actor, priority = 'normal') {
 /**
  * Spawn a new actor from a definition.
  */
+const _emptyRegistry = { guards: {}, actions: {}, services: {} };
+
 export async function spawnActor({ definitionId, initialContext, logicalStartTick }) {
   const def = await cachedFindDefinition(definitionId);
   if (!def) throw new Error(`Definition not found: ${definitionId}`);
+
+  // Compute initial snapshot on the main thread so we can do a single DB write
+  // with the full state — eliminating the two-write window (null stateValue → real state).
+  const compiledJson = def.compiledJson ?? compileMachine(def.definitionJson);
+  const snapResult   = computeInitialSnapshot(compiledJson, def.definitionJson, initialContext ?? {}, _emptyRegistry);
+  if (snapResult.error) throw new Error(`Failed to compute initial snapshot: ${snapResult.error}`);
+
+  const stateValue         = snapResult.stateValue;
+  const effectiveContext   = snapResult.context ?? initialContext ?? {};
+  const historyFingerprint = snapResult.historyFingerprint ?? '0';
+  const regionFingerprints = initializeRegionFingerprints(def.definitionJson, stateValue, null);
 
   const pool    = getWorkerPool();
   const actorId = (await import('uuid')).v4();
 
   const actorLogicalTick = logicalStartTick ?? def.deployedAt ?? 0;
 
+  // Single write: full initial state on actor creation — no intermediate null-state.
   await dbCreateActor({
-    id: actorId,
+    id:                 actorId,
     definitionId,
-    stateValue:         null,
-    context:            initialContext ?? {},
-    logicalStartTick:   actorLogicalTick,
-    historyFingerprint: '0',
-  });
-
-  const workerResult = await pool.send(actorId, {
-    type:           'SPAWN',
-    actorId,
-    definitionId:   def.id,
-    definitionJson: def.definitionJson,
-    initialContext: initialContext && Object.keys(initialContext).length > 0 ? initialContext : undefined,
-  });
-
-  // Worker may return null context if the machine has no context definition;
-  // fall back to the caller-supplied initialContext so it persists in DB + hot registry.
-  const effectiveContext = workerResult.context ?? initialContext ?? {};
-
-  await updateActorState(actorId, {
-    stateValue:         workerResult.stateValue,
+    stateValue,
     context:            effectiveContext,
-    historyFingerprint: '0',
-    regionFingerprints: workerResult.regionFingerprints ?? null,
-    lastEventTick:      null,
-    status:             'active',
+    logicalStartTick:   actorLogicalTick,
+    historyFingerprint,
+    regionFingerprints,
+  });
+
+  // Pre-load worker with snapshot (skips re-computation in worker for idempotent reload).
+  await pool.send(actorId, {
+    type:                       'SPAWN',
+    actorId,
+    definitionId:               def.id,
+    definitionJson:             def.definitionJson,
+    stateSnapshot:              { value: stateValue, context: effectiveContext, status: 'active' },
+    existingRegionFingerprints: regionFingerprints ?? null,
   });
 
   touch(actorId, {
     definitionId,
-    stateValue:         workerResult.stateValue,
-    context:            effectiveContext,
-    historyFingerprint: '0',
-    regionFingerprints: workerResult.regionFingerprints ?? null,
-    lastEventTick:      null,
-    logicalStartTick:   actorLogicalTick,   // persisted in hot registry
-    lastAccess:         Date.now(),
+    stateValue,
+    context:          effectiveContext,
+    historyFingerprint,
+    regionFingerprints,
+    lastEventTick:    null,
+    logicalStartTick: actorLogicalTick,
+    lastAccess:       Date.now(),
   });
 
   // Notify engine: actor born at logicalStartTick with no events yet (0n = empty fingerprint)
@@ -275,7 +281,17 @@ export async function spawnActor({ definitionId, initialContext, logicalStartTic
     console.warn(`[actorManager] actorStarted notification failed for ${actorId}: ${e.message}`);
   }
 
-  return { id: actorId, logicalStartTick: actorLogicalTick, ...workerResult };
+  return {
+    id: actorId,
+    logicalStartTick: actorLogicalTick,
+    actorId,
+    stateValue,
+    context:          effectiveContext,
+    historyFingerprint,
+    regionFingerprints,
+    status:           snapResult.done ? 'done' : 'active',
+    done:             snapResult.done ?? false,
+  };
 }
 
 /**
@@ -662,28 +678,10 @@ export async function sendEvent(actorId, event, tick, opts = {}) {
  * Get current actor state snapshot.
  */
 export async function getActorState(actorId, { priority = 'normal' } = {}) {
-  const actor = await findActorById(actorId);
-  if (!actor) throw new Error(`Actor not found: ${actorId}`);
-
-  // If DB says terminated or archived, return DB state — do not consult hot registry.
-  // Archived actors may still be in the hot cache from before force-archive ran.
-  if (actor.status === 'terminated' || actor.status === 'archived') {
-    return {
-      actorId:      actor.id,
-      definitionId: actor.definitionId,
-      stateValue:   actor.stateValue,
-      context:      actor.context,
-      regionFingerprints: actor.regionFingerprints ?? null,
-      status:       actor.status,
-    };
-  }
-
+  // Hot path: terminateActor and archive operations call hotRegistry.delete() before
+  // updating DB status, so a live hot entry always reflects current actor state.
   const hot = hotRegistry.get(actorId);
   if (hot) {
-    // After Track A, EVENT runs on the main thread and updates the hot registry directly.
-    // The worker's XState instance is only used for SPAWN/HYDRATE/TERMINATE — it never
-    // receives EVENT messages, so its state is stale after the first sendEvent call.
-    // The hot registry is the authoritative source of truth for live actors.
     touch(actorId, { ...hot, lastAccess: Date.now() });
     return {
       actorId,
@@ -692,9 +690,12 @@ export async function getActorState(actorId, { priority = 'normal' } = {}) {
       definitionId:       hot.definitionId,
       historyFingerprint: hot.historyFingerprint,
       regionFingerprints: hot.regionFingerprints ?? null,
-      status:             hot.status ?? actor.status ?? 'active',
+      status:             'active',
     };
   }
+
+  const actor = await findActorById(actorId);
+  if (!actor) throw new Error(`Actor not found: ${actorId}`);
 
   return {
     actorId:            actor.id,
@@ -728,7 +729,8 @@ export async function terminateActor(actorId, { priority = 'normal' } = {}) {
   for (const key of migrationCheckCache.keys()) {
     if (key.startsWith(_prefix)) migrationCheckCache.delete(key);
   }
-  getWriteBuffer().flushActor(actorId);  // persist latest state before marking terminal
+  await getWriteBuffer().flushActor(actorId);  // persist latest state before marking terminal
+  await cancelAllPendingForActor(actorId);      // cancel any outstanding scheduled events
   await updateActorStatus(actorId, 'terminated');
 
   try {
@@ -842,44 +844,52 @@ export async function migrateActor(actorId, targetDefinitionId, { priority = 'no
       }
     })();
   } else {
-    // Postgres: update definition including stateEntryId; cancel + recreate after: timers.
-    await migrateActorDefinition(actorId, {
-      definitionId:       targetDefinitionId,
-      stateValue:         result.stateValue,
-      context:            result.context,
-      regionFingerprints: result.regionFingerprints ?? null,
-      logicalStartTick:   newLogicalStartTick,
-      stateEntryId:       newEntryId,
-    });
-    try {
-      const { query } = await import('../registry/db-postgres.js');
-      await query(
+    // Postgres: wrap actor update + timer cancel/recreate in a single transaction.
+    const { transaction: pgTransaction } = await import('../registry/db-postgres.js');
+    const encCtx = result.context != null
+      ? encrypt(Buffer.from(JSON.stringify(result.context)))
+      : null;
+    await pgTransaction(async (client) => {
+      // 1. Update actor definition and state atomically
+      await client.query(
+        `UPDATE actors SET
+           definition_id=$1, state_value=$2, context_json=$3,
+           region_fingerprints=$4, logical_start_tick=$5, state_entry_id=$6,
+           status='active', updated_at=$7
+         WHERE id=$8`,
+        [targetDefinitionId,
+         result.stateValue != null ? JSON.stringify(result.stateValue) : null,
+         encCtx, serializeRegionFingerprints(result.regionFingerprints ?? null),
+         newLogicalStartTick, newEntryId, Date.now(), actorId]
+      );
+
+      // 2. Cancel pending after: timers for the old state
+      await client.query(
         `UPDATE scheduled_events SET status='cancelled'
          WHERE actor_id=$1 AND event_type LIKE '__SK_TIMEOUT_%' AND status='pending'`,
         [actorId]
       );
-      // Create after: timers for the new state
+
+      // 3. Schedule after: timers for the new state (if any)
       const afterTransitions = targetDef.compiledJson?.afterTransitions;
       if (afterTransitions) {
         const newStateKey = stateKeyOf(result.stateValue);
         const afters      = afterTransitions[newStateKey] ?? [];
         if (afters.length > 0) {
-          const now = Date.now();
+          const tsNow = Date.now();
           for (const { delayMs, eventType } of afters) {
-            await query(
+            await client.query(
               `INSERT INTO scheduled_events
                  (actor_id, event_type, payload_enc, fire_at, status, created_at)
                VALUES ($1,$2,$3,$4,'pending',$5)`,
               [actorId, eventType,
                encrypt(JSON.stringify({ stateEntryId: newEntryId })),
-               now + delayMs, now]
+               tsNow + delayMs, tsNow]
             );
           }
         }
       }
-    } catch (e) {
-      console.warn(`[actorManager] migrateActor: failed to manage timers for ${actorId}: ${e.message}`);
-    }
+    });
   }
 
   try {

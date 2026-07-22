@@ -55,11 +55,11 @@ function getStmts() {
     insert: db.prepare(`
       INSERT INTO actors
         (id, definition_id, state_value, context_json,
-         logical_start_tick, history_fingerprint, last_event_tick,
+         logical_start_tick, history_fingerprint, region_fingerprints, last_event_tick,
          state_entry_id, status, created_at, updated_at)
       VALUES
         (@id, @definition_id, @state_value, @context_json,
-         @logical_start_tick, @history_fingerprint, @last_event_tick,
+         @logical_start_tick, @history_fingerprint, @region_fingerprints, @last_event_tick,
          @state_entry_id, @status, @created_at, @updated_at)
     `),
     findById: db.prepare(`
@@ -140,25 +140,27 @@ export async function createActor({
   context,
   logicalStartTick = 0,
   historyFingerprint = '0',
+  regionFingerprints = null,
   stateEntryId = 0,
 } = {}) {
   const ts = now();
   const encContext = context != null
     ? encrypt(Buffer.from(JSON.stringify(context)))
     : null;
+  const encRegions = serializeRegionFingerprints(regionFingerprints);
 
   if (isPostgres) {
     const { query } = await import('./db-postgres.js');
     await query(
       `INSERT INTO actors
          (id, definition_id, state_value, context_json,
-          logical_start_tick, history_fingerprint, last_event_tick,
+          logical_start_tick, history_fingerprint, region_fingerprints, last_event_tick,
           state_entry_id, status, created_at, updated_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
       [id, definitionId,
        stateValue != null ? JSON.stringify(stateValue) : null,
        encContext, logicalStartTick, String(historyFingerprint),
-       null, stateEntryId ?? 0, 'active', ts, ts]
+       encRegions, null, stateEntryId ?? 0, 'active', ts, ts]
     );
     return id;
   }
@@ -171,6 +173,7 @@ export async function createActor({
     context_json:         encContext,
     logical_start_tick:   logicalStartTick,
     history_fingerprint:  String(historyFingerprint),
+    region_fingerprints:  encRegions,
     last_event_tick:      null,
     state_entry_id:       stateEntryId ?? 0,
     status:               'active',
