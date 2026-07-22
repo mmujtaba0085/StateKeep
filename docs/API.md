@@ -33,7 +33,7 @@ No authentication required. Returns server status, APV engine mode, and uptime.
 ```json
 {
   "status":    "ok",
-  "engine":    "real",
+  "engine":    "wasm",
   "db":        "ok",
   "uptime":    3612,
   "timestamp": "2025-05-19T10:00:00.000Z"
@@ -43,7 +43,7 @@ No authentication required. Returns server status, APV engine mode, and uptime.
 | Field | Values | Meaning |
 |-------|--------|---------|
 | `status` | `ok` / `degraded` | `degraded` if DB is unreachable |
-| `engine` | `real` / `fallback` | `fallback` = APV .so not loaded, migrations paused |
+| `engine` | `wasm` | APV WASM engine loaded; server fails to start if `apv-engine.mjs` is missing |
 | `db` | `ok` / `error` | SQLite reachability |
 | `uptime` | integer (seconds) | Server process uptime |
 
