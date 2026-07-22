@@ -8,6 +8,7 @@
 import { randomInt }         from 'crypto';
 import { updateFingerprint } from '../ffi/fingerprintChain.js';
 
+// Guards against infinite always-guard cycles in user-defined machines (e.g. A→B guard, B→A guard, repeat)
 const MAX_TRANSIENT_DEPTH = 100;
 
 // Deduplicate missing-guard warnings (avoid log flood at 30k ev/s)
@@ -51,6 +52,7 @@ function findCandidates(stateKey, eventType, transitions) {
   const exact = transitions[`${stateKey}:${eventType}`];
   if (exact) return exact;
   // Bubble up through parent states
+  // XState v5 semantics: events propagate leaf→root; a transition on a parent handles all its children
   const parts = stateKey.split('.');
   while (parts.length > 1) {
     parts.pop();
@@ -363,6 +365,7 @@ function _processParallelEvent(
 
   const newFingerprint = updateFingerprint(entry.historyFingerprint, event.type);
   let returnRegionFingerprints = entry.regionFingerprints ? { ...entry.regionFingerprints } : undefined;
+  // Update per-region fingerprints separately: APV routes each parallel region independently for migration decisions
   if (returnRegionFingerprints) {
     for (const [regionName, regionStateVal] of Object.entries(parallelRegions)) {
       const fullRegionPath = `${parallelRoot}.${regionName}`;
@@ -534,6 +537,7 @@ export function processEvent(entry, compiledJson, event, registry, pendingSends 
     }
   }
 
+  // after: ops are returned as data (scheduledEventOps), not executed here — interpreter has no I/O; actorManager processes them post-commit
   // Cancel after: scheduled events for old state
   if (afterTransitions[oldStateKey]) {
     schedOps.push({ op: 'cancel', stateKey: oldStateKey });

@@ -38,6 +38,8 @@ async function loadEngine() {
 
   console.log('[ffi/engine] Loaded WASM APV engine');
 
+  // WASM memory is a flat ArrayBuffer; toPtr copies the buffer onto the WASM heap where C functions can read it
+  // strPtr null-terminates the string first — C's strlen/strcmp expect a '\0' sentinel
   function toPtr(buf) {
     const ptr = wasm._malloc(buf.length);
     new Uint8Array(wasm.HEAPU8.buffer).set(buf, ptr);
@@ -105,6 +107,7 @@ async function loadEngine() {
   };
 }
 
+// No runtime fallback: if apv-engine.mjs is absent loadEngine() throws and the server fails to start
 let engineSingleton = null;
 export const engineReady = loadEngine().then(e => { engineSingleton = e; });
 

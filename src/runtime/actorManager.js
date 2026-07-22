@@ -42,6 +42,7 @@ const IDLE_TIMEOUT_MS    = parseInt(process.env.IDLE_TIMEOUT_SECONDS  ?? '300', 
 
 const hotRegistry = new LRUCache(HOT_REGISTRY_SIZE, async (actorId, entry) => {
   detachActorInvokes(actorId);  // explicit intent — invoke Promises survive independently
+  // Must persist state before dropping registry entry: next event will HYDRATE from DB, recovering from last successful write
   try {
     await updateActorState(actorId, {
       stateValue:          entry.stateValue,
@@ -102,6 +103,7 @@ export const _migrationPollTimer = setInterval(async () => {
 
 // ── Definition JSON cache (60s TTL) ───────────────────────────────────────────
 // Reduces DB reads for hot definitions hit on every spawnActor / ensureInWorker.
+// 60s TTL: definitions change rarely but must eventually expire so a fresh deployment is picked up without restart
 const _defCache    = new Map();   // definitionId → { def, expiresAt }
 const DEF_CACHE_TTL_MS = 60_000;
 
@@ -746,6 +748,7 @@ export async function terminateActor(actorId, { priority = 'normal' } = {}) {
  * Throws with code 'STATE_NOT_MAPPABLE' if the actor's state cannot be resolved.
  */
 export async function migrateActor(actorId, targetDefinitionId, { priority = 'normal' } = {}) {
+  // APV: fingerprint-based routing means no event replay — only the current snapshot is mapped to the new definition
   const pool   = getWorkerPool();
   const actor  = await findActorById(actorId);
   if (!actor) throw new Error(`Actor not found: ${actorId}`);
@@ -926,6 +929,7 @@ export async function migrateActor(actorId, targetDefinitionId, { priority = 'no
  * real SPAWN/HYDRATE for an active definition has zero compile cost.
  */
 export async function seedEngineRegistry() {
+  // Engine is in-process WASM and loses its changepoint graph on every restart — rebuild from DB before serving events
   const eng = getEngine();
   if (eng.available) {
     const scalars = await loadChangepointsAfter(0);

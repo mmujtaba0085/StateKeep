@@ -186,6 +186,7 @@ export class WorkerPool {
     let burstActive = false;
 
     if (U) {
+      // 5s window: long enough to drain any real urgent surge, short enough to avoid starving other tiers indefinitely
       if (slot.burstStart === null) slot.burstStart = now;
       burstActive = (now - slot.burstStart) < URGENT_BURST_MS;
 
@@ -245,6 +246,7 @@ export class WorkerPool {
     slot.stats.waitCnt[tier]++;
 
     // Coalesce consecutive EVENTs for same actorId from the same tier queue
+    // Scanning ahead reduces IPC round-trips; fingerprint chaining then runs in a single in-worker pass across the batch
     if (next.message.type === 'EVENT') {
       const actorId = next.message.actorId;
       const queue   =
