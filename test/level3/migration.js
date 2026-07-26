@@ -27,6 +27,7 @@ import { test, describe, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { seedApiKey, post, get, put, BASE_URL } from '../setup.js';
 import { linearMachine, linearMachineV2, linearMachineV3 } from '../helpers/factories.js';
+import { engineReady } from '../../src/ffi/engine.js';
 
 const REAL_ENGINE = !!process.env.STATEKEEP_ENGINE_PATH &&
                     process.env.STATEKEEP_ENGINE_PATH !== './mock/libapv-mock.so';
@@ -203,9 +204,9 @@ describe('Migration 5: Actors in "migrating" status reject events', () => {
     const { createDefinition } = await import('../../src/registry/definitionRepo.js');
 
     const defId = `mig5-unit-def-${Date.now()}`;
-    createDefinition({ id: defId, parentId: null, orgId: 'default', definitionJson: linearMachine('mig5'), deployedAt: Date.now() });
-    const actorId = createActor({ definitionId: defId, orgId: 'default', stateValue: 'idle', context: {} });
-    updateActorStatus(actorId, 'migrating');
+    await createDefinition({ id: defId, parentId: null, definitionJson: linearMachine('mig5'), deployedAt: Date.now() });
+    const actorId = await createActor({ definitionId: defId, stateValue: 'idle', context: {}, historyFingerprint: '0' });
+    await updateActorStatus(actorId, 'migrating');
 
     const r = await post(`/v1/actors/${actorId}/event`, { type: 'START' });
     // Should be rejected (4xx) since actor is migrating
@@ -217,6 +218,7 @@ describe('Migration 5: Actors in "migrating" status reject events', () => {
 
 describe('Migration 6: History fingerprint is stable across migrations', () => {
   test('fingerprint computed before and after event is deterministic', async () => {
+    await engineReady;
     const { computeHash, updateFingerprint } = await import('../../src/ffi/hashUtils.js');
 
     const initial = computeHash(['START']);

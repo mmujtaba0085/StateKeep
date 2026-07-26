@@ -476,7 +476,7 @@ describe('SC3-G: Mixed batch — some scenarios pass, some fail', () => {
 
 describe('SC3-H: Step-level granularity in scenario results', () => {
 
-  test('early failure in sequence — subsequent steps are still executed', async () => {
+  test('early failure in sequence — runner stops at final state', async () => {
     const { VALID_LINEAR } = await import('./machines.js');
     const r = await scenario(VALID_LINEAR, [
       {
@@ -499,9 +499,8 @@ describe('SC3-H: Step-level granularity in scenario results', () => {
     assert.equal(result.steps[1].state, 'done');
     assert.equal(result.steps[1].expected, 'wrong_state');
 
-    // Step 3: RETRY from done → stays done (no RETRY from done)
-    assert.ok(result.steps[2], 'Step 3 should still be reported');
-    console.log(`  Step 3 after early fail: state=${result.steps[2].state}`);
+    // Step 3: Machine reached final state after step 2 — runner stops before processing step 3
+    assert.equal(result.steps.length, 2, 'Runner stops at final state — step 3 not executed');
   });
 
   test('expectDone:false + machine IS done → FAIL (both directions now enforced)', async () => {

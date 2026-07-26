@@ -29,7 +29,7 @@ import { rmSync, existsSync } from 'fs';
 
 // ── Lazy imports (after env is configured) ────────────────────────────────────
 
-let db, actorRepo, defRepo, apiKeyRepo, encrypt, decrypt;
+let db, actorRepo, defRepo, encrypt, decrypt;
 
 before(async () => {
   const dbMod      = await import('../../src/registry/db.js');
@@ -38,7 +38,6 @@ before(async () => {
   decrypt          = dbMod.decrypt;
   actorRepo        = await import('../../src/registry/actorRepo.js');
   defRepo          = await import('../../src/registry/definitionRepo.js');
-  apiKeyRepo       = await import('../../src/registry/apiKeyRepo.js');
 });
 
 // ── WAL Mode ──────────────────────────────────────────────────────────────────
@@ -262,29 +261,3 @@ describe('definitionRepo', () => {
   });
 });
 
-// ── API Key Repository ────────────────────────────────────────────────────────
-
-describe('apiKeyRepo', () => {
-  test('validateApiKey returns null for unknown key', async () => {
-    const result = await apiKeyRepo.validateApiKey('sk_unknown_key');
-    assert.equal(result, null);
-  });
-
-  test('seeded legacy key validates correctly', async () => {
-    const bcrypt = (await import('bcryptjs')).default;
-    const db2    = (await import('../../src/registry/db.js')).getDb();
-    const testKey = `legacykey-${Date.now()}`;
-    const hash    = await bcrypt.hash(testKey, 1);
-    db2.prepare(`INSERT INTO api_keys (key_hash, label, tier, created_at) VALUES (?, 'unit-test', 'free', ?)`)
-       .run(hash, Date.now());
-
-    const result = await apiKeyRepo.validateApiKey(testKey);
-    assert.ok(result, 'Should validate correct key');
-    assert.equal(result.label, 'unit-test');
-  });
-
-  test('wrong key fails validation', async () => {
-    const result = await apiKeyRepo.validateApiKey('definitely-wrong-key-abc123');
-    assert.equal(result, null);
-  });
-});

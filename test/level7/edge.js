@@ -156,7 +156,9 @@ describe('Edge 4: Nested state value serialization', () => {
 
 describe('Edge 5: Max uint64 refinement in engine', () => {
   test('registerChangepoint with refinement=2^64-1 does not overflow', async () => {
-    const { default: fb } = await import('../../src/ffi/fallback.js');
+    const { engineReady: er, getEngine: ge } = await import('../../src/ffi/engine.js');
+    await er;
+    const fb = ge();
     const maxU64 = 0xFFFFFFFFFFFFFFFFn;
     assert.doesNotThrow(() => {
       const rc = fb.registerChangepoint(1n, 0n, maxU64, 'max-refinement-test');

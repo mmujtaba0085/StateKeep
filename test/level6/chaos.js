@@ -17,6 +17,7 @@ import '../setup.js';
 import { test, describe, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { seedApiKey, post, get, put, BASE_URL } from '../setup.js';
+import { engineReady, getEngine } from '../../src/ffi/engine.js';
 import { linearMachine } from '../helpers/factories.js';
 
 before(async () => {
@@ -27,18 +28,11 @@ before(async () => {
 // ── Chaos 1: Engine Disappears ────────────────────────────────────────────────
 
 describe('Chaos 1: Engine fallback when .so is absent', () => {
-  test('getEngine() returns fallback object when engine path is missing', async () => {
-    // Temporarily point to non-existent path, force re-eval of fallback
-    const origPath = process.env.STATEKEEP_ENGINE_PATH;
-    process.env.STATEKEEP_ENGINE_PATH = '/nonexistent/libapv-engine.so';
-
-    // The module is already loaded (ESM singleton), so we test the fallback module directly
-    const { default: fb } = await import('../../src/ffi/fallback.js');
-    assert.equal(fb.available, false, 'Fallback engine must report available=false');
-    assert.equal(fb.computeAccessible(0n, 0n, 1n), null, 'Must return null (stay)');
-
-    if (origPath) process.env.STATEKEEP_ENGINE_PATH = origPath;
-    else delete process.env.STATEKEEP_ENGINE_PATH;
+  test('WASM engine is available and loaded', async () => {
+    await engineReady;
+    const eng = getEngine();
+    assert.equal(eng.available, true, 'WASM engine must report available=true');
+    assert.equal(eng.mode, 'wasm', 'Engine mode must be wasm');
   });
 
   test('system continues to spawn actors when engine is unavailable', async () => {
@@ -48,8 +42,10 @@ describe('Chaos 1: Engine fallback when .so is absent', () => {
     assert.equal(r.status, 201, `Spawn failed in fallback mode: ${JSON.stringify(r.body)}`);
   });
 
-  test('destroy() on fallback engine does not throw', async () => {
-    const { default: fb } = await import('../../src/ffi/fallback.js');
+  test('destroy() on engine does not throw', async () => {
+    await engineReady;
+    const { getEngine: ge } = await import('../../src/ffi/engine.js');
+    const fb = ge();
     assert.doesNotThrow(() => fb.destroy());
     assert.doesNotThrow(() => fb.destroy()); // idempotent
     assert.doesNotThrow(() => fb.destroy()); // third time
@@ -121,8 +117,9 @@ describe('Chaos 4: Logical clock handles extreme values', () => {
     assert.equal(actor.logicalStartTick, Number.MAX_SAFE_INTEGER);
   });
 
-  test('clockTick monotonically increments past a million calls (fallback)', async () => {
-    const { default: fb } = await import('../../src/ffi/fallback.js');
+  test('clockTick monotonically increments past a million calls', async () => {
+    await engineReady;
+    const fb = getEngine();
     let prev = fb.clockTick();
     for (let i = 0; i < 1_000_000; i += 1000) {
       // Take every 1000th tick to keep test fast
@@ -134,7 +131,8 @@ describe('Chaos 4: Logical clock handles extreme values', () => {
   });
 
   test('hash of large BigInt does not overflow', async () => {
-    const { default: fb } = await import('../../src/ffi/fallback.js');
+    await engineReady;
+    const fb = getEngine();
     const UINT64_MAX = 0xFFFFFFFFFFFFFFFFn;
     let h = fb.fnv1aInit();
     // Feed max-value bytes

@@ -17,8 +17,12 @@
  */
 
 import '../setup.js';
-import { test, describe } from 'node:test';
+import { test, describe, before } from 'node:test';
 import assert from 'node:assert/strict';
+import { engineReady, getEngine } from '../../src/ffi/engine.js';
+
+// Ensure engine is ready before any test runs
+before(async () => { await engineReady; });
 
 // ── Tiny generative helpers ───────────────────────────────────────────────────
 
@@ -81,8 +85,8 @@ describe('Property: Determinism', () => {
     });
   });
 
-  test('fallback computeAccessible is deterministic for any inputs', async () => {
-    const { default: fb } = await import('../../src/ffi/fallback.js');
+  test('computeAccessible is deterministic for any inputs', async () => {
+    const fb = getEngine();
     await runProperty('determinism-computeAccessible', 200, () => {
       const prefixHash  = randomBigInt64();
       const actorTime   = BigInt(Math.floor(Math.random() * 1_000_000));
@@ -97,8 +101,8 @@ describe('Property: Determinism', () => {
 // ── Invariant 2: Monotonicity ─────────────────────────────────────────────────
 
 describe('Property: Monotonicity', () => {
-  test('fallback clockTick never decreases', async () => {
-    const { default: fb } = await import('../../src/ffi/fallback.js');
+  test('clockTick never decreases', async () => {
+    const fb = getEngine();
     let prev = fb.clockTick();
     for (let i = 0; i < 1000; i++) {
       const next = fb.clockTick();
@@ -118,7 +122,7 @@ describe('Property: Monotonicity', () => {
     }
     const { createActor, findActorById } = actorRepo;
     const { createDefinition } = defRepo;
-    const { default: fb } = await import('../../src/ffi/fallback.js');
+    const fb = getEngine();
 
     await runProperty('monotonicity-logicalTime', 20, async () => {
       const defId = `prop-mon-${Math.random().toString(36).slice(2)}`;
@@ -146,7 +150,7 @@ describe('Property: Monotonicity', () => {
 
 describe('Property: Prefix Stability', () => {
   test('incremental hash equals one-shot hash for any event sequence', async () => {
-    const { default: fb } = await import('../../src/ffi/fallback.js');
+    const fb = getEngine();
     await runProperty('prefix-stability', 200, () => {
       const events  = randomEventSequence(1, 30);
 
@@ -184,8 +188,8 @@ describe('Property: Prefix Stability', () => {
 // ── Invariant 4: Idempotency ──────────────────────────────────────────────────
 
 describe('Property: Idempotency', () => {
-  test('registerChangepoint called twice returns 0 both times (fallback)', async () => {
-    const { default: fb } = await import('../../src/ffi/fallback.js');
+  test('registerChangepoint called twice returns 0 both times', async () => {
+    const fb = getEngine();
     await runProperty('idempotency-register', 50, () => {
       const tStar      = randomBigInt64();
       const prefixHash = randomBigInt64();
@@ -230,11 +234,11 @@ describe('Property: Idempotency', () => {
 // ── Invariant 5: No Self-Loop ─────────────────────────────────────────────────
 
 describe('Property: No Self-Loop When Engine Returns Stay', () => {
-  test('fallback computeAccessible always returns null (never migrates)', async () => {
-    const { default: fb } = await import('../../src/ffi/fallback.js');
+  test('computeAccessible returns null or a definition ID (WASM engine)', async () => {
+    const fb = getEngine();
     await runProperty('no-self-loop', 200, () => {
       const result = fb.computeAccessible(randomBigInt64(), randomBigInt64(), randomBigInt64());
-      assert.equal(result, null, 'Fallback must always return null (stay)');
+      assert.ok(result === null || typeof result === 'string', 'computeAccessible must return null or a definition ID');
     });
   });
 });
@@ -243,7 +247,7 @@ describe('Property: No Self-Loop When Engine Returns Stay', () => {
 
 describe('Property: Hash Avalanche', () => {
   test('single-character change in input changes hash output', async () => {
-    const { default: fb } = await import('../../src/ffi/fallback.js');
+    const fb = getEngine();
     let avalancheCount = 0;
 
     for (let i = 0; i < 100; i++) {
@@ -267,7 +271,7 @@ describe('Property: BigInt Bounds (uint64)', () => {
   const UINT64_MAX = 0xFFFFFFFFFFFFFFFFn;
 
   test('all hash outputs fit within uint64 bounds', async () => {
-    const { default: fb } = await import('../../src/ffi/fallback.js');
+    const fb = getEngine();
     await runProperty('bigint-bounds', 500, () => {
       const events = randomEventSequence(1, 10);
       let h = fb.fnv1aInit();

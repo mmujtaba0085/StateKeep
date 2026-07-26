@@ -45,8 +45,11 @@ run_group() {
 
 # ── Test groups ──────────────────────────────────────────────────────────────
 
-run_group "Statechart suite (sc1-sc18 + crypto)" \
-  "node --test test/statechart/sc*.js test/crypto.spec.js"
+run_group "Statechart suite (sc1-sc17 + crypto)" \
+  "node --test \$(ls test/statechart/sc*.js | grep -v sc18) test/crypto.spec.js"
+
+run_group "Stress — sc18 (write buffer saturation)" \
+  "node --test test/statechart/sc18.stress-actors.js"
 
 run_group "Hot-path suite" \
   "node --test --test-concurrency=1 test/statechart/hot-path/*.spec.js"

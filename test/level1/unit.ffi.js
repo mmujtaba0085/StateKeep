@@ -4,9 +4,8 @@
  * Level 1 — Unit Tests: FFI Loader + Fingerprinting
  *
  * Tests:
- *   - Load mock engine (libapv-mock.so) when path is set
- *   - Graceful fallback when engine path is absent
- *   - computeAccessible always returns null in mock/fallback
+ *   - Load WASM engine (apv-engine.mjs) and verify it is available
+ *   - computeAccessible returns null or a definition ID
  *   - clockTick is monotonically increasing
  *   - FNV-1a hash: stability, incremental consistency, empty input
  *   - Fingerprint hex ↔ BigInt round-trip
@@ -17,34 +16,36 @@
  *   node --test test/level1/unit.ffi.js
  */
 
-import { test, describe } from 'node:test';
+import { test, describe, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
+import { engineReady, getEngine } from '../../src/ffi/engine.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const MOCK_LIB  = join(__dirname, '..', '..', 'mock', 'libapv-mock.so');
 const MOCK_AVAIL = existsSync(MOCK_LIB);
 
-// ── Import fallback directly (no .so required) ────────────────────────────────
+// ── WASM engine tests ─────────────────────────────────────────────────────────
 
-describe('Fallback engine (no .so)', () => {
+describe('WASM engine', () => {
   let fb;
 
-  test('imports without error', async () => {
-    const mod = await import('../../src/ffi/fallback.js');
-    fb = mod.default;
-    assert.ok(fb, 'fallback module should export an object');
+  before(async () => {
+    await engineReady;
+    fb = getEngine();
   });
 
-  test('available flag is false', async () => {
-    if (!fb) fb = (await import('../../src/ffi/fallback.js')).default;
-    assert.equal(fb.available, false);
+  test('imports without error', async () => {
+    assert.ok(fb, 'WASM engine should export an object');
+  });
+
+  test('available flag is true', async () => {
+    assert.equal(fb.available, true);
   });
 
   test('clockTick returns incrementing BigInts', async () => {
-    if (!fb) fb = (await import('../../src/ffi/fallback.js')).default;
     const t1 = fb.clockTick();
     const t2 = fb.clockTick();
     const t3 = fb.clockTick();
@@ -53,25 +54,23 @@ describe('Fallback engine (no .so)', () => {
     assert.ok(t3 > t2, `t3 (${t3}) should be > t2 (${t2})`);
   });
 
-  test('computeAccessible always returns null', async () => {
-    if (!fb) fb = (await import('../../src/ffi/fallback.js')).default;
-    assert.equal(fb.computeAccessible(0n, 0n, 0n), null);
-    assert.equal(fb.computeAccessible(0xDEADBEEFn, 999n, 1000n), null);
+  test('computeAccessible returns null or a definition ID', async () => {
+    const result1 = fb.computeAccessible(0n, 0n, 0n);
+    const result2 = fb.computeAccessible(0xDEADBEEFn, 999n, 1000n);
+    assert.ok(result1 === null || typeof result1 === 'string', 'computeAccessible must return null or a definition ID');
+    assert.ok(result2 === null || typeof result2 === 'string', 'computeAccessible must return null or a definition ID');
   });
 
   test('registerChangepoint returns 0 (success)', async () => {
-    if (!fb) fb = (await import('../../src/ffi/fallback.js')).default;
     const rc = fb.registerChangepoint(1n, 0n, 0n, 'some-def-id');
     assert.equal(rc, 0);
   });
 
   test('fnv1aInit returns the FNV-1a 64-bit offset basis', async () => {
-    if (!fb) fb = (await import('../../src/ffi/fallback.js')).default;
     assert.equal(fb.fnv1aInit(), 0xcbf29ce484222325n);
   });
 
   test('fnv1a hash of empty data is stable', async () => {
-    if (!fb) fb = (await import('../../src/ffi/fallback.js')).default;
     const buf = Buffer.alloc(0);
     const h1  = fb.fnv1aFinal(fb.fnv1aUpdate(fb.fnv1aInit(), buf));
     const h2  = fb.fnv1aFinal(fb.fnv1aUpdate(fb.fnv1aInit(), buf));
@@ -79,7 +78,6 @@ describe('Fallback engine (no .so)', () => {
   });
 
   test('fnv1a hash of "hello" is deterministic', async () => {
-    if (!fb) fb = (await import('../../src/ffi/fallback.js')).default;
     const buf = Buffer.from('hello', 'utf8');
     const h1  = fb.fnv1aFinal(fb.fnv1aUpdate(fb.fnv1aInit(), buf));
     const h2  = fb.fnv1aFinal(fb.fnv1aUpdate(fb.fnv1aInit(), buf));
@@ -88,14 +86,12 @@ describe('Fallback engine (no .so)', () => {
   });
 
   test('different inputs produce different hashes', async () => {
-    if (!fb) fb = (await import('../../src/ffi/fallback.js')).default;
     const h1 = fb.fnv1aFinal(fb.fnv1aUpdate(fb.fnv1aInit(), Buffer.from('event_A')));
     const h2 = fb.fnv1aFinal(fb.fnv1aUpdate(fb.fnv1aInit(), Buffer.from('event_B')));
     assert.notEqual(h1, h2);
   });
 
   test('incremental hashing equals one-shot hashing', async () => {
-    if (!fb) fb = (await import('../../src/ffi/fallback.js')).default;
     const combined = Buffer.from('event_Aevent_B', 'utf8');
     const oneShot  = fb.fnv1aFinal(fb.fnv1aUpdate(fb.fnv1aInit(), combined));
 
@@ -110,15 +106,18 @@ describe('Fallback engine (no .so)', () => {
   });
 
   test('destroy() does not throw', async () => {
-    if (!fb) fb = (await import('../../src/ffi/fallback.js')).default;
     assert.doesNotThrow(() => fb.destroy());
   });
 });
 
-// ── hashUtils.js tests (work against fallback always) ────────────────────────
+// ── hashUtils.js tests ────────────────────────────────────────────────────────
 
 describe('hashUtils', () => {
   let hashUtils;
+
+  before(async () => {
+    await engineReady;
+  });
 
   test('imports without error', async () => {
     hashUtils = await import('../../src/ffi/hashUtils.js');
