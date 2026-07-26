@@ -3,8 +3,7 @@
   "version": "1.0.0",
   "description": "Hosted State Machine Platform with Pluggable Migration Engine",
   "type": "module",
-  "license": "UNLICENSED",
-  "private": true,
+  "license": "Apache-2.0 WITH Commons-Clause",
   "engines": {
     "node": ">=20.0.0"
   },

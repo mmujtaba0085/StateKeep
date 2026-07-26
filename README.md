@@ -533,3 +533,13 @@ Consider a Postgres adapter (not yet available — see roadmap) when:
 5. **Deploy on NVMe SSD** — WAL write latency is I/O-bound; HDD is unsuitable for production.
 
 The SQLite WAL ceiling is a known, documented constraint of this deployment model — it is not a bug and will not be silently worked around. When you hit it, the right move is a purpose-built distributed actor store.
+
+---
+
+## License
+
+StateKeep is licensed under [Apache 2.0 with the Commons Clause](LICENSE).
+
+You are free to use, modify, and self-host StateKeep for any purpose. Selling StateKeep — or any modified version of it — as a hosted service or commercial product requires a separate agreement.
+
+For commercial licensing: [mmujtaba0085@gmail.com](mailto:mmujtaba0085@gmail.com)
