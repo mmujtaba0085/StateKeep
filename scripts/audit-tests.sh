@@ -45,7 +45,7 @@ run_group() {
 
 # ── Test groups ──────────────────────────────────────────────────────────────
 
-run_group "Statechart suite (sc1-sc17 + crypto)" \
+run_group "Statechart suite (sc1-sc18 + crypto)" \
   "node --test test/statechart/sc*.js test/crypto.spec.js"
 
 run_group "Hot-path suite" \
