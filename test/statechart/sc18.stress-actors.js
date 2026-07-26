@@ -12,12 +12,11 @@
  * Run (full): STRESS=1 node --test test/statechart/sc18.stress-actors.js
  */
 
-import '../setup.js';
 import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn }     from 'child_process';
-import { fileURLToPath } from 'url';
-import { dirname, join } from 'path';
+import { spawn }        from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
 import { post, put, get } from '../setup.js';
 import { startServer, stopServer } from '../helpers/serverHelper.js';
 
