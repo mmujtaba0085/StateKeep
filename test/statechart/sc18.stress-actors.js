@@ -81,13 +81,18 @@ async function bulkSpawn(definitionId, count) {
 }
 
 /**
- * Return actor counts by status for a definition.
- * Uses GET /v1/actors?definitionId=X which returns { counts: {active,migrating,...} }.
+ * Return actor counts by status for a specific definition.
+ * Fetches up to `maxActors` actors filtered by definitionId and tallies statuses
+ * from the returned actors, not the global `counts` field (which is DB-wide).
  */
-async function getStatusCounts(definitionId) {
-  const r = await get(`/v1/actors?definitionId=${encodeURIComponent(definitionId)}&limit=1`);
+async function getStatusCounts(definitionId, maxActors = 1000) {
+  const r = await get(`/v1/actors?definitionId=${encodeURIComponent(definitionId)}&limit=${maxActors}`);
   if (r.status !== 200) throw new Error(`getStatusCounts failed (${r.status}): ${JSON.stringify(r.body)}`);
-  return r.body.counts; // { active, migrating, needs_rescue, terminated, archived }
+  const counts = { active: 0, migrating: 0, needs_rescue: 0, terminated: 0, archived: 0 };
+  for (const actor of r.body.actors) {
+    if (actor.status in counts) counts[actor.status]++;
+  }
+  return counts;
 }
 
 // ── Top-level server lifecycle ─────────────────────────────────────────────────

@@ -14,15 +14,26 @@ let _server = null;
 export async function startServer() {
   if (_server) return _server;
 
-  // Import server module fresh — env vars must be set before this.
+  const base = `http://127.0.0.1:${process.env.PORT || 3099}`;
+
+  // If a server is already running (e.g. a deployed instance), use it directly.
+  // Importing server.js when the port is occupied causes process.exit(1) in server.js.
+  try {
+    const res = await fetch(`${base}/v1/health`);
+    if (res.ok) {
+      _server = { base, stop: () => Promise.resolve() };
+      return _server;
+    }
+  } catch {}
+
+  // No server running — start one by importing server.js.
   const mod = await import('../../src/api/server.js').catch(() => null);
   if (!mod) {
-    // Server exports nothing — it starts itself; wait for it to be ready
+    // Server exports nothing — it starts itself; wait for it to be ready.
     await new Promise(r => setTimeout(r, 800));
   }
 
   // Poll until the health endpoint responds
-  const base = `http://127.0.0.1:${process.env.PORT || 3099}`;
   for (let i = 0; i < 40; i++) {
     try {
       const res = await fetch(`${base}/v1/health`);

@@ -217,7 +217,7 @@ describe('Event pagination', () => {
     // If there's a nextCursor, verify page 2 has no overlap with page 1
     const cursor = page1.body.nextCursor;
     if (cursor && page1.body.events.length > 0) {
-      const page2 = await get(`/v1/actors/${id}/events?limit=3&cursor=${encodeURIComponent(cursor)}`);
+      const page2 = await get(`/v1/actors/${id}/events?limit=3&after=${cursor}`);
       assert.equal(page2.status, 200);
 
       const ids1 = new Set(page1.body.events.map(e => e.id));

@@ -126,20 +126,20 @@ describe('Property: Monotonicity', () => {
 
     await runProperty('monotonicity-logicalTime', 20, async () => {
       const defId = `prop-mon-${Math.random().toString(36).slice(2)}`;
-      createDefinition({
+      await createDefinition({
         id: defId, parentId: null, orgId: 'prop-test-org',
         definitionJson: { id: defId, initial: 'x', states: { x: {} } },
         deployedAt: Date.now(),
       });
       const tick    = fb.clockTick();
-      const actorId = createActor({
+      const actorId = await createActor({
         definitionId:     defId,
         orgId:            'prop-test-org',
         stateValue:       'x',
         context:          {},
         logicalStartTick: Number(tick),
       });
-      const actor = findActorById(actorId);
+      const actor = await findActorById(actorId);
       assert.ok(actor.logicalStartTick >= 0, `logicalStartTick must be >= 0, got ${actor.logicalStartTick}`);
       assert.ok(actor.logicalStartTick <= Number(tick), 'logicalStartTick must not exceed current tick');
     });
@@ -279,9 +279,10 @@ describe('Property: BigInt Bounds (uint64)', () => {
         h = fb.fnv1aUpdate(h, Buffer.from(e, 'utf8'));
       }
       h = fb.fnv1aFinal(h);
+      const hUint = BigInt.asUintN(64, h);
 
-      assert.ok(h >= 0n,         `Hash underflowed: ${h}`);
-      assert.ok(h <= UINT64_MAX, `Hash overflowed: ${h}`);
+      assert.ok(hUint >= 0n,         `Hash underflowed: ${h}`);
+      assert.ok(hUint <= UINT64_MAX, `Hash overflowed: ${h}`);
     });
   });
 

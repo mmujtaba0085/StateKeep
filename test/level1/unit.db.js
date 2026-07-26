@@ -90,10 +90,10 @@ describe('actorRepo', () => {
   let defId;
   let actorId;
 
-  before(() => {
+  before(async () => {
     // Seed a definition row for FK constraint
     defId = `unit-db-def-${Date.now()}`;
-    defRepo.createDefinition({
+    await defRepo.createDefinition({
       id:             defId,
       parentId:       null,
       orgId:          TEST_ORG,
@@ -102,8 +102,8 @@ describe('actorRepo', () => {
     });
   });
 
-  test('createActor persists to DB', () => {
-    actorId = actorRepo.createActor({
+  test('createActor persists to DB', async () => {
+    actorId = await actorRepo.createActor({
       definitionId:      defId,
       orgId:             TEST_ORG,
       stateValue:        'idle',
@@ -114,8 +114,8 @@ describe('actorRepo', () => {
     assert.ok(actorId, 'createActor should return an ID');
   });
 
-  test('findActorById returns correct fields', () => {
-    const actor = actorRepo.findActorById(actorId);
+  test('findActorById returns correct fields', async () => {
+    const actor = await actorRepo.findActorById(actorId);
     assert.ok(actor, 'Should find actor');
     assert.equal(actor.id, actorId);
     assert.equal(actor.definitionId, defId);
@@ -136,46 +136,46 @@ describe('actorRepo', () => {
     }
   });
 
-  test('updateActorState reflects new state', () => {
-    actorRepo.updateActorState(actorId, {
+  test('updateActorState reflects new state', async () => {
+    await actorRepo.updateActorState(actorId, {
       stateValue:         'running',
       context:            { key: 'updated', extraField: 99 },
       historyFingerprint: 'aabbccdd00112233',
       lastEventTick:      20,
       status:             'active',
     });
-    const actor = actorRepo.findActorById(actorId);
+    const actor = await actorRepo.findActorById(actorId);
     assert.equal(actor.stateValue, 'running');
     assert.equal(actor.context.extraField, 99);
     assert.equal(actor.historyFingerprint, 'aabbccdd00112233');
     assert.equal(actor.lastEventTick, 20);
   });
 
-  test('updateActorStatus to terminated', () => {
-    actorRepo.updateActorStatus(actorId, 'terminated');
-    const actor = actorRepo.findActorById(actorId);
+  test('updateActorStatus to terminated', async () => {
+    await actorRepo.updateActorStatus(actorId, 'terminated');
+    const actor = await actorRepo.findActorById(actorId);
     assert.equal(actor.status, 'terminated');
   });
 
-  test('findActorsByDefinition returns only active actors', () => {
+  test('findActorsByDefinition returns only active actors', async () => {
     // Create a second active actor
-    const id2 = actorRepo.createActor({ definitionId: defId, orgId: TEST_ORG, stateValue: 'idle', context: {} });
-    const list = actorRepo.findActorsByDefinition(defId, TEST_ORG);
+    const id2 = await actorRepo.createActor({ definitionId: defId, orgId: TEST_ORG, stateValue: 'idle', context: {} });
+    const list = await actorRepo.findActorsByDefinition(defId, TEST_ORG);
     const ids  = list.map(a => a.id);
     assert.ok(!ids.includes(actorId), 'Terminated actor should NOT appear');
     assert.ok(ids.includes(id2), 'Active actor should appear');
   });
 
-  test('listActors returns actors sorted by created_at DESC', () => {
-    const actors = actorRepo.listActors({ limit: 10, offset: 0, orgId: TEST_ORG });
+  test('listActors returns actors sorted by created_at DESC', async () => {
+    const actors = await actorRepo.listActors({ limit: 10, offset: 0, orgId: TEST_ORG });
     assert.ok(Array.isArray(actors));
     for (let i = 1; i < actors.length; i++) {
       assert.ok(actors[i - 1].createdAt >= actors[i].createdAt, 'Should be descending');
     }
   });
 
-  test('actor not found returns null', () => {
-    const actor = actorRepo.findActorById('nonexistent-id-xyz');
+  test('actor not found returns null', async () => {
+    const actor = await actorRepo.findActorById('nonexistent-id-xyz');
     assert.equal(actor, null);
   });
 });
@@ -185,14 +185,14 @@ describe('actorRepo', () => {
 describe('Event Log', () => {
   let defId2, actorId2;
 
-  before(() => {
+  before(async () => {
     defId2 = `unit-events-def-${Date.now()}`;
-    defRepo.createDefinition({
+    await defRepo.createDefinition({
       id: defId2, parentId: null, orgId: TEST_ORG,
       definitionJson: { id: defId2, initial: 'idle', states: { idle: {} } },
       deployedAt: Date.now(),
     });
-    actorId2 = actorRepo.createActor({ definitionId: defId2, orgId: TEST_ORG, stateValue: 'idle', context: {} });
+    actorId2 = await actorRepo.createActor({ definitionId: defId2, orgId: TEST_ORG, stateValue: 'idle', context: {} });
   });
 
   test('events are ordered by autoincrement id ASC', () => {
@@ -232,31 +232,31 @@ describe('Event Log', () => {
 describe('definitionRepo', () => {
   let defId3;
 
-  test('createDefinition and findDefinitionById round-trip', () => {
+  test('createDefinition and findDefinitionById round-trip', async () => {
     defId3 = `unit-def3-${Date.now()}`;
     const machine = { id: defId3, initial: 'start', states: { start: {} } };
-    defRepo.createDefinition({ id: defId3, parentId: null, orgId: TEST_ORG, definitionJson: machine, deployedAt: Date.now() });
-    const found = defRepo.findDefinitionById(defId3);
+    await defRepo.createDefinition({ id: defId3, parentId: null, orgId: TEST_ORG, definitionJson: machine, deployedAt: Date.now() });
+    const found = await defRepo.findDefinitionById(defId3);
     assert.ok(found);
     assert.equal(found.id, defId3);
     assert.deepEqual(found.definitionJson, machine);
     assert.equal(found.status, 'active');
   });
 
-  test('deprecateDefinition changes status', () => {
-    defRepo.deprecateDefinition(defId3);
-    const found = defRepo.findDefinitionById(defId3);
+  test('deprecateDefinition changes status', async () => {
+    await defRepo.deprecateDefinition(defId3);
+    const found = await defRepo.findDefinitionById(defId3);
     assert.equal(found.status, 'deprecated');
   });
 
-  test('listDefinitions returns paginated results', () => {
-    const list = defRepo.listDefinitions({ limit: 5, offset: 0, orgId: TEST_ORG });
+  test('listDefinitions returns paginated results', async () => {
+    const list = await defRepo.listDefinitions({ limit: 5, offset: 0, orgId: TEST_ORG });
     assert.ok(Array.isArray(list));
     assert.ok(list.length <= 5);
   });
 
-  test('unknown definition returns null', () => {
-    const result = defRepo.findDefinitionById('no-such-def');
+  test('unknown definition returns null', async () => {
+    const result = await defRepo.findDefinitionById('no-such-def');
     assert.equal(result, null);
   });
 });
