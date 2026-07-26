@@ -73,6 +73,11 @@ run_group "Chaos — level 6" \
 run_group "Edge — level 7" \
   "node --test test/level7/edge.js"
 
+# ── Playwright E2E (run separately — not captured in pass/fail above) ─────────
+echo ""
+echo "  NOTE: Playwright E2E tests are not run by this script."
+echo "  Run separately: npx playwright test 2>&1 | tee /tmp/audit-e2e.txt"
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 
 echo ""
