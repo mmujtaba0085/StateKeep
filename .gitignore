@@ -60,3 +60,6 @@ sk-test.sh
 test-engine.mjs
 test-guard.mjs
 *.sh.bak
+
+# Generated test audit report — not committed
+docs/test-audit-report.md
