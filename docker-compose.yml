@@ -1,0 +1,27 @@
+# StateKeep — self-hosted state machine engine
+# https://github.com/mmujtaba0085/StateKeep
+#
+# Quick start:
+#   1. cp .env.example .env   (and fill in the required secrets)
+#   2. docker compose up -d
+#   3. curl http://localhost:3001/v1/health
+#   4. Open http://localhost:3001/dashboard/
+
+services:
+  statekeep:
+    image: ghcr.io/mmujtaba0085/statekeep:latest
+    restart: unless-stopped
+    ports:
+      - "${PORT:-3001}:3001"
+    volumes:
+      # SQLite database — survives container restarts
+      - ./data:/opt/statekeep/data
+      # Structured JSON logs (Pino)
+      - ./logs:/var/log/statekeep
+    env_file: .env
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3001/v1/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
