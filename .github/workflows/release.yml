@@ -64,10 +64,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Rename dotfile for download compatibility
+        # gh CLI and some download tools strip leading dots; rename so users get a usable filename
+        run: cp .env.example env.example
+
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
           files: |
             docker-compose.yml
-            .env.example
+            env.example
