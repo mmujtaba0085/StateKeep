@@ -2,7 +2,7 @@
 # https://github.com/mmujtaba0085/StateKeep
 #
 # Quick start:
-#   1. cp .env.example .env   (and fill in the required secrets)
+#   1. cp env.example .env   (and fill in the required secrets)
 #   2. docker compose up -d
 #   3. curl http://localhost:3001/v1/health
 #   4. Open http://localhost:3001/dashboard/
