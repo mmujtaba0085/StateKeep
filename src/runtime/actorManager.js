@@ -653,6 +653,11 @@ export async function sendEvent(actorId, event, tick, opts = {}) {
         );
       }
     } catch {}
+    // Flush terminal status to DB immediately and evict from hot cache so
+    // getActorState falls through to the DB and returns 'terminated' correctly.
+    // Without this, getActorState returns status:'active' for any hot-cache hit.
+    await buf.flushActor(actorId);
+    hotRegistry.delete(actorId);
   }
 
   // Emit webhook events (never throws — emitWebhookEvent swallows errors)

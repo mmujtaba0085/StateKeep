@@ -131,7 +131,7 @@ function PageWorkers() {
 
   const loaded = health !== null;
   const ok = health?.status === "ok";
-  const engineReal = health?.engine === "real";
+  const engineReal = health?.engine === "wasm" || health?.engine === "real";
 
   return React.createElement(React.Fragment, null,
     React.createElement("div", { className: "page-header" },
@@ -162,7 +162,7 @@ function PageWorkers() {
         React.createElement("div", { className: "stat-tile " + (!loaded ? "" : engineReal ? "green" : "amber") },
           React.createElement("div", { className: "stat-tile-label" }, "APV Engine"),
           React.createElement("div", { className: "stat-tile-val" }, health?.engine || "—"),
-          React.createElement("div", { className: "stat-tile-sub" }, !loaded ? "loading…" : engineReal ? "native .so loaded" : "fallback — migrations paused")
+          React.createElement("div", { className: "stat-tile-sub" }, !loaded ? "loading…" : engineReal ? "engine active" : "engine unavailable")
         ),
         React.createElement("div", { className: "stat-tile " + (!loaded ? "" : (health?.uptime && health.uptime < 300) ? "amber" : "") },
           React.createElement("div", { className: "stat-tile-label" }, "API Uptime"),
