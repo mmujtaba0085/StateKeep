@@ -21,6 +21,10 @@ WORKDIR /app
 COPY --chown=statekeep:statekeep src/       ./src/
 COPY --chown=statekeep:statekeep package.json ./
 
+# Startup script — launches background workers then execs the API server
+COPY --chown=statekeep:statekeep start.sh ./
+RUN chmod +x start.sh
+
 # Production dependencies from stage 1
 COPY --from=deps --chown=statekeep:statekeep /app/node_modules ./node_modules
 
@@ -42,4 +46,4 @@ EXPOSE 3001
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
     CMD wget -qO- http://localhost:3001/v1/health | grep -q '"status":"ok"' || exit 1
 
-CMD ["node", "src/api/server.js"]
+CMD ["./start.sh"]

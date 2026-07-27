@@ -63,3 +63,7 @@ test-guard.mjs
 
 # Generated test audit report — not committed
 docs/test-audit-report.md
+
+# Local scratch / release dry-run directory
+temp/
+node
