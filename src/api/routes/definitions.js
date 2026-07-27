@@ -336,7 +336,7 @@ export async function definitionRoutes(fastify) {
     // Flush deferred writes so the DB reflects the latest actor states before
     // we query for stranded actors (avoids false-negative when a recent event
     // hasn't been written yet by the 50ms write-buffer timer).
-    if (parentId) getWriteBuffer().flush();
+    if (parentId) await getWriteBuffer().flush();
 
     if (parentId) {
       const strandedGroups = await findStrandedActors(parentId, effectiveValidStates);
@@ -486,42 +486,41 @@ export async function definitionRoutes(fastify) {
 
     // Save compiled form — reuse the pre-compiled result from registry validation
     // if available, otherwise compile now (registry absent path).
-    try {
-      const { runtimeDef, ...compiledForm } = _precompiledResult ?? compileMachine(definitionToStore);
-      await updateCompiledJson(id, compiledForm);
-      if (Object.keys(compiledForm.afterTransitions).length > 0) {
-        await updateDefinitionJson(id, runtimeDef);
-      }
-    } catch (compileErr) {
-      request.log.warn({ err: compileErr, definitionId: id }, 'compiled_json generation failed; deploy succeeded without compiled form');
+    // Propagate failures: a NULL compiled_json means all subsequent sendEvents fail.
+    const { runtimeDef, ...compiledForm } = _precompiledResult ?? compileMachine(definitionToStore);
+    await updateCompiledJson(id, compiledForm);
+    if (Object.keys(compiledForm.afterTransitions).length > 0) {
+      await updateDefinitionJson(id, runtimeDef);
     }
 
-    try {
-      if (hasHistoryRegions) {
-        // Parallel changepoint: register per-region hashes with the engine.
-        // We do NOT insert into the scalar changepoints table — prefixHash would
-        // be 0n (wildcard), routing every actor to this definition on restart.
-        const regionHexMap   = computeRegionHashes(normalizedHistoryRegions);
-        const regionArr      = regionFingerprintsToArray(regionHexMap);
-        if (regionArr && regionArr.length > 0) {
-          const rc = eng.registerChangepointParallel(tStar, regionArr, BigInt(refinement), id);
-          if (rc === -2) {
-            // Engine rejected this selector as ambiguous (Proposition 5.14 violation).
-            // The definition row was already written to DB; without a matching changepoint
-            // it is inert — no actors will be migrated to it. Deploy under a different
-            // version ID or adjust the selector to resolve the conflict.
-            return reply.code(409).send({
-              error: 'Ambiguous deployment: this historyRegions selector conflicts with an existing changepoint at the same deployment tick. Ensure selectors are pairwise incompatible or use a covering union selector (Proposition 5.14).',
-            });
-          }
-          await insertParChangepoint({ tStar: Number(tStar), regionHashesHexMap: regionHexMap, refinement, childDefId: id });
+    if (hasHistoryRegions) {
+      // Parallel changepoint: register per-region hashes with the engine.
+      // We do NOT insert into the scalar changepoints table — prefixHash would
+      // be 0n (wildcard), routing every actor to this definition on restart.
+      const regionHexMap   = computeRegionHashes(normalizedHistoryRegions);
+      const regionArr      = regionFingerprintsToArray(regionHexMap);
+      if (regionArr && regionArr.length > 0) {
+        // Engine call first: need its return code to reject ambiguous selectors (-2).
+        // If insertParChangepoint then fails, the in-memory engine entry is already
+        // registered, but on next restart the DB re-seeds the engine from the DB
+        // changepointpar table — so divergence is limited to the current process lifetime.
+        const rc = eng.registerChangepointParallel(tStar, regionArr, BigInt(refinement), id);
+        if (rc === -2) {
+          // Engine rejected this selector as ambiguous (Proposition 5.14 violation).
+          // The definition row was already written to DB; without a matching changepoint
+          // it is inert — no actors will be migrated to it. Deploy under a different
+          // version ID or adjust the selector to resolve the conflict.
+          return reply.code(409).send({
+            error: 'Ambiguous deployment: this historyRegions selector conflicts with an existing changepoint at the same deployment tick. Ensure selectors are pairwise incompatible or use a covering union selector (Proposition 5.14).',
+          });
         }
-      } else {
-        eng.registerChangepoint(tStar, prefixHash, BigInt(refinement), id);
-        await insertChangepoint({ tStar: Number(tStar), prefixHash: prefixHash.toString(), refinement, childDefId: id });
+        await insertParChangepoint({ tStar: Number(tStar), regionHashesHexMap: regionHexMap, refinement, childDefId: id });
       }
-    } catch (e) {
-      request.log.warn(`[definitions] registerChangepoint failed: ${e.message}`);
+    } else {
+      // DB first so that if the engine call below throws, the changepoint is already
+      // persisted and will be re-loaded into the engine on next server restart.
+      await insertChangepoint({ tStar: Number(tStar), prefixHash: prefixHash.toString(), refinement, childDefId: id });
+      eng.registerChangepoint(tStar, prefixHash, BigInt(refinement), id);
     }
 
     // Invalidate inline migration + definition cache for the parent definition

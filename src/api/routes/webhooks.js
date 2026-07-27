@@ -214,11 +214,13 @@ export async function webhookRoutes(fastify) {
 
     let exists;
     if (isPostgres) {
-      const { queryOne, query } = await import('../../registry/db-postgres.js');
+      const { queryOne, transaction } = await import('../../registry/db-postgres.js');
       exists = await queryOne(`SELECT id FROM webhooks WHERE id=$1`, [webhookId]);
       if (!exists) return reply.code(404).send({ error: `Webhook ${webhookId} not found` });
-      await query(`DELETE FROM webhook_deliveries WHERE webhook_id=$1`, [webhookId]);
-      await query(`DELETE FROM webhooks WHERE id=$1`, [webhookId]);
+      await transaction(async (client) => {
+        await client.query(`DELETE FROM webhook_deliveries WHERE webhook_id=$1`, [webhookId]);
+        await client.query(`DELETE FROM webhooks WHERE id=$1`, [webhookId]);
+      });
     } else {
       const db = getDb();
       exists = db.prepare(`SELECT id FROM webhooks WHERE id = ?`).get(webhookId);

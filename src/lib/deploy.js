@@ -26,13 +26,10 @@ export async function deployDefinition(definitionJson, {
 
   const machineId = await createDefinition({ id, parentId: parentId ?? null, definitionJson, deployedAt: tStar });
 
-  // Compile and store compiled form so main-thread interpreter can process events
-  try {
-    const { runtimeDef: _rt, ...compiledForm } = compileMachine(definitionJson);
-    await updateCompiledJson(id, compiledForm);
-  } catch (compileErr) {
-    console.warn(`[deploy] Compile warning for ${id}:`, compileErr.message);
-  }
+  // Compile and store compiled form so main-thread interpreter can process events.
+  // Propagate failures: a NULL compiled_json means all subsequent sendEvents fail.
+  const { runtimeDef: _rt, ...compiledForm } = compileMachine(definitionJson);
+  await updateCompiledJson(id, compiledForm);
 
   if (!parentId) {
     return { id, machineId, deployedAt: tStar };
@@ -45,13 +42,14 @@ export async function deployDefinition(definitionJson, {
   }
 
   const deploymentId = await createDeployment({ definitionId: id, affectedActors: affected.length });
-  await updateDeploymentStatus(deploymentId, 'migrating');
 
   await enqueueJobs(affected.map(a => ({
     deployment_id: deploymentId,
     actor_id:      a.id,
     target_def_id: id,
   })));
+
+  await updateDeploymentStatus(deploymentId, 'migrating');
 
   return { id, machineId, deployedAt: tStar, deploymentId, migrationJobs: affected.length };
 }

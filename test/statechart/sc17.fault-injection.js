@@ -1,22 +1,28 @@
 /**
  * test/statechart/sc17.fault-injection.js
  *
- * Fault-injection tests — verifies error propagation and ordering invariants
- * from the 2026-07-22 atomicity audit.
+ * Fault-injection tests — verifies error propagation and ordering invariants.
  *
  * Tests:
  *   SC17-A: writeBuffer.flush() rejects when SQLite throws
  *   SC17-B: migrate-worker marks job done before inserting MIGRATED event
- *   SC17-C: PUT /v1/definitions returns 500 when updateCompiledJson throws
+ *   SC17-C: Storage functions called by the definitions route propagate DB errors
+ *          C1: updateCompiledJson rejects when SQLite UPDATE fails
+ *          C2: insertChangepoint rejects when SQLite INSERT fails, nothing persisted
  *   SC17-D: Postgres webhook DELETE rolls back on partial failure (skip if no Postgres)
  *
  * Run: node --test test/statechart/sc17.fault-injection.js
  *
+ * SC17-C uses SQLite RAISE() triggers on the shared getDb() connection to inject
+ * failures directly into the storage functions. No server or experimental flags
+ * required. The definitions route has no try/catch around these calls, so their
+ * error propagation is what causes 500 responses at the HTTP layer.
+ *
  * SC17-D requires STATEKEEP_DB_URL set to a Postgres connection string.
- * All other tests use in-memory fakes — no DB setup required.
  */
 
-import { test, describe, mock } from 'node:test';
+import '../setup.js';
+import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 
 // ─── SC17-A: writeBuffer.flush() rejects when SQLite throws ──────────────────
@@ -97,85 +103,82 @@ describe('SC17-B: migrate-worker marks job done before inserting MIGRATED event'
   });
 });
 
-// ─── SC17-C: definitions route — updateCompiledJson error propagates ──────────
+// ─── SC17-C: storage functions propagate errors ────────────────────────────────
+//
+// The definitions route calls updateCompiledJson and insertChangepoint with no
+// surrounding try/catch. If these functions propagate DB errors, Fastify returns
+// 500 to the caller. Tests here verify the propagation contract at the function
+// level — no server or module mocking required.
+//
+// Technique: SQLite RAISE() triggers on the shared getDb() connection. Because
+// the test and the repo functions use the same connection (same process, module
+// singleton), triggers created here are immediately visible to the repo functions.
 
-describe('SC17-C: definitions route propagates updateCompiledJson errors', () => {
-  test('deploy rejects when updateCompiledJson throws (error not swallowed)', async (t) => {
-    // mock.module requires --experimental-test-module-mocks in Node.js 22
-    if (typeof mock.module !== 'function') {
-      t.skip('mock.module not available — rerun with --experimental-test-module-mocks flag');
-      return;
-    }
+describe('SC17-C: storage functions called by definitions route propagate errors', () => {
+  test('C1: updateCompiledJson rejects when SQLite UPDATE fails', async () => {
+    const { getDb } = await import('../../src/registry/db.js');
+    const { createDefinition, updateCompiledJson } = await import('../../src/registry/definitionRepo.js');
+    const db = getDb();
 
-    // Record whether updateCompiledJson was called
-    let updateCompiledJsonCalled = false;
-
-    // Use top-level mock.module (TestContext.mock does not have .module())
-    mock.module('../../src/registry/definitionRepo.js', {
-      namedExports: {
-        findDefinitionById: async () => null,
-        upsertDefinition: async () => ({ id: 'fault-def', parentId: null, created: true }),
-        updateCompiledJson: async () => {
-          updateCompiledJsonCalled = true;
-          throw new Error('SQLITE_FULL: database disk image is malformed');
-        },
-        updateDefinitionJson: async () => {},
-        findDefinitionsByMachineId: async () => [],
-        getLatestByMachineId: async () => null,
-      }
+    // Seed a definition so updateCompiledJson has a real row to UPDATE
+    const defId = `sc17c1-${Date.now()}`;
+    await createDefinition({
+      id:             defId,
+      parentId:       null,
+      definitionJson: { id: defId, initial: 'idle', states: { idle: { type: 'final' } } },
+      deployedAt:     Date.now(),
     });
 
-    mock.module('../../src/ffi/engine.js', {
-      namedExports: {
-        getEngine: () => ({ available: false, mode: 'fallback', clockTick: () => 1n }),
-        engineReady: Promise.resolve(),
-      }
-    });
+    // Install trigger to make any compiled_json UPDATE fail
+    db.exec(`
+      CREATE TRIGGER IF NOT EXISTS __fault_inject_compiled_json
+      BEFORE UPDATE OF compiled_json ON definitions
+      BEGIN
+        SELECT RAISE(ABORT, 'SQLITE_IOERR: disk full (injected)');
+      END
+    `);
 
-    mock.module('../../src/registry/changepointRepo.js', {
-      namedExports: {
-        insertChangepoint: async () => {},
-        getWildcardChildDef: async () => null,
-        loadChangepointsAfter: async () => [],
-        loadParChangepointsAfter: async () => [],
-      }
-    });
-
-    // Dynamic import AFTER mocking
-    const { default: Fastify } = await import('fastify');
-    const app = Fastify({ logger: false });
-    app.addHook('preHandler', async (req) => { req.org = { id: 'test-org', plan: 'enterprise' }; });
-
-    // Import the definitions route plugin
-    let definitionsPlugin;
     try {
-      definitionsPlugin = (await import('../../src/api/routes/definitions.js')).default;
-    } catch (e) {
-      // If the route uses imports that can't be mocked at this point, skip gracefully
-      t.skip('definitions route could not be loaded in isolation: ' + e.message);
-      mock.restoreAll();
-      return;
+      await assert.rejects(
+        () => updateCompiledJson(defId, { states: {}, guards: {}, actions: {}, afterTransitions: {} }),
+        (err) => err.message.includes('disk full') || err.code?.includes('SQLITE') || err.message?.includes('SQLITE'),
+        'updateCompiledJson must propagate DB errors — route relies on this for 500 responses'
+      );
+    } finally {
+      db.exec(`DROP TRIGGER IF EXISTS __fault_inject_compiled_json`);
+    }
+  });
+
+  test('C2: insertChangepoint rejects when SQLite INSERT fails, nothing persisted', async () => {
+    const { getDb } = await import('../../src/registry/db.js');
+    const { insertChangepoint } = await import('../../src/registry/changepointRepo.js');
+    const db = getDb();
+
+    const childDefId = `sc17c2-${Date.now()}`;
+
+    // Install trigger to make any INSERT into changepoints fail
+    db.exec(`
+      CREATE TRIGGER IF NOT EXISTS __fault_inject_changepoint
+      BEFORE INSERT ON changepoints
+      BEGIN
+        SELECT RAISE(ABORT, 'injected failure: changepoints insert');
+      END
+    `);
+
+    try {
+      await assert.rejects(
+        () => insertChangepoint({ tStar: Date.now(), prefixHash: '0', refinement: 1, childDefId }),
+        (err) => err.message.includes('injected') || err.code?.includes('SQLITE') || err.message?.includes('SQLITE'),
+        'insertChangepoint must propagate DB errors — route relies on this for 500 responses'
+      );
+    } finally {
+      db.exec(`DROP TRIGGER IF EXISTS __fault_inject_changepoint`);
     }
 
-    await app.register(definitionsPlugin, { prefix: '/v1' });
-    await app.ready();
-
-    const resp = await app.inject({
-      method: 'PUT',
-      url: '/v1/definitions',
-      headers: { 'content-type': 'application/json' },
-      payload: {
-        id: 'fault-def',
-        definition: { id: 'fault-def', initial: 'idle', states: { idle: { type: 'final' } } },
-      },
-    });
-
-    assert.equal(resp.statusCode, 500,
-      `Expected 500 when updateCompiledJson throws, got ${resp.statusCode}`
-    );
-
-    await app.close();
-    mock.restoreAll();
+    // Verify RAISE(ABORT) prevented the INSERT — changepoint must be absent
+    const row = db.prepare('SELECT id FROM changepoints WHERE child_def_id = ?').get(childDefId);
+    assert.equal(row, undefined,
+      `Changepoint must be absent after insertChangepoint failure, found: ${JSON.stringify(row)}`);
   });
 });
 
@@ -185,13 +188,11 @@ describe('SC17-D: Postgres webhook DELETE rolls back on partial failure', {
   skip: !process.env.STATEKEEP_DB_URL?.startsWith('postgres')
 }, () => {
   test('both DELETEs roll back when second throws', async () => {
-    // Simulate the fixed transaction behavior
     let deliveriesDeleteCalled = false;
     let webhookDeleteCalled = false;
     let webhookRowExists = true;
 
     const simulateFixedTransaction = async (transactionFn) => {
-      // A real pg transaction rolls back all ops if any throw
       try {
         await transactionFn({
           query: async (sql) => {
@@ -204,7 +205,6 @@ describe('SC17-D: Postgres webhook DELETE rolls back on partial failure', {
           }
         });
       } catch {
-        // Transaction rolled back — webhook row still exists
         webhookRowExists = true;
       }
     };

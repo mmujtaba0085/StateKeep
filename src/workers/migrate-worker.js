@@ -187,16 +187,19 @@ async function processJob(job) {
       }
     }
 
+    // Mark job done before inserting the audit event so a transient DB error on
+    // insertEvent cannot leave the job in 'migrating' state and trigger a re-migration.
+    await markDone(id);
+    await incrementMigrated(deployment_id);
     await insertEvent(actor_id, 'MIGRATED', {
       fromDefinitionId: fromDefId,
       toDefinitionId:   target_def_id,
       fromState,
       toState:          result.stateValue,
-    }, currentTick);
-
-    await markDone(id);
+    }, currentTick).catch(err =>
+      console.warn(`[migrate-worker] MIGRATED event insert failed for ${actor_id}:`, err.message)
+    );
     await insertMigrationNotification(actor_id, fromDefId, target_def_id).catch(() => {});
-    await incrementMigrated(deployment_id);
     evictFromApiCache(actor_id);
   } catch (err) {
     if (err.code === 'STATE_NOT_MAPPABLE' || err.code === 'CONTEXT_TRANSFORM_FAILED') {
