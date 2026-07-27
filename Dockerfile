@@ -3,6 +3,9 @@ FROM node:22-alpine AS deps
 
 WORKDIR /app
 
+# Build tools needed to compile native modules (better-sqlite3, koffi) from source on Alpine musl
+RUN apk add --no-cache python3 make g++
+
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 
