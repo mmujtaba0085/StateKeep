@@ -27,7 +27,7 @@ function PageLogin() {
         setError(data.error || "Invalid API key — check and try again");
         return;
       }
-      setOrgName(data.label || data.orgId || "your organisation");
+      setOrgName(data.label || "instance");
       // Brief confirmation flash before entering the app
       setTimeout(() => Api.setKey(trimmed), 600);
     } catch {
@@ -56,7 +56,7 @@ function PageLogin() {
 
       React.createElement("h1", { className: "login-title" }, "Sign in"),
       React.createElement("p", { className: "login-desc" },
-        "Paste your API key to access your organisation's dashboard"
+        "Paste your API key to access the dashboard"
       ),
 
       // ── Form ───────────────────────────────────────────────────────────────
@@ -116,7 +116,7 @@ function PageLogin() {
             stroke: "var(--green)", strokeWidth: 2.5, style: { flexShrink: 0 } },
             React.createElement("polyline", { points: "20 6 9 17 4 12" })
           ),
-          React.createElement("span", null, "Verified — entering ", React.createElement("strong", null, orgName), "…")
+          React.createElement("span", null, "Verified — loading dashboard…")
         ),
 
         React.createElement("button", {
@@ -129,7 +129,7 @@ function PageLogin() {
       // ── Footer hint ────────────────────────────────────────────────────────
       React.createElement("div", { className: "login-footer" },
         React.createElement("span", { className: "muted", style: { fontSize: 11 } },
-          "Your API key was provided when your account was created."
+          "Find your key in .env (STATEKEEP_API_KEY) or create one via POST /v1/keys."
         )
       )
     )

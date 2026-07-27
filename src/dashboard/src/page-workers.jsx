@@ -49,13 +49,14 @@ function QueueStatsPanel() {
           )
         ),
         React.createElement("tbody", null,
-          tierRow("High   (dashboard)", "high",   "green"),
-          tierRow("Normal (API calls)", "normal", "blue"),
-          tierRow("Low    (background)", "low",   "purple")
+          tierRow("Urgent (manual actions)", "urgent", "red"),
+          tierRow("High   (dashboard bg)",  "high",   "green"),
+          tierRow("Normal (API calls)",     "normal", "blue"),
+          tierRow("Low    (background)",    "low",    "purple")
         )
       ),
       React.createElement("div", { style: { padding: "10px 16px", fontSize: 10.5, color: "var(--muted)", borderTop: "1px solid var(--border)" } },
-        "Round-robin: 3 high → 2 normal → 1 low per round. Within each tier, orgs are served in round-robin so no single org can starve others."
+        "Urgent gets exclusive burst for the first 5s of continuous load; then 1U → 3H → 2N → 1L per round. Within each tier, API keys are served round-robin so no single caller starves others."
       )
     )
   );

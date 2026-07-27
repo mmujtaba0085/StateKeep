@@ -1,7 +1,7 @@
 {
   "name": "statekeep",
   "version": "1.0.0",
-  "description": "Hosted State Machine Platform with Pluggable Migration Engine",
+  "description": "Open-source actor-based state machine engine with zero-downtime migration",
   "type": "module",
   "license": "Apache-2.0 WITH Commons-Clause",
   "engines": {
@@ -66,7 +66,6 @@
     "bcryptjs": "^2.4.3",
     "better-sqlite3": "^9.4.5",
     "fastify": "^4.27.0",
-    "koffi": "^2.8.9",
     "package.json": "^2.0.1",
     "pino": "^9.1.0",
     "pino-roll": "^1.0.0",

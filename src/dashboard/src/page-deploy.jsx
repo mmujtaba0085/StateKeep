@@ -29,6 +29,7 @@ function PageDeploy() {
   const [deploying, setDeploying]         = useState5(false);
   const [deployError, setDeployError]     = useState5(null);
   const [deployResult, setDeployResult]   = useState5(null);   // clean 201 response
+  const [dryRunResult, setDryRunResult]   = useState5(null);   // dryRun preview
   const [strandedActors, setStrandedActors] = useState5([]);   // requires_confirmation
   const [realConfirmToken, setRealConfirmToken] = useState5(null);
   const [realExpiresIn, setRealExpiresIn] = useState5(300);
@@ -86,17 +87,36 @@ function PageDeploy() {
     try { body = buildBody(); } catch (e) { setDeployError(e.message); return; }
     setDeploying(true);
     try {
+      const res = await Api.put("/v1/definitions?dryRun=true", body);
+      setDryRunResult(res);
+      setStrandedActors(res.strandedActors || []);
+      setDeployResult(null);
+      setStep(2);
+    } catch (e) {
+      setDeployError(e.message || "Preview failed");
+    } finally {
+      setDeploying(false);
+    }
+  }
+
+  async function handleDeploy() {
+    setDeployError(null);
+    let body;
+    try { body = buildBody(); } catch (e) { setDeployError(e.message); return; }
+    setDeploying(true);
+    try {
       const res = await Api.put("/v1/definitions", body);
       if (res.status === "requires_confirmation") {
         setStrandedActors(res.strandedActors || []);
         setRealConfirmToken(res.confirmToken);
         setRealExpiresIn(res.expiresIn || 300);
         setDeployResult(null);
-        setStep(2);
+        setStep(3);
       } else {
         setDeployResult(res);
         setStrandedActors([]);
-        setStep(2);
+        setStep(4);
+        pushToast({ kind: "success", title: "Deployed", desc: `${res.affectedActors} actors affected` });
       }
     } catch (e) {
       setDeployError(e.message || "Deploy failed");
@@ -117,7 +137,7 @@ function PageDeploy() {
       setDeployResult(res);
       setStrandedActors([]);
       pushToast({ kind: "success", title: "Deployed", desc: `${res.affectedActors} actors affected, ${res.strandedTagged} tagged needs_rescue` });
-      setStep(4); // success screen
+      setStep(4);
     } catch (e) {
       setDeployError(e.message || "Confirmed deploy failed");
     } finally {
@@ -126,7 +146,7 @@ function PageDeploy() {
   }
 
   function handleReset() {
-    setStep(1); setDeployResult(null); setStrandedActors([]);
+    setStep(1); setDeployResult(null); setDryRunResult(null); setStrandedActors([]);
     setRealConfirmToken(null); setRealExpiresIn(300);
     setConfirmed(false); setDeployError(null);
   }
@@ -149,12 +169,12 @@ function PageDeploy() {
 
         React.createElement("h2", { className: "display", style: { fontSize: 18, margin: "0 0 18px", fontWeight: 600 } }, "Deploy New Version"),
 
-        // step indicator
-        React.createElement("div", { className: "steps" },
+        // step indicator (steps 1-3 visible; step 4 = success, no indicator)
+        step < 4 && React.createElement("div", { className: "steps" },
           [1, 2, 3].map(n => React.createElement(React.Fragment, { key: n },
             React.createElement("div", { className: "step" + (step === n ? " active" : step > n ? " done" : "") },
               React.createElement("div", { className: "step-num" }, step > n ? Icons.Check({ size: 12 }) : n),
-              React.createElement("span", null, n === 1 ? "Configure" : n === 2 ? "Review Impact" : "Confirm")
+              React.createElement("span", null, n === 1 ? "Configure" : n === 2 ? "Preview Impact" : "Confirm")
             ),
             n < 3 && React.createElement("div", { className: "step-line" })
           ))
@@ -265,28 +285,37 @@ function PageDeploy() {
           )
         ),
 
-        // ── STEP 2: Review Impact ────────────────────────────────────────────
-        step === 2 && React.createElement("div", null,
+        // ── STEP 2: Review Impact (dryRun result) ───────────────────────────
+        step === 2 && dryRunResult && React.createElement("div", null,
 
-          // clean deploy success
-          deployResult && strandedActors.length === 0 && React.createElement("div", {
-            style: { padding: 16, background: "var(--green-bg, #0d2318)", border: "1px solid var(--green-bd, #166534)", borderRadius: 8, marginBottom: 14 }
+          // migration preview stats
+          dryRunResult.migration && React.createElement("div", {
+            style: { padding: 14, background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 8, marginBottom: 14 }
           },
-            React.createElement("div", { style: { fontWeight: 600, fontSize: 13, color: "var(--green)" } }, "✓ Deployed successfully"),
-            React.createElement("div", { style: { fontSize: 12, color: "var(--muted)", marginTop: 6, lineHeight: 1.6 } },
-              React.createElement("div", null, "Definition: ", React.createElement("span", { className: "mono" }, deployResult.id)),
-              React.createElement("div", null, "Affected actors: ", React.createElement("span", { className: "mono" }, deployResult.affectedActors)),
-              deployResult.deploymentId && React.createElement("div", null, "Deployment ID: ", React.createElement("span", { className: "mono", style: { fontSize: 10 } }, deployResult.deploymentId))
+            React.createElement("div", { style: { fontWeight: 600, fontSize: 13, marginBottom: 10 } }, "Migration Impact Preview"),
+            React.createElement("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10, textAlign: "center" } },
+              React.createElement("div", null,
+                React.createElement("div", { className: "mono", style: { fontSize: 20, fontWeight: 700 } }, dryRunResult.migration.eligible ?? 0),
+                React.createElement("div", { className: "muted", style: { fontSize: 11 } }, "eligible")
+              ),
+              React.createElement("div", null,
+                React.createElement("div", { className: "mono", style: { fontSize: 20, fontWeight: 700, color: "var(--green)" } }, (dryRunResult.migration.wouldMigrate ?? []).length),
+                React.createElement("div", { className: "muted", style: { fontSize: 11 } }, "would migrate")
+              ),
+              React.createElement("div", null,
+                React.createElement("div", { className: "mono", style: { fontSize: 20, fontWeight: 700, color: "var(--muted)" } }, (dryRunResult.migration.wouldStay ?? []).length),
+                React.createElement("div", { className: "muted", style: { fontSize: 11 } }, "would stay")
+              )
             )
           ),
 
-          // breaking change — stranded actors summary
+          // breaking change — stranded actors warning
           strandedActors.length > 0 && React.createElement("div", {
             style: { padding: 16, background: "var(--amber-bg)", border: "1px solid var(--amber-bd)", borderRadius: 8, marginBottom: 14 }
           },
             React.createElement("div", { style: { fontWeight: 600, fontSize: 13, color: "var(--amber)" } }, "⚠ Breaking change detected"),
             React.createElement("div", { style: { fontSize: 12, color: "var(--muted)", marginTop: 6, marginBottom: 10, lineHeight: 1.5 } },
-              "The following actor states do not exist in the new definition. Confirming will tag them ",
+              "The following actor states do not exist in the new definition. Deploying will tag them ",
               React.createElement("span", { style: { color: "var(--red)" } }, "needs_rescue"),
               " — they will stop accepting events until a rescue deployment is provided."
             ),
@@ -306,15 +335,20 @@ function PageDeploy() {
             )
           ),
 
+          !strandedActors.length && React.createElement("div", {
+            style: { padding: 12, background: "var(--green-bg, #0d2318)", border: "1px solid var(--green-bd, #166534)", borderRadius: 8, marginBottom: 14, fontSize: 12, color: "var(--green)" }
+          }, "✓ No breaking changes — all current actor states exist in the new definition"),
+
           React.createElement("div", { style: { display: "flex", gap: 8, marginTop: 8 } },
-            strandedActors.length > 0
-              ? React.createElement("button", { className: "btn btn-primary", style: { flex: 1 }, onClick: () => setStep(3) }, "Confirm Deploy →")
-              : React.createElement("button", { className: "btn btn-blue", style: { flex: 1 }, onClick: () => { window.location.hash = "#machines"; } }, "← Back to Machines"),
-            React.createElement("button", { className: "btn btn-ghost", onClick: handleReset }, "New Deploy")
+            React.createElement("button", {
+              className: "btn btn-blue", style: { flex: 1 },
+              onClick: handleDeploy, disabled: deploying
+            }, deploying ? "Deploying…" : strandedActors.length > 0 ? "Deploy (requires confirmation) →" : "Deploy"),
+            React.createElement("button", { className: "btn btn-ghost", onClick: handleReset }, "← Edit")
           )
         ),
 
-        // ── STEP 3: Confirm breaking change ─────────────────────────────────
+        // ── STEP 3: Confirm breaking change (only reached via handleDeploy) ─
         step === 3 && React.createElement("div", null,
           React.createElement("div", { style: { padding: 16, border: "1px solid var(--amber-bd)", background: "var(--amber-bg)", borderRadius: 8, marginBottom: 14 } },
             React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center" } },
@@ -336,22 +370,24 @@ function PageDeploy() {
             style: { marginTop: 14, width: "100%" },
             onClick: handleConfirmedDeploy
           }, deploying ? "Deploying…" : "Deploy with Rescue Plan"),
-          React.createElement("button", { className: "btn btn-ghost", style: { marginTop: 8, width: "100%" }, onClick: () => setStep(2) }, "Back")
+          React.createElement("button", { className: "btn btn-ghost", style: { marginTop: 8, width: "100%" }, onClick: () => setStep(2) }, "← Back to Preview")
         ),
 
-        // ── STEP 4: Success after confirmed deploy ───────────────────────────
+        // ── STEP 4: Success ──────────────────────────────────────────────────
         step === 4 && deployResult && React.createElement("div", null,
           React.createElement("div", { style: { padding: 16, background: "var(--green-bg, #0d2318)", border: "1px solid var(--green-bd, #166534)", borderRadius: 8, marginBottom: 14 } },
-            React.createElement("div", { style: { fontWeight: 600, fontSize: 13, color: "var(--green)" } }, "✓ Deployed with rescue plan"),
+            React.createElement("div", { style: { fontWeight: 600, fontSize: 13, color: "var(--green)" } },
+              deployResult.strandedTagged > 0 ? "✓ Deployed with rescue plan" : "✓ Deployed successfully"
+            ),
             React.createElement("div", { style: { fontSize: 12, color: "var(--muted)", marginTop: 6, lineHeight: 1.6 } },
               React.createElement("div", null, "Definition: ", React.createElement("span", { className: "mono" }, deployResult.id)),
-              React.createElement("div", null, "Affected: ", deployResult.affectedActors, " actors"),
-              React.createElement("div", null, "Tagged needs_rescue: ", React.createElement("span", { style: { color: "var(--red)" } }, deployResult.strandedTagged)),
+              React.createElement("div", null, "Affected actors: ", React.createElement("span", { className: "mono" }, deployResult.affectedActors)),
+              deployResult.strandedTagged > 0 && React.createElement("div", null, "Tagged needs_rescue: ", React.createElement("span", { style: { color: "var(--red)" } }, deployResult.strandedTagged)),
               deployResult.deploymentId && React.createElement("div", null, "Deployment ID: ", React.createElement("span", { className: "mono", style: { fontSize: 10 } }, deployResult.deploymentId))
             )
           ),
           React.createElement("div", { style: { display: "flex", gap: 8 } },
-            React.createElement("a", { href: "#migration", className: "btn btn-blue" }, "View in Migration Intel"),
+            deployResult.deploymentId && React.createElement("a", { href: "#migration", className: "btn btn-blue" }, "View in Migration Intel"),
             React.createElement("button", { className: "btn btn-ghost", onClick: handleReset }, "Deploy Another")
           )
         )

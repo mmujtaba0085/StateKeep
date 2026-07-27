@@ -144,7 +144,7 @@ function HealthBar({ apiKey }) {
     ),
     React.createElement("div", { className: "worker-cell" },
       React.createElement("div", { className: "worker-cell-name" },
-        React.createElement("span", { className: "dot dot-" + (health.engine === "real" ? "green" : "amber") }),
+        React.createElement("span", { className: "dot dot-" + (health.engine === "wasm" || health.engine === "real" ? "green" : "amber") }),
         "APV Engine"
       ),
       React.createElement("div", { className: "worker-cell-beat" }, health.engine || "—")

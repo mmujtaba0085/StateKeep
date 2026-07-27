@@ -8,7 +8,7 @@ const useApp = () => useContext(AppCtx);
 function AppProvider({ children }) {
   const [route, setRoute] = useState(() => (window.location.hash.replace(/^#/, "") || "command"));
   const [org] = useState({ name: "StateKeep", tier: "Open Source" });
-  const [selectedMachine, setSelectedMachine] = useState("loan");
+  const [selectedMachine, setSelectedMachine] = useState(null);
   const [selectedActorId, setSelectedActorId] = useState(null);
   const [toasts, setToasts] = useState([]);
   const [modal, setModal] = useState(null);
