@@ -135,123 +135,19 @@ statekeep_api_latency_p99_ms 12
 
 ## 2. Authentication
 
-### POST /v1/auth/login
+All API requests (except `/v1/health`) require an `x-api-key` header containing the key from your `.env` file (`STATEKEEP_API_KEY`).
 
-Exchange dashboard credentials for an API key. No auth header required.
-
-**Request:**
-```json
-{ "username": "admin", "password": "your-password" }
+```http
+x-api-key: sk_live_...
 ```
 
-**Response 200:**
-```json
-{ "apiKey": "sk_abc123_..." }
-```
+Admin-only routes (`/v1/admin/*`) require `x-admin-key` with `STATEKEEP_ADMIN_KEY` instead.
 
-**Response 401:**
-```json
-{ "error": "Invalid credentials" }
-```
+The dashboard is always accessible when self-hosted — no separate login is needed.
 
 ---
 
-### POST /v1/auth/verify
-
-Verify that an API key is valid and return its metadata. Requires the key being verified in the `x-api-key` header.
-
-**Response 200:**
-```json
-{
-  "valid": true,
-  "keyId": "key_abc123",
-  "label": "production",
-  "tier":  "pro",
-  "orgId": "org_xyz"
-}
-```
-
----
-
-## 3. API Key Management
-
-Requires `pro` or `enterprise` tier key.
-
-### POST /v1/keys
-
-Create a new API key for the authenticated org.
-
-**Request:**
-```json
-{
-  "label": "production-backend",
-  "tier":  "pro"
-}
-```
-
-`tier` values: `free` | `pro` | `enterprise` (default: `free`)
-
-**Response 201:**
-```json
-{
-  "keyId":  "key_abc123",
-  "rawKey": "sk_abc123_<64-char-secret>",
-  "label":  "production-backend",
-  "tier":   "pro",
-  "orgId":  "org_xyz",
-  "note":   "Save this key — it will not be shown again."
-}
-```
-
-The `rawKey` is returned exactly once. Store it securely.
-
----
-
-### GET /v1/keys
-
-List all API keys for the authenticated org. Secrets are never included.
-
-**Response 200:**
-```json
-{
-  "keys": [
-    {
-      "keyId":     "key_abc123",
-      "label":     "production-backend",
-      "tier":      "pro",
-      "createdAt": 1716163200000,
-      "revokedAt": null
-    }
-  ]
-}
-```
-
----
-
-### POST /v1/keys/:keyId/rotate
-
-Rotate a key — invalidate the existing secret and issue a new one. The `keyId` stays the same.
-
-**Response 200:**
-```json
-{
-  "keyId":  "key_abc123",
-  "rawKey": "sk_abc123_<new-64-char-secret>",
-  "note":   "Save this key — it will not be shown again."
-}
-```
-
----
-
-### DELETE /v1/keys/:keyId
-
-Revoke a key. Revoked keys return 401 immediately.
-
-**Response 204** (no body)
-
----
-
-## 4. Definitions
+## 3. Definitions
 
 ### PUT /v1/definitions
 
@@ -527,7 +423,7 @@ Aggregate actor counts across all versions of a machine family.
 
 ---
 
-## 5. Actors
+## 4. Actors
 
 ### POST /v1/actors
 
@@ -810,7 +706,7 @@ Update actor metadata. Currently supports resetting `needs_rescue` actors back t
 
 ---
 
-## 6. Scheduled Events
+## 5. Scheduled Events
 
 ### POST /v1/actors/:id/schedule
 
@@ -899,7 +795,7 @@ List scheduled events that have exhausted all retry attempts. Requires `X-Admin-
 
 ---
 
-## 7. Webhooks
+## 6. Webhooks
 
 ### POST /v1/webhooks
 
@@ -1053,7 +949,7 @@ List recent delivery attempts for a webhook.
 
 ---
 
-## 8. Admin
+## 7. Admin
 
 Admin endpoints require the `X-Admin-Key` header (the `STATEKEEP_ADMIN_KEY` environment variable value). Do not expose admin keys to API clients.
 
@@ -1087,71 +983,7 @@ Delete a stale worker heartbeat record. Use when a worker shows unhealthy but th
 
 ---
 
-## 9. Organizations (Admin)
-
-Requires `X-Admin-Key` header.
-
-### GET /v1/orgs
-
-List all organizations.
-
-**Response 200:**
-```json
-{
-  "orgs": [
-    { "id": "org_xyz", "name": "Acme Corp", "createdAt": 1716163200000 }
-  ]
-}
-```
-
----
-
-### POST /v1/orgs
-
-Create a new organization.
-
-**Request:**
-```json
-{ "name": "Acme Corp" }
-```
-
-**Response 201:**
-```json
-{ "id": "org_xyz", "name": "Acme Corp", "createdAt": 1716163200000 }
-```
-
----
-
-### DELETE /v1/orgs/:id
-
-Delete an organization and all its associated data.
-
-**Response 204** (no body)
-
----
-
-### POST /v1/orgs/:id/keys
-
-Provision an API key for a specific org. Admin use for onboarding new customers.
-
-**Request:**
-```json
-{ "label": "customer-key", "tier": "pro" }
-```
-
-**Response 201:** Same as `POST /v1/keys` response.
-
----
-
-### GET /v1/orgs/:id/keys
-
-List API keys for a specific org.
-
-**Response 200:** Same as `GET /v1/keys` response.
-
----
-
-## 10. Archives & Export
+## 8. Archives & Export
 
 ### GET /v1/archives
 
@@ -1196,7 +1028,7 @@ Restore an archived actor back to `active` status.
 
 ---
 
-## 11. Priority & Headers
+## 9. Priority & Headers
 
 ### X-Priority header
 
@@ -1217,7 +1049,7 @@ You generally do not need to set `X-Priority` — the default `normal` is approp
 
 ---
 
-## 12. Error Reference
+## 10. Error Reference
 
 All error responses follow this shape:
 ```json

@@ -75,8 +75,8 @@ await fastify.register(FastifySwagger, {
       title:       'StateKeep API',
       description: 'Actor lifecycle management with Anchor-Point Versioning (APV) for zero-downtime statechart migrations.',
       version:     '1.0.0',
-      contact:     { name: 'StateKeep', url: 'https://statekeep.io' },
-      license:     { name: 'Proprietary' },
+      contact:     { name: 'StateKeep', url: 'https://github.com/mmujtaba0085/StateKeep', email: 'statekeep.support@gmail.com' },
+      license:     { name: 'Apache-2.0 WITH Commons-Clause' },
     },
     tags: [
       { name: 'actors',      description: 'Actor lifecycle — spawn, events, state, terminate' },
