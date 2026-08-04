@@ -27,7 +27,7 @@ Health check: `curl http://localhost:3001/v1/health` → `{"status":"ok","engine
 node --test test/statechart/sc*.js test/crypto.spec.js
 ```
 
-**E2E tests** (Playwright, manages its own server on port 3001):
+**E2E tests** (Playwright — only needed if you're working on the API or dashboard; manages its own server on port 3001):
 ```bash
 npx playwright test
 ```
@@ -37,7 +37,7 @@ npx playwright test
 bash scripts/run-tests.sh
 ```
 
-Expected: ~432 tests, 2 skips, 0 failures.
+Expected: ~444 tests, 2 skips, 0 failures.
 
 ## Architecture overview
 

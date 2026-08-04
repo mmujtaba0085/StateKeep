@@ -1,6 +1,7 @@
 import { createApiKey } from './src/registry/apiKeyRepo.js';
 
-const result = await createApiKey({ label: 'admin', tier: 'enterprise' });
+const label = process.argv[2] || 'default';
+const result = await createApiKey({ label });
 
-console.log('Your API key (save this - shown once):');
+console.log(`API key "${label}" created (save this — shown once):`);
 console.log(result.rawKey);
