@@ -2,23 +2,29 @@
 
 **Host statecharts. Version them. Migrate running actors. Without replay, without downtime, without migration scripts.**
 
-StateKeep is an open-infrastructure platform that runs XState v5 statecharts as long-lived, persistent actors over HTTP. You upload a JSON machine definition, spawn actors against it, and send events. StateKeep handles everything else: state persistence, encryption at rest, event history, version migration, garbage collection, and the safety guarantees that make production deployments of stateful logic possible.
+StateKeep is an open-source, self-hosted engine for running stateful workflows as persistent actors. You define a state machine in JSON, deploy it, spawn actor instances, and send events over HTTP. StateKeep handles everything else: state persistence, encryption at rest, event history, version migration, garbage collection, and the safety guarantees that make running stateful logic in production actually safe.
+
+The definition format is compatible with XState v5. The runtime is StateKeep's own.
 
 ---
 
 ## What Problem This Solves
 
-Every application has state machines. An order is `pending → paid → shipped → delivered`. A user is `trial → active → suspended → churned`. A loan application is `submitted → underwriting → approved → disbursed`. You model these explicitly or you model them implicitly in a mess of database flags and boolean columns. Either way, two hard problems always appear.
+Every application has state machines. An order is `pending → paid → shipped → delivered`. A user is `trial → active → suspended → churned`. A loan application is `submitted → underwriting → approved → disbursed`. You model these explicitly or implicitly. Either way, once the workflow is live and users are inside it, three problems appear without exception.
 
-**Problem 1: The state machine changes after customers are already using it.**
+**Problem 1: Migration scripts that fail in ways you only find in production.**
 
-You realise the loan flow needs an income verification step between document collection and approval. You have 40,000 active applications. You cannot replay them. You cannot restart them. You need the new step to apply to the right applicants — those who paid the verification fee — while applicants who waived the fee continue on the old flow. Writing a migration script to move 40,000 rows across two versions of your business logic, without re-triggering any side effects, is the kind of work that causes 2 am incidents.
+Your workflow logic changes. You write a migration script. Staging passes. Production has seven years of edge-case actor states that staging never had. Something fires twice. A side effect re-triggers. You are up at 2am undoing it.
 
-**Problem 2: The state machine needs to be the product, not just the implementation.**
+**Problem 2: Old workflow versions you can never fully retire.**
 
-If you are building a platform where customers configure their own workflows — an insurance company defining claim lifecycles, a bank defining loan workflows, a SaaS company defining onboarding funnels — you cannot deploy a new version of your own application every time a customer changes their flow. The workflow definition needs to be data. It needs to be versioned. Running instances need to migrate to new versions without the developer writing any code.
+You deploy v3. v1 is still running because some actors have not finished. You cannot shut it down. v4 ships. v1 is still alive. The graveyard of unmaintained workflow versions grows with every release, each one a liability you have to keep compatible.
 
-StateKeep solves both problems. It treats statechart definitions as first-class versioned entities, and uses a proprietary migration engine to route running actors to new versions based on the path each actor took through the old version — not just where they currently are.
+**Problem 3: Actors silently stranded on versions nobody maintains.**
+
+An actor that did not match migration criteria stays on the old version. Applying old logic. Returning stale state. Nobody notices until a user files a strange support ticket — if they ever do.
+
+StateKeep solves all three. It treats statechart definitions as first-class versioned data and uses a deterministic, fingerprint-based migration engine to route every active actor to exactly the right version — based on the path each actor took, not just where it currently is.
 
 ---
 
@@ -204,6 +210,10 @@ StateKeep writes the following internal event types to an actor's event history.
 
 ## The APV Engine Contract
 
+The history fingerprint is a standard FNV-1a hash chain: each event updates `fp = fnv1aUpdate(fp, eventType)`. The fingerprint accumulates incrementally — processing an event is a single hash update, not a history scan. Evaluation at migration time is a single hash comparison per actor per deployment. The fingerprint computation is in the open-source worker code and is identical to the WASM engine.
+
+The APV evaluation engine — the part that maintains the changepoint graph and answers routing queries — ships as a compiled WASM binary (`src/ffi/apv-engine.mjs`). The source is proprietary while we evaluate IP protection. The full migration capability is available on day one.
+
 StateKeep treats the APV WASM engine as an oracle. It does not attempt to understand how the engine makes routing decisions internally. The contract is defined by the six function groups exported from `apv-engine.mjs`.
 
 `apv_clock_tick` returns a global monotonic counter. Every definition deployment and every actor spawn is stamped with a tick value. This is the APV logical time — independent of wall clock time.
@@ -222,21 +232,15 @@ If `apv-engine.mjs` is absent or fails to load, StateKeep replaces it with a JS 
 
 ## Market Position
 
-The three platforms most often compared to StateKeep are Temporal, Cadence (Temporal's predecessor), and Inngest. The comparison is worth making precisely because the surface similarity — all four handle long-running stateful processes — hides a fundamental difference in what each system treats as the primary unit of work.
+**Temporal** solves durability brilliantly. Durable async functions, compensating transactions, complex branching — for code-heavy workflows it is genuinely the right tool. But the version is the code version. Changing a running workflow means versioning your functions, not your definition. Old worker processes stay alive until every workflow they own completes, because you cannot force an in-flight function to jump versions. Problems 2 and 3 above are yours to manage. Temporal has no built-in primitives for either.
 
-**Temporal and Cadence** treat code as the primary unit. You write an async function. Temporal makes that function durable by recording a history of every decision it makes and replaying the function from scratch on every worker restart, skipping already-completed steps. State is the accumulated result of the function's execution history. This model is extremely powerful for complex workflows with branching logic, compensating transactions, and external API calls where you want the reliability of a state machine without having to define one explicitly. Its limitations: the replay model means side effects must be carefully isolated or they re-fire, local development requires running a full Temporal cluster, and the workflow version is the code version — changing a running workflow requires careful versioning of the code itself, not the definition.
+**Inngest** solves event-driven pipelines with minimal infrastructure. Zero cluster to manage, excellent developer experience, built-in retry and scheduling. But there is no explicit state machine model and no versioned definition concept. A developer who wants a state machine builds one inside a function. Problems 1, 2, and 3 are fully in your hands.
 
-**Inngest** treats events as the primary unit. An event triggers a function; that function runs in steps that can sleep and wait for more events. The system provides retry, backoff, and scheduling. There is no explicit state machine model. A developer who wants a state machine in Inngest builds one inside a function using a switch statement. The state lives in function variables. There is no migration concept because there is no versioned definition.
+**XState** gives you the state machine model and a rich ecosystem for modeling stateful logic. It is an excellent library. But it is a library, not infrastructure. Persistence, actor lifecycle, version management, and migration routing are all still your responsibility. What you would build on top of XState to make it production-safe for long-running actors — that is what StateKeep is.
 
-**StateKeep** treats the statechart definition as the primary unit. State is an explicit, named value stored in a database. The definition that produced that state is a versioned record with a parent pointer. The event history that produced that state is an immutable log. The combination of these three — current state, versioned definition, event history — enables the capability that defines StateKeep: path-based migration, where two actors on the same state can receive different migration decisions because they arrived by different paths.
+**StateKeep** treats the statechart definition as the primary unit of versioning. State is an explicit named value in a database. The definition that produced it is a versioned record with a parent pointer. The event history that produced it is an immutable log. The combination of these three enables path-based migration: two actors in the same state receive different routing decisions in the same deployment if they arrived by different paths. Both outcomes are mathematically correct.
 
-The practical consequences of this difference:
-
-For a developer building a background job pipeline, Temporal is the better choice. The workflow is code, the steps are clear, and replay is a natural fit.
-
-For a developer building event-driven microservices with zero infrastructure, Inngest is the better choice. The developer experience is excellent and the deployment model is simple.
-
-For a platform builder whose customers are the ones defining workflows — loan officers configuring approval flows, operations teams configuring SLA pipelines, insurance adjusters configuring claim workflows — StateKeep is the right choice. The definitions are data, not code. New versions can be deployed to production without a code deployment. Running instances migrate based on their history, not their current state. The audit log is a first-class database table, not an internal replay journal.
+Use Temporal when your workflow is code and replay is a natural fit. Use Inngest when you want zero infrastructure for event-driven pipelines. Use StateKeep when the workflow definition is the product — when it needs to be versioned as data, migrated surgically across live actors, and audited as a first-class database table rather than a replay journal.
 
 ---
 
