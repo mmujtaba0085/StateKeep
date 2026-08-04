@@ -59,7 +59,9 @@ function PageMetrics() {
       React.createElement(KpiTile, {
         label: "APV engine",
         value: health ? (health.engine || "—") : "—",
-        sub: health ? "engine active" : "loading…"
+        sub: health
+          ? (health.engine === "wasm" || health.engine === "real" ? "engine active" : "engine unavailable")
+          : "loading…"
       }),
       React.createElement(KpiTile, {
         label: "Uptime",
