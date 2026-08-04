@@ -187,7 +187,7 @@ export async function definitionRoutes(fastify) {
     const hasHistoryRegions = historyRegions && typeof historyRegions === 'object' &&
                               !Array.isArray(historyRegions) &&
                               Object.keys(historyRegions).length > 0;
-    const hasHistoryTarget  = hasHistoryPath || hasHistoryRegions;
+    const hasHistoryTarget  = !!(hasHistoryPath || hasHistoryRegions);
     const parentDefForTargeting = parentId ? await findDefinitionById(parentId) : null;
 
     if (parentId && !parentDefForTargeting) {
