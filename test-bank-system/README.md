@@ -1,200 +1,173 @@
-# Bank/Loan System Testing Environment
+# StateKeep Demo: Bank & Loan System
 
-A standalone testing environment for a comprehensive Bank and Loan application system. This project is designed to test core banking functionality independently before integration with StateKeep.
+A working demonstration of StateKeep running real banking workflows. Three state machines — loan applications, accounts, and transactions — run as live actors managed by StateKeep, with a local Express API in front.
 
-## Project Structure
+This is not a toy: it exercises spawning thousands of actors, sending concurrent events, and live migration when you redeploy a definition.
+
+---
+
+## What it shows
+
+| Workflow | States | Key events |
+|----------|--------|------------|
+| Loan application | idle → submitted → underReview → approved/rejected → disbursed | SUBMIT_APPLICATION, APPROVE, REJECT, DISBURSE |
+| Account | pending → active → suspended → closed | ACTIVATE, SUSPEND, CLOSE |
+| Transaction | initiated → processing → settled / failed | PROCESS, SETTLE, FAIL |
+
+---
+
+## Prerequisites
+
+- **StateKeep running** on `http://localhost:3001` with a valid API key
+- Node.js 22+
+
+---
+
+## Setup
+
+**1. Copy and fill in the env file:**
+
+```bash
+cp .env.example .env
+```
+
+Edit `.env`:
+```env
+STATEKEEP_URL=http://localhost:3001
+STATEKEEP_API_KEY=sk_live_...     # your key from StateKeep .env
+```
+
+**2. Install dependencies:**
+
+```bash
+npm install
+```
+
+**3. Deploy the state machine definitions to StateKeep:**
+
+```bash
+node scripts/precheck-statekeep.js
+```
+
+This registers the three machine definitions (`loanApplication`, `account`, `transaction`) with your StateKeep instance. It is idempotent — safe to run again if you restart.
+
+**4. Start the demo API:**
+
+```bash
+npm start
+# or for live reload during development:
+npm run dev
+```
+
+The Express server starts on `http://localhost:4100` (or `PORT` from your env).
+
+---
+
+## Using the demo API
+
+All requests go through this server, which translates them into StateKeep actor operations.
+
+### Loan application
+
+```bash
+# Start a new loan application
+curl -X POST http://localhost:4100/api/loans/apply \
+  -H "Content-Type: application/json" \
+  -d '{"applicantId":"user-1","loanAmount":15000,"term":24}'
+
+# Get status
+curl http://localhost:4100/api/loans/:id
+
+# Advance through the workflow
+curl -X PUT http://localhost:4100/api/loans/:id/review    # START_REVIEW
+curl -X PUT http://localhost:4100/api/loans/:id/approve   # APPROVE
+```
+
+### Account lifecycle
+
+```bash
+curl -X POST http://localhost:4100/api/accounts          # create
+curl -X PUT  http://localhost:4100/api/accounts/:id/activate
+curl -X PUT  http://localhost:4100/api/accounts/:id/close
+```
+
+### Transactions
+
+```bash
+curl -X POST http://localhost:4100/api/transactions/deposit  \
+  -d '{"accountId":"...","amount":500}'
+curl -X POST http://localhost:4100/api/transactions/transfer \
+  -d '{"fromId":"...","toId":"...","amount":200}'
+```
+
+---
+
+## Running tests
+
+Unit tests run against mock services (no StateKeep needed):
+
+```bash
+npm test                    # all unit tests
+npm run test:loan           # loan application tests only
+npm run test:account        # account tests only
+npm run test:transaction    # transaction tests only
+```
+
+Integration tests run against a live StateKeep instance (requires `.env` with a real key and StateKeep running):
+
+```bash
+npm run test:statekeep      # deploys definitions, then runs integration tests
+npm run test:integration    # integration tests only (skip the precheck)
+```
+
+---
+
+## How it connects to StateKeep
+
+Each loan, account, or transaction is a **StateKeep actor**. When you call the Express API:
+
+1. `POST /api/loans/apply` → spawns a new actor with definition `loanApplication`
+2. `PUT /api/loans/:id/approve` → sends event `APPROVE` to that actor
+3. `GET /api/loans/:id` → reads current actor state from StateKeep
+
+The state machine logic lives entirely in StateKeep. The Express layer is just a domain-friendly HTTP wrapper.
+
+### Live migration demo
+
+To see APV migration in action:
+
+1. Spawn some loan actors and advance them through various states
+2. Modify `src/statecharts/loanApplication.json` (e.g. add a new `dueDiligence` state)
+3. Redeploy the definition: `node scripts/precheck-statekeep.js`
+4. Watch actors automatically migrate to the new version via StateKeep's migrate-worker
+
+---
+
+## File structure
 
 ```
 test-bank-system/
 ├── src/
-│   ├── statecharts/          # State machine definitions (SCXML/JSON format)
-│   │   ├── loanApplication.json   # Loan application workflow states
-│   │   ├── account.json            # Account lifecycle states
-│   │   └── transaction.json        # Transaction processing states
-│   ├── services/             # Business logic services
-│   │   ├── loanService.js         # Loan application processing
-│   │   ├── accountService.js      # Account management
-│   │   └── transactionService.js  # Transaction handling
-│   ├── api/                  # REST API endpoints
-│   │   ├── server.js              # Express server setup
-│   │   └── routes.js              # API routes
-│   └── tests/                # Test suite
+│   ├── api/
+│   │   ├── server.js          Express server
+│   │   └── routes.js          REST endpoints
+│   ├── services/
+│   │   ├── loanService.js     StateKeep calls for loans
+│   │   ├── accountService.js  StateKeep calls for accounts
+│   │   └── transactionService.js
+│   ├── statecharts/
+│   │   ├── loanApplication.json   Machine definition
+│   │   ├── account.json
+│   │   └── transaction.json
+│   └── tests/
 │       ├── loanApplication.test.js
 │       ├── account.test.js
-│       └── transaction.test.js
-├── examples/
-│   └── scenarios/            # Example workflows and test scenarios
-├── package.json
-└── README.md
+│       ├── transaction.test.js
+│       ├── statekeep.integration.test.js
+│       ├── statekeep.runtime.integration.test.js
+│       └── statekeepHelper.js
+├── scripts/
+│   └── precheck-statekeep.js  Deploys definitions to StateKeep
+├── .env.example
+└── package.json
 ```
-
-## Features
-
-### 1. **Loan Application Workflow**
-- Loan request submission
-- Application review process
-- Approval/rejection workflow
-- Disbursement management
-
-### 2. **Account Management**
-- Account creation and activation
-- Customer profile management
-- Account status transitions
-- Account closure workflow
-
-### 3. **Transaction Processing**
-- Deposits and withdrawals
-- Fund transfers between accounts
-- Payment processing
-- Transaction settlement
-
-## Getting Started
-
-### Installation
-
-```bash
-# Install dependencies
-npm install
-```
-
-### Running the Server
-
-```bash
-# Development mode (auto-reload)
-npm run dev
-
-# Production mode
-npm start
-```
-
-The server will run on a free local port by default. Set `PORT` if you want a fixed one.
-
-### Running Tests
-
-```bash
-# Run all tests
-npm test
-
-# Run tests in watch mode
-npm run test:watch
-
-# Run specific test suite
-npm run test:loan
-npm run test:account
-npm run test:transaction
-```
-
-## API Endpoints
-
-### Loan Application
-- `POST /api/loans/apply` - Submit a new loan application
-- `GET /api/loans/:id` - Get loan application status
-- `PUT /api/loans/:id/review` - Review a loan application
-- `PUT /api/loans/:id/approve` - Approve a loan
-
-### Account Management
-- `POST /api/accounts` - Create new account
-- `GET /api/accounts/:id` - Get account details
-- `PUT /api/accounts/:id/activate` - Activate account
-- `PUT /api/accounts/:id/close` - Close account
-
-### Transactions
-- `POST /api/transactions/deposit` - Process deposit
-- `POST /api/transactions/withdraw` - Process withdrawal
-- `POST /api/transactions/transfer` - Transfer funds
-- `GET /api/transactions/:id` - Get transaction details
-
-## State Machines
-
-Each major workflow is defined as a state machine:
-
-### Loan Application States
-```
-idle → submitted → underreview → approved/rejected → disbursed
-```
-
-### Account States
-```
-pending → active → suspended → closed
-```
-
-### Transaction States
-```
-initiated → processing → settled/failed
-```
-
-## Example Workflows
-
-See `/examples/scenarios/` for sample workflows demonstrating:
-- Complete loan application process
-- Account lifecycle
-- Multi-step transaction scenarios
-
-## Integration with StateKeep
-
-This project is designed to work independently first. Once testing is complete:
-
-1. Export statechart definitions to StateKeep format
-2. Connect services to StateKeep actors
-3. Use StateKeep for distributed state management
-4. Scale to multi-instance deployments
-
-See [INTEGRATION.md](INTEGRATION.md) (coming soon) for integration steps.
-
-## Testing Approach
-
-- **Unit Tests**: Service layer logic
-- **Integration Tests**: API endpoint workflows
-- **Scenario Tests**: Complex multi-step workflows
-- **State Transition Tests**: Validate state machine behavior
-
-## Development Workflow
-
-1. Define statecharts for your workflows
-2. Implement services to handle state transitions
-3. Create API routes that trigger transitions
-4. Write tests for each workflow
-5. Test with example scenarios
-6. Prepare for StateKeep integration
-
-## Next Steps
-
-- [ ] Implement statechart definitions
-- [ ] Create service implementations
-- [ ] Set up API routes
-- [ ] Write comprehensive tests
-- [ ] Create example scenarios
-- [ ] Document integration with StateKeep
-- [ ] Performance testing
-- [ ] Error handling and edge cases
-
-## Environment Variables
-
-Create a `.env` file (not tracked in git):
-
-```
-PORT=4100
-NODE_ENV=development
-LOG_LEVEL=debug
-```
-
-## Troubleshooting
-
-### Port Already in Use
-```bash
-# Change port
-PORT=3001 npm run dev
-```
-
-### Module Not Found
-```bash
-# Reinstall dependencies
-rm -rf node_modules
-npm install
-```
-
-## Resources
-
-- [StateKeep Documentation](../README.md)
-- [Express.js Guide](https://expressjs.com/)
-- [Jest Testing Framework](https://jestjs.io/)

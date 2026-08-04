@@ -242,31 +242,56 @@ For a platform builder whose customers are the ones defining workflows — loan 
 
 ## Quick Start
 
+### Docker (recommended)
+
 ```bash
-# Install dependencies
+# 1. Generate required secrets
+node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+
+# 2. Configure environment
+cp .env.example .env
+# Edit .env: set STATEKEEP_ENCRYPTION_KEY, STATEKEEP_ADMIN_KEY, STATEKEEP_API_KEY
+
+# 3. Start
+docker compose up -d
+
+# 4. Verify
+curl http://localhost:3001/v1/health
+# → {"status":"ok","engine":"wasm","db":"ok"}
+
+# Dashboard: http://localhost:3001/dashboard/
+```
+
+### Manual (Node.js)
+
+```bash
+# Install dependencies (Windows: run from PowerShell, not WSL)
 npm install
 
 # Configure environment
 cp .env.example .env
-# Edit .env: STATEKEEP_ENCRYPTION_KEY=$(openssl rand -hex 32)
-#            STATEKEEP_DB_PATH=/var/lib/statekeep/db.sqlite
+# Edit .env: set STATEKEEP_ENCRYPTION_KEY, STATEKEEP_ADMIN_KEY, STATEKEEP_API_KEY
 
 # Start server and workers
 node --env-file=.env src/api/server.js &
 node --env-file=.env src/workers/migrate-worker.js &
-node src/workers/scheduler-worker.js &
-node src/workers/gc-worker.js &
-node src/workers/snapshot-worker.js &
-node src/workers/metrics-worker.js &
+node --env-file=.env src/workers/scheduler-worker.js &
+node --env-file=.env src/workers/gc-worker.js &
+node --env-file=.env src/workers/snapshot-worker.js &
+node --env-file=.env src/workers/metrics-worker.js &
 ```
 
-**Create an API key:**
+**Get your API key:**
+
+Set `STATEKEEP_API_KEY=sk_live_<your-key>` in `.env` before the first start — the server seeds it into the database automatically. Or, after the server has started once, generate a new key with:
 
 ```bash
-curl -sX POST http://localhost:3001/v1/keys \
-  -H "Content-Type: application/json" \
-  -d '{"label":"dev","tier":"pro"}'
+node --env-file=.env gen-key.mjs my-key
+# → API key "my-key" created (save this — shown once):
+# → sk_live_...
 ```
+
+Use the key in the `x-api-key` header for all API calls.
 
 **Deploy a definition:**
 
@@ -469,21 +494,6 @@ For backend developers integrating StateKeep into their apps, see [`docs/develop
 
 ---
 
-## CLI
-
-```bash
-# Push a machine definition file to StateKeep
-statekeep push order.machine.js --url https://your-instance.com --key sk_...
-
-# Watch a directory and auto-push on file changes (dev mode)
-statekeep dev --url http://localhost:3001 --key sk_...
-
-# Preview migration impact before deploying a new version
-statekeep preview order-v2.machine.js --parent order-v1 --url https://your-instance.com --key sk_...
-```
-
----
-
 ## Production Deployment
 
 Full instructions in `docs/deployment.md`. The minimal checklist:
@@ -493,10 +503,6 @@ Full instructions in `docs/deployment.md`. The minimal checklist:
 3. Run the API server and all five worker processes under systemd or PM2. Workers are safe to restart independently.
 4. Put Caddy or nginx in front of the API server for TLS termination.
 5. Back up the SQLite file with `PRAGMA wal_checkpoint(FULL)` before copying.
-
-```bash
-sudo bash scripts/install.sh
-```
 
 ---
 
