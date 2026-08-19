@@ -57,7 +57,7 @@ Two actors on the same current state, having reached it by different paths, rece
 }
 ```
 
-No `historyPath` means wildcard: all actors on the parent definition are eligible for this deployment. With `historyPath`, only actors whose event sequence contains those events in that order are eligible. The `historyPath` is hashed via FNV-1a and registered with the APV engine as the `prefix_hash` for this changepoint. The engine evaluates every actor against this hash during deployment.
+No `historyPath` means wildcard: all actors on the parent definition are eligible for this deployment. With `historyPath`, only actors whose current event history exactly matches that sequence are eligible — actors that have processed additional events since are not selected. The `historyPath` is hashed via FNV-1a and registered with the APV engine as the `prefix_hash` for this changepoint. The engine evaluates every actor against this hash during deployment.
 
 ### Stranded Actor Protection
 
