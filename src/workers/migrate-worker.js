@@ -24,7 +24,7 @@ const ADMIN_KEY = process.env.STATEKEEP_ADMIN_KEY ?? '';
 
 async function evictFromApiCache(actorId) {
   try {
-    await fetch(`http://localhost:${API_PORT}/v1/internal/cache/evict`, {
+    await fetch(`${process.env.STATEKEEP_INTERNAL_URL ?? `http://127.0.0.1:${API_PORT}`}/v1/internal/cache/evict`, {
       method:  'POST',
       headers: { 'Content-Type': 'application/json', 'x-admin-key': ADMIN_KEY },
       body:    JSON.stringify({ actorId }),

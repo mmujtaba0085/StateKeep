@@ -176,7 +176,7 @@ export async function findMachineIdsByName(name) {
   if (isPostgres) {
     const { queryAll } = await import('./db-postgres.js');
     const rows = await queryAll(
-      `SELECT machine_id FROM definitions WHERE id = machine_id AND (definition_json::jsonb)->>'id' = $1`,
+      `SELECT machine_id FROM definitions WHERE id = machine_id AND (convert_from(definition_json, 'UTF8')::jsonb)->>'id' = $1  -- definition_json is BYTEA on Postgres`,
       [name]
     );
     return rows.map((r) => r.machine_id);

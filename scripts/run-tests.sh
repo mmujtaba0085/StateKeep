@@ -125,7 +125,11 @@ echo -e "${BLUE}  LEVEL 1: Unit Tests (FFI + DB)                  ${NC}"
 echo -e "${BLUE}══════════════════════════════════════════════════${NC}"
 
 run_test_file "L1: FFI Loader & Hashing"   "test/level1/unit.ffi.js"
-run_test_file "L1: SQLite Persistence"     "test/level1/unit.db.js"
+if [[ "${STATEKEEP_DB_URL:-}" == postgres* ]]; then
+  warn "SKIP L1: SQLite Persistence — Postgres mode (tests SQLite internals)"; SKIP=$((SKIP+1))
+else
+  run_test_file "L1: SQLite Persistence"     "test/level1/unit.db.js"
+fi
 
 # ── Level 4: Property (no server needed) ─────────────────────────────────────
 echo ""
@@ -133,7 +137,11 @@ echo -e "${BLUE}═════════════════════�
 echo -e "${BLUE}  LEVEL 4: Property-Based / Invariants            ${NC}"
 echo -e "${BLUE}══════════════════════════════════════════════════${NC}"
 
-run_test_file "L4: Properties"             "test/level4/property.js"
+if [[ "${STATEKEEP_DB_URL:-}" == postgres* ]]; then
+  warn "SKIP L4: Properties — Postgres mode (drives the SQLite repo layer directly)"; SKIP=$((SKIP+1))
+else
+  run_test_file "L4: Properties"             "test/level4/property.js"
+fi
 
 # ── Start server for integration + higher tests ───────────────────────────────
 start_server || { fail "Server startup failed — skipping integration tests"; exit 2; }

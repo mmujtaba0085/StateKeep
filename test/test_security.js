@@ -21,7 +21,7 @@ const BASE   = `http://127.0.0.1:${PORT}`;
 const KEY    = 'sk_test_' + 'k'.repeat(24);
 const ADMIN  = 'adm_test_' + 'a'.repeat(24);
 const dir    = mkdtempSync(join(tmpdir(), 'sk-sec-'));
-let server;
+let server, scheduler;
 
 const env = {
   ...process.env,
@@ -55,11 +55,12 @@ before(async () => {
     try { if ((await fetch(`${BASE}/v1/health`)).ok) break; } catch {}
     await new Promise((r) => setTimeout(r, 250));
   }
+  scheduler = spawn(process.execPath, ['src/workers/scheduler-worker.js'], { env, stdio: 'ignore' });
   const d = await req('PUT', '/v1/definitions', { body: { id: 'sec-v1', definition: { id: 'sec', initial: 'a', states: { a: { on: { T: 'b' } }, b: { on: { T: 'a' } } } } } });
   assert.equal(d.status, 201);
 });
 
-after(() => { server?.kill('SIGKILL'); rmSync(dir, { recursive: true, force: true }); });
+after(() => { scheduler?.kill('SIGKILL'); server?.kill('SIGKILL'); rmSync(dir, { recursive: true, force: true }); });
 
 // ── Authentication ──────────────────────────────────────────────────────────
 test('health is public; everything else needs the key', async () => {
@@ -135,6 +136,32 @@ test('dead-letter endpoint is admin-only and returns a real list', async () => {
   const r = await req('GET', '/v1/scheduled/dead-letter', { headers: { 'x-admin-key': ADMIN } });
   assert.equal(r.status, 200);
   assert.ok(Array.isArray(r.body.deadLetter));
+});
+
+test('a fired scheduled event is visible through the API and cannot be undone', async () => {
+  await req('PUT', '/v1/definitions', { body: { id: 'offer-v1', definition: { id: 'offer', initial: 'open',
+    states: { open: { on: { NUDGE: 'open', EXPIRE: 'expired' } }, expired: { type: 'final' } } } } });
+  const { id } = (await req('POST', '/v1/actors', { body: { definitionId: 'offer-v1' } })).body;
+  await req('GET', `/v1/actors/${id}`);                                   // server now has it cached
+  assert.equal((await req('POST', `/v1/actors/${id}/schedule`, { body: { type: 'EXPIRE', fireAt: Date.now() + 300 } })).status, 201);
+  let state;
+  for (let i = 0; i < 40 && state !== 'expired'; i++) {
+    await new Promise((r) => setTimeout(r, 250));
+    state = (await req('GET', `/v1/actors/${id}`)).body.stateValue;
+  }
+  assert.equal(state, 'expired', 'API must show the scheduler-fired transition');
+  const r = await req('POST', `/v1/actors/${id}/event`, { body: { type: 'NUDGE' } });
+  assert.equal(r.status, 409, 'an expired offer must not be revived by a later event');
+});
+
+test('concurrent duplicates with one idempotency key are applied exactly once', async () => {
+  for (let run = 0; run < 3; run++) {
+    const { id } = (await req('POST', '/v1/actors', { body: { definitionId: 'sec-v1' } })).body;
+    const rs = await Promise.all(Array.from({ length: 10 }, () =>
+      req('POST', `/v1/actors/${id}/event`, { body: { type: 'T', idempotencyKey: `k-${run}` } })));
+    assert.equal(rs.filter((r) => r.status === 200 && !r.body.idempotent).length, 1);
+    assert.equal((await req('GET', `/v1/actors/${id}`)).body.stateValue, 'b', 'T applied once (a → b)');
+  }
 });
 
 // ── Rate limiting (keep last: it exhausts the budget) ───────────────────────

@@ -67,6 +67,32 @@ jobs:
           name: server-logs-${{ github.run_id }}
           path: /tmp/statekeep-test-logs/
 
+  postgres:
+    name: "Full suite on Postgres"
+    runs-on: ubuntu-24.04
+    needs: [unit]
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: statekeep
+          POSTGRES_PASSWORD: statekeep
+          POSTGRES_DB: statekeep
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U statekeep" --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      STATEKEEP_DB_URL: postgresql://statekeep:statekeep@127.0.0.1:5432/statekeep
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - name: Run all suites against Postgres (SQLite-internal tests skip themselves)
+        run: bash scripts/run-tests.sh
+
   audit:
     name: "Dependency audit"
     runs-on: ubuntu-24.04

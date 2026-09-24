@@ -13,11 +13,14 @@ import { getDb, encrypt, isPostgres } from '../registry/db.js';
 import { findDueEvents, markFired, markDispatchFailed, scheduleRetryOrFail } from '../registry/scheduledEventRepo.js';
 import { startHeartbeat } from './heartbeat.js';
 import { findActorById } from '../registry/actorRepo.js';
-import { sendEvent } from '../runtime/actorManager.js';
 import { getEngine, engineReady } from '../ffi/engine.js';
 
 const POLL_INTERVAL = parseInt(process.env.SCHEDULER_POLL_INTERVAL ?? '5000', 10);
 const SKIP_STATUSES = new Set(['terminated', 'archived', 'needs_rescue']);
+
+// Where the API server listens for internal calls from workers.
+const INTERNAL_URL = process.env.STATEKEEP_INTERNAL_URL ?? `http://127.0.0.1:${process.env.PORT ?? 3001}`;
+const ADMIN_KEY    = process.env.STATEKEEP_ADMIN_KEY ?? '';
 
 console.log('[scheduler-worker] Starting...');
 
@@ -52,9 +55,22 @@ async function tick() {
     try {
       const eng       = getEngine();
       const clockTick = eng.available ? Number(eng.clockTick()) : Date.now();
-      const event     = { type: row.eventType ?? row.event_type, ...(row.payload ?? {}) };
+      // payload must not override the event type
+      const event     = { ...(row.payload ?? {}), type: row.eventType ?? row.event_type };
 
-      await sendEvent(row.actorId ?? row.actor_id, event, clockTick);
+      // Deliver through the API server (the single owner of the actor cache) — see
+      // /v1/internal/actors/:id/dispatch. Calling sendEvent() here left the server's
+      // cached copy stale and let a later API event overwrite the fired transition.
+      const res = await fetch(`${INTERNAL_URL}/v1/internal/actors/${encodeURIComponent(row.actorId ?? row.actor_id)}/dispatch`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json', ...(ADMIN_KEY ? { 'x-admin-key': ADMIN_KEY } : {}) },
+        body:    JSON.stringify({ event, tick: clockTick }),
+        signal:  AbortSignal.timeout(15_000),
+      });
+      if (!res.ok) {
+        const body = await res.text().catch(() => '');
+        throw new Error(`dispatch failed: HTTP ${res.status} ${body.slice(0, 200)}`);
+      }
 
       // Write SCHEDULED_EVENT_FIRED to event log
       const encPayload = row.payload

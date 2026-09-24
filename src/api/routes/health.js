@@ -56,10 +56,10 @@ export async function healthRoutes(fastify) {
     if (isPostgres) {
       const { queryAll } = await import('../../registry/db-postgres.js');
       rows = await queryAll(`
-        SELECT worker_type, MAX(last_beat) AS last_beat, pid, started_at, worker_id
+        -- Postgres rejects SQLite's bare columns in GROUP BY; take the latest beat per type.
+        SELECT DISTINCT ON (worker_type) worker_type, last_beat, pid, started_at, worker_id
         FROM worker_heartbeats
-        GROUP BY worker_type
-        ORDER BY worker_type
+        ORDER BY worker_type, last_beat DESC
       `, []);
     } else {
       rows = getDb().prepare(`

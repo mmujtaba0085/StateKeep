@@ -54,7 +54,8 @@ describe('Chaos 1: Engine fallback when .so is absent', () => {
 
 // ── Chaos 2: Corrupted Ciphertext ────────────────────────────────────────────
 
-describe('Chaos 2: Corrupted context_json is handled gracefully', () => {
+const sqliteOnly = (process.env.STATEKEEP_DB_URL ?? '').startsWith('postgres') && 'reads the SQLite file directly';
+describe('Chaos 2: Corrupted context_json is handled gracefully', { skip: sqliteOnly }, () => {
   test('actorRepo returns null context for corrupted encrypted data', async () => {
     const { getDb, encrypt }      = await import('../../src/registry/db.js');
     const { createActor, findActorById, updateActorState } = await import('../../src/registry/actorRepo.js');

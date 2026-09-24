@@ -13,6 +13,8 @@ before(async () => {
   await put('/v1/definitions', { id: 'term-test-v1', definition: SAMPLE_MACHINE_V1 });
 });
 
+const sqliteOnly = (process.env.STATEKEEP_DB_URL ?? '').startsWith('postgres') && 'reads the SQLite file directly';
+
 test('DELETE /v1/actors/:id returns 200 with terminated status (docs/API.md)', async () => {
   const { id } = (await post('/v1/actors', { definitionId: 'term-test-v1' })).body;
   const r = await del(`/v1/actors/${id}`);
@@ -20,7 +22,7 @@ test('DELETE /v1/actors/:id returns 200 with terminated status (docs/API.md)', a
   assert.equal(r.body.status, 'terminated');
 });
 
-test('after DELETE, actor status is terminated in DB', async () => {
+test('after DELETE, actor status is terminated in DB', { skip: sqliteOnly }, async () => {
   const { getDb } = await import('../src/registry/db.js');
   const db = getDb();
 
@@ -45,7 +47,7 @@ test('DELETE non-existent actor returns 404', async () => {
   assert.equal(r.status, 404);
 });
 
-test('GC worker archives actors idle > 24h', async () => {
+test('GC worker archives actors idle > 24h', { skip: sqliteOnly }, async () => {
   const { getDb } = await import('../src/registry/db.js');
   const db = getDb();
 

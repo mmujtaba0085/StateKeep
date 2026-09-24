@@ -26,6 +26,12 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const { Pool } = pg;
 
+// node-postgres returns BIGINT (int8) as a string by default. StateKeep keeps ticks,
+// deployed_at and millisecond timestamps in BIGINT columns and compares them in JS;
+// as strings, '9' > '10' is true. All such values are far below 2^53, so parse them
+// as Numbers (matching what better-sqlite3 returns on the SQLite backend).
+pg.types.setTypeParser(20, (v) => (v === null ? null : Number(v)));
+
 let _pool = null;
 
 export function getPool() {
@@ -76,31 +82,35 @@ export async function transaction(fn) {
 
 // ── Schema bootstrap ──────────────────────────────────────────────────────────
 
-const SCHEMA_VERSION = 1;
+// Every NNN_*.sql file in migrations/postgres is applied once, in order, each in its
+// own transaction. (Previously only 001 was ever applied, so the Postgres schema
+// stayed at v1 while the SQLite schema moved on to v25.)
+import { readdirSync } from 'fs';
 
 export async function bootstrapSchema() {
-  const sql = readFileSync(join(__dirname, 'migrations', 'postgres', '001_initial.sql'), 'utf8');
+  const dir   = join(__dirname, 'migrations', 'postgres');
+  const files = readdirSync(dir).filter((f) => /^\d{3}_.*\.sql$/.test(f)).sort();
 
-  await transaction(async (client) => {
-    // Ensure schema_migrations table exists first
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS schema_migrations (
-        version    INTEGER PRIMARY KEY,
-        applied_at BIGINT NOT NULL
-      )
-    `);
+  await query(`
+    CREATE TABLE IF NOT EXISTS schema_migrations (
+      version    INTEGER PRIMARY KEY,
+      applied_at BIGINT NOT NULL
+    )
+  `);
 
-    const existing = await client.query(
-      `SELECT version FROM schema_migrations WHERE version = $1`,
-      [SCHEMA_VERSION]
-    );
-    if (existing.rows.length > 0) return; // already applied
-
-    await client.query(sql);
-    await client.query(
-      `INSERT INTO schema_migrations (version, applied_at) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
-      [SCHEMA_VERSION, Date.now()]
-    );
-    console.log(`[db-postgres] Schema v${SCHEMA_VERSION} applied`);
-  });
+  for (const file of files) {
+    const version = parseInt(file.slice(0, 3), 10);
+    await transaction(async (client) => {
+      // Serialise concurrent bootstraps (API server + workers starting together)
+      await client.query('SELECT pg_advisory_xact_lock(727274)');
+      const existing = await client.query(`SELECT 1 FROM schema_migrations WHERE version = $1`, [version]);
+      if (existing.rows.length > 0) return;
+      await client.query(readFileSync(join(dir, file), 'utf8'));
+      await client.query(
+        `INSERT INTO schema_migrations (version, applied_at) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+        [version, Date.now()]
+      );
+      console.log(`[db-postgres] Schema v${version} applied (${file})`);
+    });
+  }
 }

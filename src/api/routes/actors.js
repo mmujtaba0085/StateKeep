@@ -38,6 +38,11 @@ export function getLatencies() {
   ];
 }
 
+// In-flight idempotency keys (`${actorId}:${key}`) → promise resolved when done.
+// Single-process guard; with several API servers the DB unique index still keeps
+// one event row, but see docs: run one writer per database.
+const idempotencyInFlight = new Map();
+
 export async function actorRoutes(fastify) {
 
   // ── POST /v1/actors ────────────────────────────────────────────────────────
@@ -129,6 +134,18 @@ export async function actorRoutes(fastify) {
       },
     },
   }, async (request, reply) => {
+    // Serialise requests that share an idempotency key BEFORE any await. The
+    // duplicate check below awaits the database on Postgres, so concurrent
+    // duplicates could all pass it and the transition was applied several times
+    // (only one event row survived the unique index). Waiters re-run the check
+    // afterwards and get the idempotent reply.
+    const _idemKey = request.body?.idempotencyKey ? `${request.params.id}:${request.body.idempotencyKey}` : null;
+    let _idemRelease = null;
+    if (_idemKey) {
+      while (idempotencyInFlight.has(_idemKey)) await idempotencyInFlight.get(_idemKey);
+      idempotencyInFlight.set(_idemKey, new Promise((r) => { _idemRelease = r; }));
+    }
+    try {
     const t0    = Date.now();
     const eng   = getEngine();
     const tick  = eng.clockTick();
@@ -221,6 +238,9 @@ export async function actorRoutes(fastify) {
         ...(err.code ? { code: err.code } : {}),
       });
     }
+    } finally {
+      if (_idemKey) { idempotencyInFlight.delete(_idemKey); _idemRelease(); }
+    }
   });
 
   // ── POST /v1/actors/:id/events/batch — send up to 100 events in one call ─
@@ -267,7 +287,14 @@ export async function actorRoutes(fastify) {
     for (const evBody of request.body.events) {
       const { type: eventType, payload, idempotencyKey } = evBody;
 
-      // Idempotency check per event
+      // Idempotency check per event (same in-flight guard as the single-event route)
+      const _bKey = idempotencyKey ? `${id}:${idempotencyKey}` : null;
+      let _bRelease = null;
+      if (_bKey) {
+        while (idempotencyInFlight.has(_bKey)) await idempotencyInFlight.get(_bKey);
+        idempotencyInFlight.set(_bKey, new Promise((r) => { _bRelease = r; }));
+      }
+      try {
       if (idempotencyKey) {
         const inFlight = getWriteBuffer().hasPendingEvent(id, idempotencyKey);
         let inDb = false;
@@ -317,6 +344,9 @@ export async function actorRoutes(fastify) {
       } catch (err) {
         results.push({ error: err.message, code: err.code ?? null });
         if (err.code === 'ACTOR_NEEDS_RESCUE' || err.code === 'ACTOR_TERMINATED' || err.code === 'ACTOR_ARCHIVED') break;
+      }
+      } finally {
+        if (_bKey) { idempotencyInFlight.delete(_bKey); _bRelease(); }
       }
     }
 

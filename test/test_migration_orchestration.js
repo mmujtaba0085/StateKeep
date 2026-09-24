@@ -13,7 +13,9 @@ before(async () => { await seedApiKey(); });
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-test('deploying child definition creates migration_jobs for actors on parent', async () => {
+const sqliteOnly = (process.env.STATEKEEP_DB_URL ?? '').startsWith('postgres') && 'reads the SQLite file directly';
+
+test('deploying child definition creates migration_jobs for actors on parent', { skip: sqliteOnly }, async () => {
   const { getDb } = await import('../src/registry/db.js');
   const db = getDb();
 
@@ -50,7 +52,7 @@ test('deploying child definition creates migration_jobs for actors on parent', a
   assert.ok(Array.isArray(statusRes.body.deployments));
 });
 
-test('actors remain on parent definition with mock engine (no migration)', async () => {
+test('actors remain on parent definition with mock engine (no migration)', { skip: sqliteOnly }, async () => {
   const { getDb } = await import('../src/registry/db.js');
   const db = getDb();
 
