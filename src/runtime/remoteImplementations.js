@@ -14,7 +14,9 @@
  *   GET  {url}/manifest               → { "guards": ["isCreditOk"], "actions": ["sendOffer"] }
  *   POST {url}/guards/{name}          → { "result": true | false }
  *   POST {url}/actions/{name}         → {} or { "send": { "type": "EVENT", ...payload } }
- * Request body: { actorId, definitionId, state, context, event }.
+ * Request body: { actorId, definitionId, state, context, event } (+ jobId for actions).
+ * Actions are at-least-once: a retry after a crash can repeat a call, so a service
+ * with side effects should dedupe on `jobId` (the Python SDK does this for you).
  * Every request carries X-StateKeep-Timestamp and
  * X-StateKeep-Signature: sha256=HMAC(secret, `${timestamp}.${body}`).
  *
@@ -133,7 +135,7 @@ function remoteActionStub(name) {
   if (actionStubs.has(name)) return actionStubs.get(name);
   const run = async ({ context, event }, meta = {}) => {
     const r = await callRemote('POST', `/actions/${encodeURIComponent(name)}`,
-      { actorId: meta.actorId ?? null, context, event });
+      { actorId: meta.actorId ?? null, jobId: meta.jobId ?? null, context, event });
     if (r && r.send && typeof r.send.type === 'string' && meta.sendEvent) {
       await meta.sendEvent(r.send);
     }

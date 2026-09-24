@@ -62,6 +62,7 @@ async function processJob(job) {
     // meta lets an action address its actor (remote actions use it to deliver a follow-up event)
     await actualFn({ context, event }, {
       actorId:   job.actor_id,
+      jobId:     job.id,
       sendEvent: (ev) => _sendEvent ? _sendEvent(job.actor_id, ev, { mergePayload: ev }) : Promise.resolve(),
     });
     await markActionJobDone(job.id).catch(() => {});

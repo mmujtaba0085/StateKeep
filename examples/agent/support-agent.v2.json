@@ -1,0 +1,28 @@
+{
+  "id": "support-agent",
+  "initial": "idle",
+  "context": { "transcript": [] },
+  "states": {
+    "idle": {
+      "on": { "USER_MESSAGE": "thinking", "END": "closed" }
+    },
+    "thinking": {
+      "entry": ["callModelV2"],
+      "on": {
+        "TOOL_REQUEST": [
+          { "target": "pending_approval", "guard": "cond: context.tool == \"issue_refund\" && context.args.amount >= 50" },
+          { "target": "running_tool" }
+        ],
+        "REPLY": "idle"
+      }
+    },
+    "pending_approval": {
+      "on": { "APPROVE": "running_tool", "DENY": "thinking" }
+    },
+    "running_tool": {
+      "entry": ["runTool"],
+      "on": { "TOOL_RESULT": "thinking" }
+    },
+    "closed": { "type": "final" }
+  }
+}

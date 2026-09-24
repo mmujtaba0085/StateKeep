@@ -88,5 +88,26 @@ class OfflineTest(unittest.TestCase):
         self.assertEqual(svc.handle("POST", "/statekeep/guards/big", bad, body, "/statekeep")[0], 401)
 
 
+    def test_retried_action_job_runs_once(self):
+        svc = ImplementationService(secret="sec")
+        calls = []
+
+        @svc.action("charge")
+        def charge(req):
+            calls.append(req["jobId"])
+            return {"send": {"type": "CHARGED", "n": len(calls)}}
+
+        def post(body):
+            ts = str(int(time.time() * 1000))
+            h = {"X-StateKeep-Timestamp": ts, "X-StateKeep-Signature": sign("sec", ts, body)}
+            return svc.handle("POST", "/statekeep/actions/charge", h, body, "/statekeep")[1]
+
+        first = post(b'{"jobId":"j1"}')
+        self.assertEqual(post(b'{"jobId":"j1"}'), first, "a retry replays the first result")
+        self.assertEqual(calls, ["j1"])
+        post(b'{"jobId":"j2"}')
+        self.assertEqual(calls, ["j1", "j2"])
+
+
 if __name__ == "__main__":
     unittest.main()

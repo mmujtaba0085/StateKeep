@@ -178,6 +178,7 @@ class ImplementationService:
         self.max_skew_ms = max_skew_ms
         self.guards: Dict[str, Callable[[dict], bool]] = {}
         self.actions: Dict[str, Callable[[dict], Optional[dict]]] = {}
+        self._done: Dict[object, dict] = {}   # jobId → first result (at-least-once dedupe)
 
     def guard(self, name: str):
         def deco(fn):
@@ -211,7 +212,18 @@ class ImplementationService:
             if kind == "guards" and name in self.guards:
                 return 200, {"result": bool(self.guards[name](req))}
             if kind == "actions" and name in self.actions:
-                return 200, self.actions[name](req) or {}
+                # Actions are delivered at least once; a retried job carries the same jobId.
+                # Replay the first result instead of repeating the side effect. (In memory:
+                # use your database for this if the service itself can restart mid-job.)
+                job = req.get("jobId")
+                if job is not None and job in self._done:
+                    return 200, self._done[job]
+                result = self.actions[name](req) or {}
+                if job is not None:
+                    self._done[job] = result
+                    if len(self._done) > 10_000:
+                        self._done.pop(next(iter(self._done)))
+                return 200, result
         return 404, {"error": "not found"}
 
     def serve(self, host: str = "127.0.0.1", port: int = 8088, prefix: str = "/statekeep"):
