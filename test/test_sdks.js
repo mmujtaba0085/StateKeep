@@ -20,7 +20,7 @@ const has = (cmd, args) => spawnSync(cmd, args, { stdio: 'ignore' }).status === 
 
 before(async () => {
   server = spawn(process.execPath, ['src/api/server.js'], { env, stdio: 'ignore' });
-  for (let i = 0; i < 60; i++) { try { if ((await fetch(`${BASE}/v1/health`)).ok) break; } catch {} await new Promise((r) => setTimeout(r, 250)); }
+  for (let i = 0; i < 60; i++) { try { if ((await fetch(`${BASE}/v1/health`)).ok) break; } catch {} await new Promise((r) => { setTimeout(r, 250); }); }
 });
 after(() => { server?.kill('SIGKILL'); rmSync(dir, { recursive: true, force: true }); });
 

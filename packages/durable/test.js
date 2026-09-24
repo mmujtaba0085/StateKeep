@@ -16,7 +16,7 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const PORT = 3098, URL_ = `http://127.0.0.1:${PORT}`;
 const dir = mkdtempSync(join(tmpdir(), 'sk-durable-'));
 let server;
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const sleep = (ms) => new Promise((r) => { setTimeout(r, ms); });
 
 // Side effects the workflows perform (to prove steps are not repeated on replay)
 const effects = [];

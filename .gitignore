@@ -67,3 +67,5 @@ docs/test-audit-report.md
 # Local scratch / release dry-run directory
 temp/
 node
+__pycache__/
+*.pyc

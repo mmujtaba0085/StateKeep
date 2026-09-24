@@ -9,6 +9,7 @@ import { spawn } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { isolatedPostgres } from './helpers/isolatedDb.js';
 
 const PY_PORT = 8097, PORT = 3095, BASE = `http://127.0.0.1:${PORT}`;
 const SECRET  = 'remote-test-secret';
@@ -28,7 +29,7 @@ const j = async (method, path, body) => {
   const r = await fetch(BASE + path, { method, headers: body ? { 'content-type': 'application/json' } : {}, body: body ? JSON.stringify(body) : undefined });
   return { status: r.status, body: await r.json().catch(() => ({})) };
 };
-const waitFor = async (fn, ms = 10_000) => { const t = Date.now(); while (Date.now() - t < ms) { if (await fn()) return true; await new Promise((r) => setTimeout(r, 200)); } return false; };
+const waitFor = async (fn, ms = 10_000) => { const t = Date.now(); while (Date.now() - t < ms) { if (await fn()) return true; await new Promise((r) => { setTimeout(r, 200); }); } return false; };
 
 const LOAN = {
   id: 'rl', initial: 'review',
@@ -41,6 +42,8 @@ const LOAN = {
 };
 
 before(async () => {
+  const pgUrl = await isolatedPostgres('remote');   // own database: no other server may take our jobs
+  if (pgUrl) env.STATEKEEP_DB_URL = pgUrl;
   py = spawn('python3', ['examples/remote-python/service.py'], { env: pyEnv, stdio: 'ignore' });
   await waitFor(async () => { try { return (await fetch(`http://127.0.0.1:${PY_PORT}/statekeep/_calls`)).ok; } catch { return false; } });
   server = spawn(process.execPath, ['src/api/server.js'], { env, stdio: 'ignore' });
@@ -68,7 +71,7 @@ test('remote guard decides the branch; remote action feeds its result back', asy
 
 test('service down: remote guard evaluates to false (fails closed)', async () => {
   py.kill('SIGKILL');
-  await new Promise((r) => setTimeout(r, 300));
+  await new Promise((r) => { setTimeout(r, 300); });
   const id = (await j('POST', '/v1/actors', { definitionId: 'rl-v1', initialContext: { amount: 1 } })).body.id;
   const r = await j('POST', `/v1/actors/${id}/event`, { type: 'APPROVE' });
   assert.equal(r.status, 200);

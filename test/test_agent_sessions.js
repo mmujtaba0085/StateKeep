@@ -10,6 +10,7 @@ import { spawn } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { isolatedPostgres } from './helpers/isolatedDb.js';
 
 const PY_PORT = 8099, PORT = 3097, BASE = `http://127.0.0.1:${PORT}`;
 const SECRET = 'agent-test-secret';
@@ -23,6 +24,7 @@ const env = {
   STATEKEEP_DB_PATH: join(dir, 'a.db'), STATEKEEP_ENCRYPTION_KEY: 'ef'.repeat(32),
   STATEKEEP_ADMIN_KEY: 'agent-admin-key-1234567890',
   STATEKEEP_REMOTE_URL: `http://127.0.0.1:${PY_PORT}/statekeep`, STATEKEEP_REMOTE_SECRET: SECRET,
+  STATEKEEP_ACTION_LEASE_MS: '1500',
   LOG_DIR: join(dir, 'logs'), STATEKEEP_DATA_DIR: join(dir, 'data'),
 };
 delete env.STATEKEEP_API_KEY;
@@ -31,7 +33,7 @@ const j = async (method, path, body) => {
   const r = await fetch(BASE + path, { method, headers: body ? { 'content-type': 'application/json' } : {}, body: body ? JSON.stringify(body) : undefined });
   return { status: r.status, body: await r.json().catch(() => ({})) };
 };
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const sleep = (ms) => new Promise((r) => { setTimeout(r, ms); });
 const waitFor = async (fn, ms = 15_000) => { const t = Date.now(); while (Date.now() - t < ms) { const v = await fn(); if (v) return v; await sleep(150); } return null; };
 const get = async (id) => (await j('GET', `/v1/actors/${id}`)).body;
 const until = async (id, pred, label) => {
@@ -50,7 +52,9 @@ async function startServer() {
 const newSession = async (definitionId = 'support-agent-v1') => (await j('POST', '/v1/actors', { definitionId })).body.id;
 
 before(async () => {
-  py = spawn('python3', ['examples/agent/agent_service.py'], { env: { ...process.env, PORT: String(PY_PORT), STATEKEEP_REMOTE_SECRET: SECRET, AGENT_LOG: LOG }, stdio: 'ignore' });
+  const pgUrl = await isolatedPostgres('agent');   // own database: no other server may take our jobs
+  if (pgUrl) env.STATEKEEP_DB_URL = pgUrl;
+  py = spawn('python3', ['examples/agent/agent_service.py'], { env: { ...process.env, PORT: String(PY_PORT), STATEKEEP_REMOTE_SECRET: SECRET, AGENT_LOG: LOG, AGENT_SLOW_ORDER: '31337' }, stdio: 'ignore' });
   await sleep(500);
   await startServer();
   migrator = spawn(process.execPath, ['src/workers/migrate-worker.js'], { env, stdio: 'ignore' });
@@ -102,6 +106,23 @@ test('a session waiting for approval survives a server crash', async () => {
   const done = await until(id, (a) => a.stateValue === 'idle', 'reply');
   assert.equal(done.context.lastReply, 'Done: refunded $120 on order 9001');
   assert.equal(refunds(id).length, 1);
+});
+
+test('server killed while a tool call is running: the tool call is picked up again', async () => {
+  const id = await newSession();
+  await say(id, 'where is order #31337');                    // this tool takes 2s
+  const toolCalls = () => (existsSync(LOG) ? readFileSync(LOG, 'utf8').trim().split('\n').map(JSON.parse) : [])
+    .filter((e) => e.kind === 'tool_call' && e.actorId === id);
+  assert.ok(await waitFor(async () => toolCalls().length === 1), 'the tool call has started');
+  server.kill('SIGKILL');                                   // dies while holding the job
+  await sleep(300);
+  await startServer();
+  const done = await until(id, (a) => a.stateValue === 'idle' && a.context.lastReply, 'reply after restart');
+  assert.equal(done.context.lastReply, 'Done: order 31337 is in transit');
+  const calls = toolCalls();
+  // The job was re-claimed after its lease ran out and sent again with the same jobId;
+  // the SDK answered the retry from its jobId cache when the first call had finished.
+  assert.ok(calls.every((c) => c.jobId === calls[0].jobId), 'retries carry the same jobId');
 });
 
 test('live sessions move to a new prompt + approval policy without losing their place', async () => {

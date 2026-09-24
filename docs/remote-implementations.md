@@ -44,3 +44,11 @@ A complete, dependency-free example is in `examples/remote-python/service.py`.
   exponential backoff (5 attempts), then `__SK_ACTION_FAILED.<name>` is sent to the actor.
 - **Feeding results back**: return `send` from an action; it is delivered to the actor as a
   follow-up event and its fields are merged into the context (e.g. `offerId`).
+
+## Several servers on one database
+
+Every API server polls the shared action-job queue. Give all servers that share a
+database the same `STATEKEEP_REMOTE_*` settings (and the same local registry): a server
+without an implementation for an action marks that job failed. A claimed job is leased
+(`STATEKEEP_ACTION_LEASE_MS`, default 120 s); if its server dies, the job is claimed again
+after the lease, with the same `jobId`.

@@ -582,8 +582,9 @@ describe('SC5-G: Concurrent events to 30 actors — state isolation guaranteed',
       )
     );
 
-    // All should return 200 (no crashes)
-    const errors = results.filter(r => r.status !== 200);
+    // All should return 200 (no crashes). Once one event wins the race into a final
+    // state, the rest are refused with 409 ACTOR_TERMINATED — that is correct, not a crash.
+    const errors = results.filter(r => r.status !== 200 && !(r.status === 409 && r.body?.code === 'ACTOR_TERMINATED'));
     assert.equal(errors.length, 0, `${errors.length} concurrent events errored`);
 
     // Final state should be one valid state (active or churned)

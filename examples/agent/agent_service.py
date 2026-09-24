@@ -20,6 +20,7 @@ import json
 import os
 import re
 import sys
+import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "sdks", "python"))
 from statekeep import ImplementationService  # noqa: E402
@@ -90,12 +91,15 @@ def call_model_v2(req):
 def run_tool(req):
     ctx = req.get("context") or {}
     tool, args = ctx.get("tool"), ctx.get("args") or {}
+    record("tool_call", actorId=req.get("actorId"), jobId=req.get("jobId"), tool=tool)
     if tool not in TOOLS:
         return {"send": {"type": "TOOL_RESULT", "toolResult": f"unknown tool {tool}"}}
     if tool == "issue_refund":
         record("refund", actorId=req.get("actorId"), jobId=req.get("jobId"), **args)
         result = f"refunded ${args.get('amount')} on order {args.get('orderId')}"
     else:
+        if args.get("orderId") == os.environ.get("AGENT_SLOW_ORDER"):   # test hook: a slow tool
+            time.sleep(2)
         result = f"order {args.get('orderId')} is in transit"
     return {"send": {"type": "TOOL_RESULT", "toolResult": result}}
 

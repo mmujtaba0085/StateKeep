@@ -1,7 +1,7 @@
 /** Loan scenario from the server tests, reproduced with plain XState actors. */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createMachine, assign } from 'xstate';
+import { createMachine } from 'xstate';
 import { createVersionRouter } from './index.js';
 
 const base = {

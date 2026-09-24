@@ -24,7 +24,7 @@ const V2 = { id: 'tk', initial: 'open', states: { open: { on: { WORK: 'working' 
 
 before(async () => {
   server = spawn(process.execPath, ['src/api/server.js'], { env, stdio: 'ignore' });
-  for (let i = 0; i < 60; i++) { try { if ((await fetch(`${BASE}/v1/health`)).ok) break; } catch {} await new Promise((r) => setTimeout(r, 250)); }
+  for (let i = 0; i < 60; i++) { try { if ((await fetch(`${BASE}/v1/health`)).ok) break; } catch {} await new Promise((r) => { setTimeout(r, 250); }); }
   await j('PUT', '/v1/definitions', { id: 'tk-v1', definition: V1 });
   for (const path of [[], ['WORK'], ['WORK', 'WAIT'], ['WORK', 'WAIT']]) {
     const id = (await j('POST', '/v1/actors', { definitionId: 'tk-v1' })).body.id;

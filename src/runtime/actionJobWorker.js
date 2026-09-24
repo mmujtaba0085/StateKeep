@@ -31,9 +31,13 @@ async function runLoop() {
   if (_stopped) return;
   try {
     const jobs = await claimActionJobs(50);
-    for (const job of jobs) {
-      await processJob(job);
-    }
+    // Concurrently: one slow action (a remote call waiting for its timeout) must not
+    // hold up every other actor's actions. Jobs of the same actor keep their order.
+    const byActor = new Map();
+    for (const job of jobs) byActor.set(job.actor_id, [...(byActor.get(job.actor_id) ?? []), job]);
+    await Promise.all([...byActor.values()].map(async (list) => {
+      for (const job of list) await processJob(job).catch((e) => console.error('[actionJobWorker] job error:', e.message));
+    }));
   } catch (err) {
     console.error('[actionJobWorker] loop error:', err.message);
   }

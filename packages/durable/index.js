@@ -199,7 +199,7 @@ export function createEngine({ url, apiKey, workflows, releases = [], fetch: f =
           } catch (err) {
             if (err instanceof Conflict || err instanceof MoveNow) throw err;
             lastErr = err;
-            if (attempt < retries) await new Promise((res) => setTimeout(res, Math.min(100 * 2 ** attempt, 2000)));
+            if (attempt < retries) await new Promise((res) => { setTimeout(res, Math.min(100 * 2 ** attempt, 2000)); });
           }
         }
         throw lastErr;

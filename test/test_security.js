@@ -53,7 +53,7 @@ before(async () => {
   server = spawn(process.execPath, ['src/api/server.js'], { env, stdio: 'ignore' });
   for (let i = 0; i < 60; i++) {
     try { if ((await fetch(`${BASE}/v1/health`)).ok) break; } catch {}
-    await new Promise((r) => setTimeout(r, 250));
+    await new Promise((r) => { setTimeout(r, 250); });
   }
   scheduler = spawn(process.execPath, ['src/workers/scheduler-worker.js'], { env, stdio: 'ignore' });
   const d = await req('PUT', '/v1/definitions', { body: { id: 'sec-v1', definition: { id: 'sec', initial: 'a', states: { a: { on: { T: 'b' } }, b: { on: { T: 'a' } } } } } });
@@ -146,7 +146,7 @@ test('a fired scheduled event is visible through the API and cannot be undone', 
   assert.equal((await req('POST', `/v1/actors/${id}/schedule`, { body: { type: 'EXPIRE', fireAt: Date.now() + 300 } })).status, 201);
   let state;
   for (let i = 0; i < 40 && state !== 'expired'; i++) {
-    await new Promise((r) => setTimeout(r, 250));
+    await new Promise((r) => { setTimeout(r, 250); });
     state = (await req('GET', `/v1/actors/${id}`)).body.stateValue;
   }
   assert.equal(state, 'expired', 'API must show the scheduler-fired transition');

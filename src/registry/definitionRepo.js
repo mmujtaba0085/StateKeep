@@ -38,7 +38,7 @@ function rowToDefinition(row) {
   if (!row) return null;
   let compiledJson = null;
   if (row.compiled_json) {
-    try { compiledJson = JSON.parse(row.compiled_json); }
+    try { compiledJson = JSON.parse(Buffer.isBuffer(row.compiled_json) ? row.compiled_json.toString('utf8') : row.compiled_json); }
     catch (e) {
       console.warn(`[StateKeep] compiled_json parse error for definition ${row.id}:`, e.message);
     }
@@ -76,7 +76,9 @@ export async function createDefinition({ id, parentId, definitionJson, compiledJ
     await query(
       `INSERT INTO definitions (id, parent_id, machine_id, definition_json, deployed_at, status, created_at, compiled_json)
        VALUES ($1,$2,$3,$4,$5,'active',$6,$7)`,
-      [id, parentId ?? null, machineId, defJson, deployedAt, createdAt, compiledJson ? JSON.stringify(compiledJson) : null]
+      // BYTEA columns: pass Buffers. A plain string is parsed as bytea *escape* text, so any
+      // backslash in the JSON (e.g. an escaped quote inside a guard expression) fails with 22P02.
+      [id, parentId ?? null, machineId, Buffer.from(defJson, 'utf8'), deployedAt, createdAt, compiledJson ? Buffer.from(JSON.stringify(compiledJson), 'utf8') : null]
     );
     return machineId;
   }
@@ -130,7 +132,7 @@ export async function findDefinitionById(id) {
 export async function updateDefinitionJson(id, definitionJson) {
   if (isPostgres) {
     const { query } = await import('./db-postgres.js');
-    await query(`UPDATE definitions SET definition_json=$1 WHERE id=$2`, [JSON.stringify(definitionJson), id]);
+    await query(`UPDATE definitions SET definition_json=$1 WHERE id=$2`, [Buffer.from(JSON.stringify(definitionJson), 'utf8'), id]);
     return;
   }
   getStmts().updateJson.run({ id, definition_json: JSON.stringify(definitionJson) });
@@ -140,7 +142,7 @@ export async function updateCompiledJson(definitionId, compiledJson) {
   if (isPostgres) {
     const { query } = await import('./db-postgres.js');
     await query(`UPDATE definitions SET compiled_json = $1 WHERE id = $2`,
-      [JSON.stringify(compiledJson), definitionId]);
+      [Buffer.from(JSON.stringify(compiledJson), 'utf8'), definitionId]);
     return;
   }
   getStmts().updateCompiledJson.run({ id: definitionId, compiled_json: JSON.stringify(compiledJson) });

@@ -24,12 +24,12 @@ function startNode(name, port) {
   nodes[name] = { proc: spawn(process.execPath, ['src/api/server.js'], { env, stdio: 'ignore' }), base: `http://127.0.0.1:${port}` };
   return nodes[name];
 }
-const up = async (n) => { for (let i = 0; i < 80; i++) { try { if ((await fetch(`${n.base}/v1/health`)).ok) return; } catch {} await new Promise((r) => setTimeout(r, 250)); } throw new Error('node did not start'); };
+const up = async (n) => { for (let i = 0; i < 80; i++) { try { if ((await fetch(`${n.base}/v1/health`)).ok) return; } catch {} await new Promise((r) => { setTimeout(r, 250); }); } throw new Error('node did not start'); };
 const call = async (n, method, path, body) => {
   const r = await fetch(n.base + path, { method, headers: body ? { 'content-type': 'application/json' } : {}, body: body ? JSON.stringify(body) : undefined });
   return { status: r.status, servedBy: r.headers.get('x-statekeep-served-by'), body: await r.json().catch(() => ({})) };
 };
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const sleep = (ms) => new Promise((r) => { setTimeout(r, ms); });
 
 before(async () => {
   if (skip) return;

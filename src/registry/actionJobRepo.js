@@ -24,31 +24,40 @@ export async function insertActionJob({ actorId, actionName, context, event, max
   return id;
 }
 
+// A claimed job is leased: status 'running' with next_retry_at = lease expiry. If the
+// server holding it dies (kill -9, OOM, deploy), the lease runs out and another poll
+// claims it again — before this, such a job stayed 'running' forever and its action
+// never ran. Actions are therefore at-least-once (remote calls carry the job id).
+export const ACTION_JOB_LEASE_MS = parseInt(process.env.STATEKEEP_ACTION_LEASE_MS ?? '120000', 10);
+
 export async function claimActionJobs(batchSize = 50) {
+  const now = Date.now();
+  const leaseUntil = now + ACTION_JOB_LEASE_MS;
   if (isPostgres) {
     const { queryAll } = await import('./db-postgres.js');
     return queryAll(
       `WITH claimed AS (
          SELECT id FROM action_jobs
-         WHERE status='pending' AND next_retry_at <= $1
+         WHERE status IN ('pending','running') AND next_retry_at <= $1
+         ORDER BY next_retry_at
          LIMIT $2
          FOR UPDATE SKIP LOCKED
        )
-       UPDATE action_jobs SET status='running'
+       UPDATE action_jobs SET status='running', next_retry_at=$3
        WHERE id IN (SELECT id FROM claimed)
        RETURNING *`,
-      [Date.now(), batchSize]
+      [now, batchSize, leaseUntil]
     );
   }
   const db = getDb();
-  const rows = db.prepare(
-    `SELECT * FROM action_jobs WHERE status='pending' AND next_retry_at <= ? LIMIT ?`
-  ).all(Date.now(), batchSize);
-  if (rows.length > 0) {
-    const update = db.prepare(`UPDATE action_jobs SET status='running' WHERE id=?`);
-    db.transaction(() => rows.forEach(r => update.run(r.id)))();
-  }
-  return rows;
+  return db.transaction(() => {
+    const rows = db.prepare(
+      `SELECT * FROM action_jobs WHERE status IN ('pending','running') AND next_retry_at <= ? ORDER BY next_retry_at LIMIT ?`
+    ).all(now, batchSize);
+    const update = db.prepare(`UPDATE action_jobs SET status='running', next_retry_at=? WHERE id=?`);
+    rows.forEach((r) => update.run(leaseUntil, r.id));
+    return rows;
+  })();
 }
 
 export async function markActionJobDone(id) {
