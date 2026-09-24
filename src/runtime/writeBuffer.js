@@ -32,6 +32,8 @@ class WriteBuffer {
     this._dbOverride        = _dbOverride;
     this._flushing          = false;
     this._flushChain        = Promise.resolve();   // Postgres: serialise concurrent flush cycles
+    this._durableWaiters    = [];                  // callers awaiting group commit (see durable())
+    this._durableScheduled  = false;
     this._timer             = setInterval(() => { this.flush().catch(() => {}); }, FLUSH_MS).unref();
   }
 
@@ -74,6 +76,28 @@ class WriteBuffer {
   queueScheduledCreate({ actorId, eventType, fireAt, payload }) {
     this._scheduledCreates.push({ actorId, eventType, fireAt,
       payload: JSON.stringify(payload) });
+  }
+
+  /**
+   * Group commit. Resolves once everything queued before this call has been
+   * committed to the database. Concurrent callers in the same tick share one
+   * flush (one transaction), so throughput stays close to the buffered mode
+   * while an HTTP 200 now means "durably saved", not "saved within 50ms".
+   */
+  durable() {
+    return new Promise((resolve, reject) => {
+      this._durableWaiters.push({ resolve, reject });
+      if (this._durableScheduled) return;
+      this._durableScheduled = true;
+      setImmediate(() => {
+        this._durableScheduled = false;
+        const waiters = this._durableWaiters.splice(0);
+        this.flush().then(
+          () => { for (const w of waiters) w.resolve(); },
+          (err) => { for (const w of waiters) w.reject(err); },
+        );
+      });
+    });
   }
 
   hasPendingEvent(actorId, idempotencyKey) {
@@ -122,7 +146,9 @@ class WriteBuffer {
 
     if (this._states.size === 0 && this._events.length === 0 && this._decisions.length === 0
         && scheduledCancels.length === 0 && scheduledCreates.length === 0) {
-      return Promise.resolve();
+      // Nothing new to write — but on Postgres an earlier flush may still be in flight,
+      // so wait for it rather than reporting "durable" too early.
+      return isPostgres ? this._flushChain : Promise.resolve();
     }
 
     const rows      = [...this._states.values()];
@@ -136,7 +162,9 @@ class WriteBuffer {
 
     if (rows.length === 0 && events.length === 0 && decisions.length === 0
         && scheduledCancels.length === 0 && scheduledCreates.length === 0) {
-      return Promise.resolve();
+      // Nothing new to write — but on Postgres an earlier flush may still be in flight,
+      // so wait for it rather than reporting "durable" too early.
+      return isPostgres ? this._flushChain : Promise.resolve();
     }
 
     if (isPostgres) {

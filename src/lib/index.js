@@ -98,7 +98,7 @@ export async function createStateKeep({
       return result;
     },
 
-    async sendEvent(actorId, event, { durability = 'buffered' } = {}) {
+    async sendEvent(actorId, event, { durability } = {}) {
       if (!actorId) throw new Error('actorId is required');
       const clockTick = Number(getEngine().clockTick());
       return _sendEvent(actorId, event, clockTick, { durability });

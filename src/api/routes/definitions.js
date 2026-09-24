@@ -281,6 +281,21 @@ export async function definitionRoutes(fastify) {
       });
     }
 
+    // historyPath is matched against an actor's history from its FIRST event (it is a
+    // prefix, not a substring). A path like ['REQUEST_INFO','RESUBMIT'] on a machine that
+    // starts with SUBMIT can never match anyone, and used to deploy "successfully" with
+    // 0 affected actors. Reject it when the parent is simple enough to check reliably.
+    if (hasHistoryPath) {
+      const problem = checkHistoryPathWalkable(parentDefForTargeting?.definitionJson, historyPath);
+      if (problem) {
+        return reply.code(400).send({
+          error: `historyPath can never match: ${problem}. historyPath must list events from the ` +
+                 `actor's first event onward (it is matched as a prefix of the actor's history).`,
+          code:  'HISTORY_PATH_UNREACHABLE',
+        });
+      }
+    }
+
     // Actors in states that are KEYS of stateMapping have a forward migration path
     // and must not be considered stranded. Compute this once for all stranded checks.
     const newStateNames = Object.keys(definition.states ?? {});
@@ -994,4 +1009,33 @@ export async function definitionRoutes(fastify) {
     const definitions = defs.map(d => ({ ...d, _actorCount: countByDef[d.id] ?? 0 }));
     return reply.send({ definitions, count: definitions.length });
   });
+}
+
+/**
+ * Walk `historyPath` through a flat machine from its initial state.
+ * Returns a human-readable problem string, or null if the path is walkable or the
+ * machine is too dynamic to check (nested/parallel states, guards, timers, always).
+ */
+export function checkHistoryPathWalkable(def, historyPath) {
+  if (!def || typeof def !== 'object' || !def.states || typeof def.initial !== 'string') return null;
+  for (const s of Object.values(def.states)) {
+    if (!s || typeof s !== 'object') return null;
+    if (s.states || s.type === 'parallel' || s.after || s.always) return null;
+    for (const t of Object.values(s.on ?? {})) {
+      if (Array.isArray(t) || (t && typeof t === 'object' && (t.guard || t.cond))) return null;
+    }
+  }
+  let state = def.initial;
+  for (let i = 0; i < historyPath.length; i++) {
+    const ev = historyPath[i];
+    const t  = def.states[state]?.on?.[ev];
+    const target = typeof t === 'string' ? t : t?.target;
+    if (!target) {
+      return `event '${ev}' (position ${i + 1}) is not accepted in state '${state}'` +
+             (i === 0 ? ` (the machine's initial state)` : '');
+    }
+    state = String(target).replace(/^\./, '').replace(/^#[^.]+\./, '');
+    if (!def.states[state]) return null; // unusual target syntax — don't guess
+  }
+  return null;
 }

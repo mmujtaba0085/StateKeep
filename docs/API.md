@@ -174,7 +174,7 @@ Deploy a new machine definition or update an existing one. Idempotent: re-deploy
 | `id` | string | Yes | Unique version identifier |
 | `definition` | object | Yes | XState v5 machine config (JSON only — no functions) |
 | `parentId` | string | No | Previous version to migrate actors from |
-| `historyPath` | string[] | No | Ordered event sequence; only actors whose history contains this path are eligible for migration. Omit or `[]` for wildcard (all actors) |
+| `historyPath` | string[] | No | Ordered event sequence starting from the actor's **first** event (a prefix, not a substring). Actors currently at exactly this point migrate on deploy; actors that reach it later migrate on their next event. Actors already past it are not moved retroactively. Omit or `[]` for wildcard (all actors) |
 | `stateMapping` | object | No | `{ oldStateName: newStateName }` — remap actors in removed/renamed states |
 | `contextTransform` | object | No | `{ "new.path": "old.path" }` — dot-notation field renames applied to actor context during migration |
 | `confirmToken` | string | No | UUID from a prior `requires_confirmation` response |

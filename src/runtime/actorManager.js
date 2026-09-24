@@ -305,8 +305,14 @@ export async function spawnActor({ definitionId, initialContext, logicalStartTic
  *   When provided, queued to the write buffer alongside the state update so
  *   both land in the same 50ms flush transaction.
  */
+// Default durability for events. 'group' (default): the call resolves only after the
+// state + event rows are committed (group commit, shared transaction per tick).
+// 'buffered': legacy behaviour — returns before the write, up to FLUSH_MS of
+// acknowledged events can be lost on a crash. 'sync': flush alone, per event.
+const DEFAULT_DURABILITY = process.env.STATEKEEP_DURABILITY ?? 'group';
+
 export async function sendEvent(actorId, event, tick, opts = {}) {
-  const { eventData, priority = 'normal', durability = 'buffered' } = opts;
+  const { eventData, priority = 'normal', durability = DEFAULT_DURABILITY } = opts;
   const pool = getWorkerPool();
 
   // Load from hot registry or SQLite.
@@ -659,6 +665,9 @@ export async function sendEvent(actorId, event, tick, opts = {}) {
     await buf.flushActor(actorId);
     hotRegistry.delete(actorId);
   }
+
+  // Group commit: don't acknowledge (or fire webhooks for) a transition that isn't on disk yet.
+  if (durability === 'group') await buf.durable();
 
   // Emit webhook events (never throws — emitWebhookEvent swallows errors)
   emitWebhookEvent('state.changed', {

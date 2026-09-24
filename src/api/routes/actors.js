@@ -83,6 +83,7 @@ export async function actorRoutes(fastify) {
         processed_at:    Date.now(),
         idempotency_key: null,
       });
+      if ((process.env.STATEKEEP_DURABILITY ?? 'group') !== 'buffered') await getWriteBuffer().durable();
 
       recordLatency(Date.now() - t0);
       return reply.code(201).send({

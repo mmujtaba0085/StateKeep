@@ -50,9 +50,15 @@ async function loadEngine() {
     return toPtr(new TextEncoder().encode(str + '\0'));
   }
 
+  // JS-side count of registered change-points. actorManager's inline migration
+  // check fast-exits when this is 0; without it the check was skipped forever.
+  let changepoints = 0;
+
   return {
     available: true,
     mode: 'wasm',
+
+    changepointCount() { return changepoints; },
 
     clockTick() { return wasm._apv_clock_tick(reg); },
     fnv1aInit() { return wasm._apv_fnv1a_init(); },
@@ -67,7 +73,7 @@ async function loadEngine() {
 
     registerChangepoint(tStar, pH, ref, cid) {
       const p = strPtr(cid);
-      try   { return wasm._apv_register_changepoint(reg, BigInt(tStar), BigInt(pH), BigInt(ref), p); }
+      try   { const rc = wasm._apv_register_changepoint(reg, BigInt(tStar), BigInt(pH), BigInt(ref), p); if (rc === 0) changepoints++; return rc; }
       finally { wasm._free(p); }
     },
 
@@ -88,7 +94,7 @@ async function loadEngine() {
     registerChangepointParallel(tStar, rHashes, ref, cid) {
       const rp = toPtr(regionHashesToBuffer(rHashes));
       const sp = strPtr(cid);
-      try   { return wasm._apv_register_changepoint_parallel(reg, BigInt(tStar), rp, rHashes.length, BigInt(ref), sp); }
+      try   { const rc = wasm._apv_register_changepoint_parallel(reg, BigInt(tStar), rp, rHashes.length, BigInt(ref), sp); if (rc === 0) changepoints++; return rc; }
       finally { wasm._free(rp); wasm._free(sp); }
     },
 
