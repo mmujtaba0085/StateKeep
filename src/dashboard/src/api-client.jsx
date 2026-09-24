@@ -32,14 +32,26 @@ function extractVersion(definitionId) {
 
 const Api = (() => {
   const self = {
-    async request(method, path, body, opts = {}) {
+    async request(method, path, body, opts = {}, _retried = false) {
       const headers = { 'Content-Type': 'application/json' };
       if (opts.priority) headers['X-Priority'] = opts.priority;
+      // API key (only needed when the server sets STATEKEEP_API_KEY). Kept for this tab only.
+      let key = null;
+      try { key = sessionStorage.getItem('statekeep_api_key'); } catch {}
+      if (key) headers['X-API-Key'] = key;
       const res = await fetch(path, {
         method,
         headers,
         body: body !== undefined ? JSON.stringify(body) : undefined,
       });
+      if ((res.status === 401 || res.status === 403) && !_retried && path.startsWith('/v1/')
+          && !path.startsWith('/v1/admin/') && !path.startsWith('/v1/internal/')) {
+        const entered = window.prompt('This StateKeep server requires an API key:');
+        if (entered) {
+          try { sessionStorage.setItem('statekeep_api_key', entered.trim()); } catch {}
+          return self.request(method, path, body, opts, true);
+        }
+      }
       if (!res.ok) {
         const text = await res.text().catch(() => '');
         let msg = 'HTTP ' + res.status;

@@ -287,15 +287,9 @@ node --env-file=.env src/workers/metrics-worker.js &
 
 **Get your API key:**
 
-Set `STATEKEEP_API_KEY=sk_live_<your-key>` in `.env` before the first start — the server seeds it into the database automatically. Or, after the server has started once, generate a new key with:
+Set `STATEKEEP_API_KEY` in `.env` to any long random string (e.g. `sk_live_$(openssl rand -hex 24)`). Every API call must then send it in the `x-api-key` header; only `GET /v1/health` is public. Admin routes (`/v1/admin/*`) need `x-admin-key` with `STATEKEEP_ADMIN_KEY`.
 
-```bash
-node --env-file=.env gen-key.mjs my-key
-# → API key "my-key" created (save this — shown once):
-# → sk_live_...
-```
-
-Use the key in the `x-api-key` header for all API calls.
+If `STATEKEEP_API_KEY` is **not** set, the API runs unauthenticated and therefore only listens on `127.0.0.1`. To expose an unauthenticated API anyway (e.g. behind a reverse proxy that does its own auth), set `STATEKEEP_ALLOW_UNAUTHENTICATED=true`. In Docker, set `STATEKEEP_API_KEY` or the container will not be reachable from outside.
 
 **Deploy a definition:**
 

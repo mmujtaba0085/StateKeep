@@ -16,6 +16,7 @@
  */
 
 import { createHmac } from 'crypto';
+import { assertSafeWebhookUrl } from '../api/lib/urlGuard.js';
 import { getDb, decrypt, isPostgres } from '../registry/db.js';
 import { startHeartbeat } from './heartbeat.js';
 import { engineReady } from '../ffi/engine.js';
@@ -96,8 +97,11 @@ async function deliverOne(delivery) {
     const controller = new AbortController();
     const timer      = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
+    // Re-check at delivery time: DNS may now point somewhere internal.
+    await assertSafeWebhookUrl(webhook.url);
     const res = await fetch(webhook.url, {
       method:  'POST',
+      redirect: 'manual',            // never follow a redirect into the internal network
       headers: {
         'Content-Type':          'application/json',
         'X-StateKeep-Signature': `sha256=${sig}`,

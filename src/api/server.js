@@ -38,6 +38,13 @@ import { webhookRoutes } from './routes/webhooks.js';
 import { adminRoutes } from './routes/admin.js';
 import { internalRoutes } from './routes/internal.js';
 import { websocketRoutes } from './websocket.js';
+import { registerSecurity, checkStartupSecurity, securityConfig } from './security.js';
+
+const _securityProblem = checkStartupSecurity();
+if (_securityProblem) {
+  console.error(`[server] Refusing to start: ${_securityProblem}`);
+  process.exit(1);
+}
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT      = parseInt(process.env.PORT ?? '3001', 10);
@@ -111,6 +118,9 @@ if (process.env.STATEKEEP_RATE_LIMIT !== 'false') {
     }),
   });
 }
+
+// ── Authentication (API key / admin key) — must run before any route handler ──
+registerSecurity(fastify);
 
 // ── x-request-id: echo or generate, attach to logger context, set response header ──
 fastify.addHook('onRequest', async (req, reply) => {
@@ -272,8 +282,14 @@ startActionJobWorker(
 );
 
 try {
-  await fastify.listen({ port: PORT, host: '0.0.0.0' });
-  fastify.log.info(`StateKeep API listening on port ${PORT}`);
+  const { host, apiKey, allowOpen } = securityConfig();
+  await fastify.listen({ port: PORT, host });
+  fastify.log.info(`StateKeep API listening on ${host}:${PORT}`);
+  if (!apiKey) {
+    fastify.log.warn(allowOpen
+      ? '[server] STATEKEEP_API_KEY is not set and STATEKEEP_ALLOW_UNAUTHENTICATED=true — the API accepts unauthenticated requests from the network.'
+      : '[server] STATEKEEP_API_KEY is not set — API is unauthenticated and bound to loopback only. Set STATEKEEP_API_KEY to expose it.');
+  }
 } catch (err) {
   fastify.log.error(err);
   process.exit(1);

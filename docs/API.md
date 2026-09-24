@@ -135,15 +135,15 @@ statekeep_api_latency_p99_ms 12
 
 ## 2. Authentication
 
-All API requests (except `/v1/health`) require an `x-api-key` header containing the key from your `.env` file (`STATEKEEP_API_KEY`).
+When `STATEKEEP_API_KEY` is set, all API requests (except `GET /v1/health`) require an `x-api-key` header with that value — missing key → `401`, wrong key → `403`. WebSocket streams may pass it as `?api_key=` instead. When it is not set, the server is unauthenticated and binds to `127.0.0.1` only (override with `STATEKEEP_ALLOW_UNAUTHENTICATED=true`).
 
 ```http
 x-api-key: sk_live_...
 ```
 
-Admin-only routes (`/v1/admin/*`) require `x-admin-key` with `STATEKEEP_ADMIN_KEY` instead.
+Admin-only routes (`/v1/admin/*`, `/v1/internal/*`) require `x-admin-key` with `STATEKEEP_ADMIN_KEY`. If no admin key is configured they are reachable from loopback only.
 
-The dashboard is always accessible when self-hosted — no separate login is needed.
+The dashboard asks for the API key on first use and keeps it for the browser tab.
 
 ---
 

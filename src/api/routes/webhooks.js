@@ -16,10 +16,8 @@
 import { getDb, encrypt, isPostgres } from '../../registry/db.js';
 import { randomUUID } from 'crypto';
 
-// In test mode allow http://localhost and http://127.0.0.1 for webhook delivery targets.
-const isTestLocalhost = (url) =>
-  process.env.NODE_ENV === 'test' &&
-  (url.startsWith('http://localhost') || url.startsWith('http://127.0.0.1'));
+// URL policy (https only, public addresses only; test-mode localhost exception) lives in urlGuard.
+import { assertSafeWebhookUrl } from '../lib/urlGuard.js';
 
 const KNOWN_EVENT_TYPES = new Set([
   'state.changed',
@@ -60,9 +58,8 @@ export async function webhookRoutes(fastify) {
   }, async (request, reply) => {
     const { url, secret, events } = request.body;
 
-    if (!url.startsWith('https://') && !isTestLocalhost(url)) {
-      return reply.code(400).send({ error: 'Webhook URL must use HTTPS (http:// is not allowed)' });
-    }
+    try { await assertSafeWebhookUrl(url); }
+    catch (err) { return reply.code(400).send({ error: err.message }); }
 
     const unknown = events.filter(e => !KNOWN_EVENT_TYPES.has(e));
     if (unknown.length > 0) {
@@ -163,8 +160,9 @@ export async function webhookRoutes(fastify) {
 
     const { url, events, active } = request.body ?? {};
 
-    if (url !== undefined && !url.startsWith('https://') && !isTestLocalhost(url)) {
-      return reply.code(400).send({ error: 'Webhook URL must use HTTPS' });
+    if (url !== undefined) {
+      try { await assertSafeWebhookUrl(url); }
+      catch (err) { return reply.code(400).send({ error: err.message }); }
     }
     if (events !== undefined) {
       const unknown = events.filter(e => !KNOWN_EVENT_TYPES.has(e));
