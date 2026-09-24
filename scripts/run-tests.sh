@@ -243,6 +243,7 @@ LEGACY_FILES=(
   test/test_sdks.js
   test/test_agent_sessions.js
   packages/xstate-apv/test.js
+  packages/durable/test.js
 )
 
 for f in "${LEGACY_FILES[@]}"; do
