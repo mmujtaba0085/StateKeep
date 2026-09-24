@@ -9,10 +9,11 @@
  *   expectDone: false + machine IS  done → fail
  */
 
+import { withConditions } from '../../runtime/conditionGuards.js';
 import { runScenario as _runScenario, computeInitialSnapshot } from '../../runtime/machineRuntime.js';
 import { analyseDefinition }                                    from '../lib/staticAnalysis.js';
 
-const _emptyRegistry = { guards: {}, actions: {}, services: {} };
+const _emptyRegistry = withConditions({ guards: {}, actions: {}, services: {} });
 
 /**
  * Wrap machineRuntime.runScenario to enforce expectDone semantics.

@@ -6,6 +6,7 @@
 export { processEvent, computeInitialSnapshot, stateKeyOf, keyToStateValue } from './interpreter.js';
 export { compileMachine } from './definitionCompiler.js';
 
+import { withConditions } from './conditionGuards.js';
 import { stateKeyOf }                             from './interpreter.js';
 import { computeInitialSnapshot, processEvent }   from './interpreter.js';
 
@@ -54,7 +55,7 @@ export function restoreSnapshot(compiledJson, landingStateValue, transformedCont
  */
 export function runScenario(compiledJson, definitionJson, scenario) {
   const { name = '(unnamed)', initialContext = {}, events = [], expectedStates = [] } = scenario;
-  const emptyRegistry = { guards: {}, actions: {}, services: {} };
+  const emptyRegistry = withConditions({ guards: {}, actions: {}, services: {} });
   const steps = [];
 
   const snapResult = computeInitialSnapshot(compiledJson, definitionJson, initialContext, emptyRegistry);

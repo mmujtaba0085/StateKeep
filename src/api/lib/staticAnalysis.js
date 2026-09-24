@@ -22,9 +22,10 @@
  * XState-level errors always take priority over static checks.
  */
 
+import { withConditions } from '../../runtime/conditionGuards.js';
 import { compileMachine, computeInitialSnapshot } from '../../runtime/machineRuntime.js';
 
-const _emptyRegistry = { guards: {}, actions: {}, services: {} };
+const _emptyRegistry = withConditions({ guards: {}, actions: {}, services: {} });
 
 // ── Public API ────────────────────────────────────────────────────────────────
 

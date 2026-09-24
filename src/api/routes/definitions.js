@@ -40,6 +40,8 @@ import {
 } from '../../registry/definitionRepo.js';
 import { compileMachine } from '../../runtime/definitionCompiler.js';
 import { validateDefinitionAgainstRegistry, getGlobalRegistry } from '../../runtime/implementationRegistry.js';
+import { withRemote, remoteEnabled, refreshRemoteManifest } from '../../runtime/remoteImplementations.js';
+import { conditionGuard } from '../../runtime/conditionGuards.js';
 import {
   findDeploymentsByDefinition,
   createDeployment,
@@ -466,7 +468,22 @@ export async function definitionRoutes(fastify) {
     // Skipped when no registry is loaded (e.g. tests that call the API without
     // a setup file) so existing workflows without a registry are unaffected.
     let _precompiledResult = null;
-    const _globalRegistry = getGlobalRegistry();
+    // With a remote implementation service configured, validate against local + remote
+    // (manifest) names — so remote-only setups also get typo checks at deploy time.
+    if (remoteEnabled()) await refreshRemoteManifest({ force: true });
+    const _globalRegistry = (getGlobalRegistry() || remoteEnabled())
+      ? withRemote(getGlobalRegistry() ?? { guards: {}, actions: {}, services: {} })
+      : null;
+    // `cond:` guards are checked even without a registry: a malformed expression would
+    // otherwise silently evaluate to false forever.
+    {
+      const bad = [...JSON.stringify(definitionToStore).matchAll(/"(cond:(?:[^"\\]|\\.)*)"/g)]
+        .map((m) => JSON.parse(`"${m[1]}"`))
+        .filter((g) => !conditionGuard(g));
+      if (bad.length > 0) {
+        return reply.code(422).send({ error: `Invalid cond: guard expression(s): ${bad.join(', ')}`, missing: bad });
+      }
+    }
     if (_globalRegistry) {
       try {
         const compileResult = compileMachine(definitionToStore);

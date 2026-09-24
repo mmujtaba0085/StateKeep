@@ -1,0 +1,95 @@
+name: StateKeep migration plan
+description: >
+  Comments on a pull request with what releasing the changed StateKeep definition files
+  would do to the actors running in production (who moves, who would be stranded),
+  like `terraform plan`. Nothing is deployed.
+branding: { icon: git-pull-request, color: blue }
+
+inputs:
+  statekeep-url:
+    description: Base URL of the StateKeep server to plan against (read-only calls)
+    required: true
+  api-key:
+    description: StateKeep API key (store it as a secret)
+    required: false
+    default: ''
+  files:
+    description: >
+      Definition files to plan (space-separated). Default: files matching
+      `*.definition.json` changed in this pull request.
+    required: false
+    default: ''
+  fail-on:
+    description: >
+      "stranded" (default) fails the check when a release would strand actors; "none" only reports
+    required: false
+    default: stranded
+  comment:
+    description: "Post or update a pull-request comment (needs the pull-requests: write permission)"
+    required: false
+    default: 'true'
+
+outputs:
+  report:
+    description: Path of the Markdown report
+    value: ${{ steps.plan.outputs.report }}
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@v4
+      with: { node-version: '22' }
+
+    - id: files
+      shell: bash
+      env:
+        INPUT_FILES: ${{ inputs.files }}
+        BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      run: |
+        if [ -n "$INPUT_FILES" ]; then
+          echo "list=$INPUT_FILES" >> "$GITHUB_OUTPUT"
+        else
+          git fetch --no-tags --depth=1 origin "$BASE_SHA" 2>/dev/null || true
+          list=$(git diff --name-only --diff-filter=AM "$BASE_SHA" HEAD -- '*.definition.json' | tr '\n' ' ')
+          echo "list=$list" >> "$GITHUB_OUTPUT"
+        fi
+
+    - id: plan
+      if: steps.files.outputs.list != ''
+      shell: bash
+      env:
+        STATEKEEP_URL: ${{ inputs.statekeep-url }}
+        STATEKEEP_API_KEY: ${{ inputs.api-key }}
+      run: |
+        report="$RUNNER_TEMP/statekeep-plan.md"
+        set +e
+        node "$GITHUB_ACTION_PATH/../../../src/cli/index.js" plan ${{ steps.files.outputs.list }} \
+          --out "$report" --fail-on "${{ inputs.fail-on }}" > /dev/null
+        code=$?
+        set -e
+        echo "report=$report" >> "$GITHUB_OUTPUT"
+        echo "code=$code" >> "$GITHUB_OUTPUT"
+        cat "$report" >> "$GITHUB_STEP_SUMMARY"
+
+    - if: steps.files.outputs.list != '' && inputs.comment == 'true' && github.event_name == 'pull_request'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        REPO: ${{ github.repository }}
+        PR: ${{ github.event.pull_request.number }}
+        REPORT: ${{ steps.plan.outputs.report }}
+      run: |
+        # Update the previous plan comment instead of adding a new one on every push
+        existing=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
+          --jq '.[] | select(.body | startswith("<!-- statekeep-migration-plan -->")) | .id' | head -1)
+        if [ -n "$existing" ]; then
+          gh api -X PATCH "repos/$REPO/issues/comments/$existing" -F body=@"$REPORT" > /dev/null
+        else
+          gh api -X POST "repos/$REPO/issues/$PR/comments" -F body=@"$REPORT" > /dev/null
+        fi
+
+    - if: steps.plan.outputs.code != '' && steps.plan.outputs.code != '0'
+      shell: bash
+      run: |
+        echo "::error::StateKeep migration plan: release would strand running actors or failed (exit ${{ steps.plan.outputs.code }}). See the report."
+        exit 1

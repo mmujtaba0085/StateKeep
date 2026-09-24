@@ -237,6 +237,11 @@ LEGACY_FILES=(
   test/test_concurrent_events.js
   test/test_migration_orchestration.js
   test/test_security.js
+  test/test_remote.js
+  test/test_importers.js
+  test/test_plan.js
+  test/test_sdks.js
+  packages/xstate-apv/test.js
 )
 
 for f in "${LEGACY_FILES[@]}"; do

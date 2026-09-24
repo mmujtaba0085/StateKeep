@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL" xmlns:camunda="http://camunda.org/schema/1.0/bpmn" id="Defs_1">
+  <bpmn:message id="Msg_docs" name="DOCUMENTS_RECEIVED"/>
+  <bpmn:process id="insurance_claim" name="insurance claim" isExecutable="true">
+    <bpmn:startEvent id="Start"/>
+    <bpmn:sequenceFlow id="f1" sourceRef="Start" targetRef="Assess"/>
+    <bpmn:serviceTask id="Assess" name="Assess claim" camunda:type="assessClaim"/>
+    <bpmn:sequenceFlow id="f2" sourceRef="Assess" targetRef="Gate"/>
+    <bpmn:exclusiveGateway id="Gate" default="f_review"/>
+    <bpmn:sequenceFlow id="f_auto" sourceRef="Gate" targetRef="Pay">
+      <bpmn:conditionExpression>${amount &lt;= 1000}</bpmn:conditionExpression>
+    </bpmn:sequenceFlow>
+    <bpmn:sequenceFlow id="f_review" sourceRef="Gate" targetRef="WaitDocs"/>
+    <bpmn:intermediateCatchEvent id="WaitDocs">
+      <bpmn:messageEventDefinition messageRef="Msg_docs"/>
+    </bpmn:intermediateCatchEvent>
+    <bpmn:sequenceFlow id="f3" sourceRef="WaitDocs" targetRef="Adjuster"/>
+    <bpmn:userTask id="Adjuster" name="Adjuster review"/>
+    <bpmn:sequenceFlow id="f4" sourceRef="Adjuster" targetRef="Pay"/>
+    <bpmn:serviceTask id="Pay" name="Pay out" camunda:type="payClaim"/>
+    <bpmn:sequenceFlow id="f5" sourceRef="Pay" targetRef="End"/>
+    <bpmn:endEvent id="End"/>
+  </bpmn:process>
+</bpmn:definitions>

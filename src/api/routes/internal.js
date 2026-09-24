@@ -45,7 +45,8 @@ export async function internalRoutes(fastify) {
       // Stamp with THIS process's APV clock (each process has its own in-memory clock).
       const eng    = getEngine();
       const tick   = eng.available ? Number(eng.clockTick()) : Date.now();
-      const result = await sendEvent(id, event, tick, {});
+      const isSystem = typeof event.type === 'string' && event.type.startsWith('__SK_');
+      const result = await sendEvent(id, event, tick, { mergePayload: isSystem ? null : event });
       notifyStateChange(id, result.stateValue, result.context);
       return reply.send({ actorId: id, stateValue: result.stateValue, done: result.done });
     } catch (err) {

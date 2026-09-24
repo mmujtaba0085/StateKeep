@@ -38,9 +38,13 @@ import { webhookRoutes } from './routes/webhooks.js';
 import { adminRoutes } from './routes/admin.js';
 import { internalRoutes } from './routes/internal.js';
 import { websocketRoutes } from './websocket.js';
+import { importRoutes } from './routes/imports.js';
 import { registerSecurity, checkStartupSecurity, securityConfig } from './security.js';
 
-const _securityProblem = checkStartupSecurity();
+import { registerClusterRouting, startCluster, checkClusterConfig, clusterEnabled } from '../cluster/cluster.js';
+import { notifyLocalSubscribers } from './websocket.js';
+
+const _securityProblem = checkStartupSecurity() ?? checkClusterConfig();
 if (_securityProblem) {
   console.error(`[server] Refusing to start: ${_securityProblem}`);
   process.exit(1);
@@ -146,6 +150,9 @@ if (process.env.STATEKEEP_RATE_LIMIT !== 'false') {
 // ── Authentication (API key / admin key) — must run before any route handler ──
 registerSecurity(fastify);
 
+// ── Multi-server mode: route per-actor requests to the owning server (before routes) ──
+registerClusterRouting(fastify);
+
 // ── x-request-id: echo or generate, attach to logger context, set response header ──
 fastify.addHook('onRequest', async (req, reply) => {
   const id = req.headers['x-request-id'] ?? randomUUID();
@@ -171,6 +178,7 @@ await fastify.register(healthRoutes);
 await fastify.register(metricsRoutes);
 await fastify.register(actorRoutes);
 await fastify.register(definitionRoutes);
+await fastify.register(importRoutes);
 await fastify.register(exportRoutes);
 await fastify.register(scheduledRoutes);
 await fastify.register(scenarioRoutes);
@@ -307,8 +315,30 @@ await seedEngineRegistry();
   }
 }
 
+{
+  const { remoteEnabled, refreshRemoteManifest } = await import('../runtime/remoteImplementations.js');
+  if (remoteEnabled()) {
+    const m = await refreshRemoteManifest({ force: true });
+    fastify.log.info(`[server] Remote implementations: ${m.guards.size} guards, ${m.actions.size} actions from ${process.env.STATEKEEP_REMOTE_URL}`);
+  } else if (process.env.STATEKEEP_REMOTE_URL && !process.env.STATEKEEP_REMOTE_SECRET) {
+    fastify.log.error('[server] STATEKEEP_REMOTE_URL is set but STATEKEEP_REMOTE_SECRET is not — remote implementations disabled');
+  }
+}
+
+await startCluster(fastify, { onRemoteStateChange: notifyLocalSubscribers });
+
+// In cluster mode the actor may be owned by another server: deliver follow-up events
+// through the routed internal dispatch instead of this process's cache.
+const _dispatchViaServer = async (actorId, event) => {
+  const res = await fetch(`http://127.0.0.1:${PORT}/v1/internal/actors/${encodeURIComponent(actorId)}/dispatch`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-admin-key': process.env.STATEKEEP_ADMIN_KEY ?? '' },
+    body: JSON.stringify({ event }),
+  });
+  if (!res.ok) throw new Error(`dispatch ${res.status}`);
+};
 startActionJobWorker(
-  (actorId, event) => sendEvent(actorId, event, Date.now(), {}),
+  (actorId, event, opts = {}) => clusterEnabled() ? _dispatchViaServer(actorId, event) : sendEvent(actorId, event, Date.now(), opts),
   getGlobalRegistry()
 );
 

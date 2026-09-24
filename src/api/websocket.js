@@ -12,6 +12,7 @@
 
 import { getActorState } from '../runtime/actorManager.js';
 import { findActorById } from '../registry/actorRepo.js';
+import { publishStateChange } from '../cluster/cluster.js';
 
 // Map<actorId, Set<WebSocket>>
 const subscribers = new Map();
@@ -20,7 +21,13 @@ const subscribers = new Map();
  * Notify all WebSocket subscribers about a state change.
  * Called by actorManager after every successful event dispatch.
  */
+/** Local subscribers + (cluster mode) every other server via LISTEN/NOTIFY. */
 export function notifyStateChange(actorId, stateValue, context) {
+  notifyLocalSubscribers(actorId, stateValue, context);
+  publishStateChange(actorId, stateValue, context);
+}
+
+export function notifyLocalSubscribers(actorId, stateValue, context) {
   const subs = subscribers.get(actorId);
   if (!subs || subs.size === 0) return;
 

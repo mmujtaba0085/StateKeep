@@ -9,6 +9,7 @@
  * GET    /v1/actors                  — List actors (dashboard)
  */
 
+import { claimNew } from '../../cluster/cluster.js';
 import { spawnActor, sendEvent, getActorState, terminateActor } from '../../runtime/actorManager.js';
 import { getWriteBuffer } from '../../runtime/writeBuffer.js';
 import { findActorById, getActorIdentity, listActors, findNeedsRescueActors, updateActorStatus, getActorCountsByStatus } from '../../registry/actorRepo.js';
@@ -92,6 +93,7 @@ export async function actorRoutes(fastify) {
         logicalStartTick: Number(tick),
       });
 
+      await claimNew(result.id);      // cluster mode: this server owns what it creates
       getWriteBuffer().queueEvent({
         actor_id:        result.id,
         event_type:      'SPAWN',
@@ -206,6 +208,7 @@ export async function actorRoutes(fastify) {
 
       const result = await sendEvent(id, event, tickNum, {
         priority,
+        mergePayload: payload ?? null,
         eventData: {
           actor_id:        id,
           event_type:      event.type,
@@ -325,6 +328,7 @@ export async function actorRoutes(fastify) {
       try {
         const result = await sendEvent(id, event, tickNum, {
           priority,
+          mergePayload: payload ?? null,
           eventData: {
             actor_id:        id,
             event_type:      event.type,
@@ -689,11 +693,15 @@ export async function actorRoutes(fastify) {
     for (let i = 0; i < requests.length; i += CONCURRENCY) {
       const slice = requests.slice(i, i + CONCURRENCY);
       const results = await Promise.allSettled(
-        slice.map(req => spawnActor({
-          definitionId:     resolvedIdCache.get(req.definitionId),
-          initialContext:   req.initialContext ?? {},
-          logicalStartTick: tick,
-        }))
+        slice.map(async (req) => {
+          const a = await spawnActor({
+            definitionId:     resolvedIdCache.get(req.definitionId),
+            initialContext:   req.initialContext ?? {},
+            logicalStartTick: tick,
+          });
+          await claimNew(a.id);        // cluster mode: this server owns what it creates
+          return a;
+        })
       );
       for (let j = 0; j < results.length; j++) {
         const r   = results[j];

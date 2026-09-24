@@ -20,6 +20,8 @@
 import { pushCommand }    from './push.js';
 import { previewCommand } from './preview.js';
 import { devCommand }     from './dev.js';
+import { importCommand }  from './import.js';
+import { planCommand }    from './plan.js';
 
 const argv = process.argv.slice(2);
 
@@ -57,6 +59,12 @@ switch (command) {
   case 'preview':
     await previewCommand(args, opts);
     break;
+  case 'plan':
+    await planCommand(args, opts);
+    break;
+  case 'import':
+    await importCommand(args, opts);
+    break;
   case 'dev':
     devCommand(args, opts);
     break;
@@ -71,6 +79,8 @@ Commands:
   push <file>      Push a machine definition to the StateKeep server
   preview <file>   Preview migration impact without deploying
   dev [dir]        Start dev server + auto-push file watcher
+  import <file>    Convert Step Functions / SCXML / BPMN to a StateKeep definition
+  plan <files...>  Report what releasing these definition files would do to running actors
 
 Options:
   --url <url>      Server URL (default: http://localhost:3000)

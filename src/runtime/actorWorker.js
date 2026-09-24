@@ -19,6 +19,7 @@
  *   BATCH_EVENTS { actorId, events }
  */
 
+import { withConditions } from './conditionGuards.js';
 import { parentPort }             from 'worker_threads';
 import {
   processEvent,
@@ -154,7 +155,7 @@ function getOrCompileDefinition(cacheKey, definitionJson) {
   return { compiledJson, definitionJson };
 }
 
-const emptyRegistry = { guards: {}, actions: {}, services: {} };
+const emptyRegistry = withConditions({ guards: {}, actions: {}, services: {} });
 
 // ── Serialization ─────────────────────────────────────────────────────────────
 

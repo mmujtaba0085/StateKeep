@@ -1,0 +1,20 @@
+<scxml xmlns="http://www.w3.org/2005/07/scxml" version="1.0" name="order" initial="cart">
+  <state id="cart">
+    <transition event="CHECKOUT" cond="total &gt; 0" target="payment"/>
+  </state>
+  <state id="payment" initial="authorizing">
+    <state id="authorizing">
+      <transition event="AUTHORIZED" target="capturing"/>
+      <transition event="DECLINED" target="cart"/>
+    </state>
+    <state id="capturing">
+      <transition event="CAPTURED" target="shipping"/>
+    </state>
+    <transition event="CANCEL" target="cancelled"/>
+  </state>
+  <state id="shipping">
+    <transition event="DELIVERED" target="done"/>
+  </state>
+  <final id="done"/>
+  <final id="cancelled"/>
+</scxml>

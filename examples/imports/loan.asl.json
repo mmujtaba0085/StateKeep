@@ -1,0 +1,27 @@
+{
+  "Comment": "loan approval",
+  "StartAt": "Check Credit",
+  "States": {
+    "Check Credit": {
+      "Type": "Task",
+      "Resource": "arn:aws:lambda:eu-west-1:123456789012:function:checkCredit",
+      "Next": "Decide",
+      "Catch": [{ "ErrorEquals": ["States.ALL"], "Next": "Manual Review" }]
+    },
+    "Decide": {
+      "Type": "Choice",
+      "Choices": [
+        { "And": [
+            { "Variable": "$.score", "NumericGreaterThanEquals": 700 },
+            { "Variable": "$.amount", "NumericLessThan": 1000000 } ],
+          "Next": "Approved" },
+        { "Variable": "$.score", "NumericLessThan": 500, "Next": "Rejected" }
+      ],
+      "Default": "Manual Review"
+    },
+    "Manual Review": { "Type": "Task", "Resource": "arn:aws:states:::sqs:sendMessage.waitForTaskToken", "Next": "Cooling Off" },
+    "Cooling Off":   { "Type": "Wait", "Seconds": 1, "Next": "Approved" },
+    "Approved": { "Type": "Succeed" },
+    "Rejected": { "Type": "Fail", "Error": "CreditTooLow" }
+  }
+}

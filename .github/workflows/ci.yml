@@ -57,6 +57,10 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
+      - uses: actions/setup-go@v5
+        with: { go-version: '1.22' }
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
       - run: npm ci
       - name: Run all suites (scripts/run-tests.sh starts its own server)
         run: bash scripts/run-tests.sh
@@ -92,6 +96,11 @@ jobs:
       - run: npm ci
       - name: Run all suites against Postgres (SQLite-internal tests skip themselves)
         run: bash scripts/run-tests.sh
+      - name: Cluster mode — two servers, one Postgres (own empty database)
+        run: |
+          PGPASSWORD=statekeep psql -h 127.0.0.1 -U statekeep -d statekeep -c 'CREATE DATABASE statekeep_cluster'
+          STATEKEEP_DB_URL=postgresql://statekeep:statekeep@127.0.0.1:5432/statekeep_cluster \
+            node --test --test-timeout=60000 test/cluster/cluster.test.js
 
   audit:
     name: "Dependency audit"

@@ -1,0 +1,12 @@
+{
+  "name": "@statekeep/xstate-apv",
+  "version": "0.1.0",
+  "description": "History-based version routing for XState v5 actors — move long-running actors to new machine versions by the path they took, with previews and no stranding.",
+  "type": "module",
+  "main": "index.js",
+  "exports": { ".": "./index.js" },
+  "files": ["index.js", "README.md"],
+  "peerDependencies": { "xstate": "^5.0.0" },
+  "license": "Apache-2.0",
+  "scripts": { "test": "node --test test.js" }
+}

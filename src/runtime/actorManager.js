@@ -5,6 +5,7 @@
  * Public API consumed by the Fastify route handlers.
  */
 
+import { withConditions } from './conditionGuards.js';
 import { randomUUID } from 'crypto';
 import { randomInt } from 'crypto';
 import { LRUCache } from './lruCache.js';
@@ -16,6 +17,7 @@ import { processEvent, computeInitialSnapshot } from './interpreter.js';
 import { compileMachine }    from './definitionCompiler.js';
 import { initializeRegionFingerprints } from './statePaths.js';
 import { getGlobalRegistry } from './implementationRegistry.js';
+import { withRemote, remoteEnabled, prefetchRemoteGuards, setCurrentGuardResults } from './remoteImplementations.js';
 import { startInvoke, detachActorInvokes, recoverInvokes } from './invokeRegistry.js';
 import { loadRunningInvokes } from '../registry/invokeRepo.js';
 import {
@@ -220,7 +222,7 @@ async function ensureInWorker(actorId, actor, priority = 'normal') {
 /**
  * Spawn a new actor from a definition.
  */
-const _emptyRegistry = { guards: {}, actions: {}, services: {} };
+const _emptyRegistry = withConditions({ guards: {}, actions: {}, services: {} });
 
 export async function spawnActor({ definitionId, initialContext, logicalStartTick }) {
   const def = await cachedFindDefinition(definitionId);
@@ -311,7 +313,7 @@ export async function spawnActor({ definitionId, initialContext, logicalStartTic
 const DEFAULT_DURABILITY = process.env.STATEKEEP_DURABILITY ?? 'group';
 
 export async function sendEvent(actorId, event, tick, opts = {}) {
-  const { eventData, priority = 'normal', durability = DEFAULT_DURABILITY } = opts;
+  const { eventData, priority = 'normal', durability = DEFAULT_DURABILITY, mergePayload = null } = opts;
   const pool = getWorkerPool();
 
   // Load from hot registry or SQLite.
@@ -518,15 +520,36 @@ export async function sendEvent(actorId, event, tick, opts = {}) {
     }
   }
 
+  // docs/API.md: an event's `payload` is merged into the actor context. It is merged
+  // BEFORE the transition so the event's own guards and actions can use the data it
+  // carries (e.g. an imported Step Functions Choice reading the previous task's output).
+  let procEntry = entry;
+  if (mergePayload && typeof mergePayload === 'object') {
+    const { type: _ignored, ...fields } = mergePayload;
+    if (Object.keys(fields).length > 0) procEntry = { ...entry, context: { ...entry.context, ...fields } };
+  }
+
   const pendingSends = [];
-  const registry     = getGlobalRegistry() ?? { guards: {}, actions: {}, services: {} };
-  const interpResult = processEvent(
-    { ...entry, actorId },
-    def.compiledJson,
-    event,
-    registry,
-    pendingSends,
-  );
+  const localRegistry = getGlobalRegistry() ?? { guards: {}, actions: {}, services: {} };
+  const registry      = withRemote(localRegistry);
+  // Remote (HTTP) guards cannot run inside the synchronous interpreter: evaluate the
+  // ones this event can reach first, then hand their results in (see remoteImplementations.js).
+  const remoteGuardResults = remoteEnabled()
+    ? await prefetchRemoteGuards({ compiledJson: def.compiledJson, event, entry: procEntry, actorId, localGuards: localRegistry.guards })
+    : null;
+  setCurrentGuardResults(remoteGuardResults);
+  let interpResult;
+  try {
+    interpResult = processEvent(
+      { ...procEntry, actorId },
+      def.compiledJson,
+      event,
+      registry,
+      pendingSends,
+    );
+  } finally {
+    setCurrentGuardResults(null);
+  }
 
   if (interpResult.error === 'TRANSIENT_LOOP_DETECTED') {
     await updateActorStatus(actorId, 'needs_rescue');

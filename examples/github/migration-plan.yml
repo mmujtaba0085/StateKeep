@@ -1,0 +1,18 @@
+# .github/workflows/statekeep-plan.yml — copy into your repository
+name: StateKeep migration plan
+on:
+  pull_request:
+    paths: ['**/*.definition.json']
+permissions:
+  contents: read
+  pull-requests: write
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: mmujtaba0085/Statekeep/.github/actions/migration-plan@main
+        with:
+          statekeep-url: ${{ vars.STATEKEEP_URL }}
+          api-key: ${{ secrets.STATEKEEP_API_KEY }}

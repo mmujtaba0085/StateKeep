@@ -7,6 +7,7 @@ import { claimActionJobs, markActionJobDone, retryActionJob, markActionJobFailed
   from '../registry/actionJobRepo.js';
 import { decrypt } from '../registry/db.js';
 import { getGlobalRegistry } from './implementationRegistry.js';
+import { withRemote } from './remoteImplementations.js';
 
 const POLL_MS  = 1_000;
 let _sendEvent = null;
@@ -40,7 +41,7 @@ async function runLoop() {
 }
 
 async function processJob(job) {
-  const fn = (getGlobalRegistry() ?? _registry)?.actions?.[job.action_name];
+  const fn = withRemote(getGlobalRegistry() ?? _registry)?.actions?.[job.action_name];
   if (!fn) {
     console.warn(`[actionJobWorker] No action fn for '${job.action_name}' — marking failed`);
     await markActionJobFailed(job.id).catch(() => {});
@@ -58,7 +59,11 @@ async function processJob(job) {
 
   try {
     const actualFn = fn.__sk_durable ? fn.__sk_durable.originalFn : fn;
-    await actualFn({ context, event }, {});
+    // meta lets an action address its actor (remote actions use it to deliver a follow-up event)
+    await actualFn({ context, event }, {
+      actorId:   job.actor_id,
+      sendEvent: (ev) => _sendEvent ? _sendEvent(job.actor_id, ev, { mergePayload: ev }) : Promise.resolve(),
+    });
     await markActionJobDone(job.id).catch(() => {});
   } catch (err) {
     const newRetryCount = (job.retry_count ?? 0) + 1;
