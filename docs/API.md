@@ -176,7 +176,7 @@ Deploy a new machine definition or update an existing one. Idempotent: re-deploy
 | `parentId` | string | No | Previous version to migrate actors from |
 | `historyPath` | string[] | No | Ordered event sequence starting from the actor's **first** event (a prefix, not a substring). Actors currently at exactly this point migrate on deploy; actors that reach it later migrate on their next event. Actors already past it are not moved retroactively. Omit or `[]` for wildcard (all actors) |
 | `stateMapping` | object | No | `{ oldStateName: newStateName }` — remap actors in removed/renamed states |
-| `contextTransform` | object | No | `{ "new.path": "old.path" }` — dot-notation field renames applied to actor context during migration |
+| `contextTransform` | object | No | `{ "new.path": "old.path" }` — dot-notation copy applied to actor context during migration. The old field is kept (additive, not destructive). Paths containing `__proto__`, `constructor` or `prototype` are rejected (400). |
 | `confirmToken` | string | No | UUID from a prior `requires_confirmation` response |
 | `refinement` | integer | No | APV refinement level (default: 1) |
 
@@ -460,7 +460,11 @@ This works because every definition has a `machineId` — the ID of the first de
 }
 ```
 
-`requestedAs` is present only when the provided `definitionId` was resolved to a different (newer) version. When an exact version ID was given, `requestedAs` is absent.
+`definitionId` may be:
+- an exact version id (e.g. `loan-v2`) — used as-is, **except** the family's root version id (e.g. `loan-v1`), which acts as the family alias and resolves to the newest active version;
+- the machine name, i.e. the `id` inside the definition JSON (e.g. `loan`) — also resolves to the newest active version (409 if two families share the name).
+
+`requestedAs` is present whenever the id was resolved to a different version.
 
 ---
 

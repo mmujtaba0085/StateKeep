@@ -139,16 +139,18 @@ describe('SC5-A: 50 actors on COMPLEX_SAAS — varied states + v2 deployment', (
     });
   });
 
-  test('churned actors are final — events are silently ignored', async () => {
-    // Churned is a final state — no events should change it
+  test('churned actors are final — events are rejected (409) and state is unchanged', async () => {
+    // Churned is a final state — events get 409 ACTOR_TERMINATED and change nothing
     const results = await Promise.all(
       groups.churned.map(id => send(id, 'SIGN_UP'))
     );
     results.forEach((r, i) => {
-      assert.equal(r.status, 200, `Churned actor ${i} event failed: ${r.status}`);
-      assert.equal(r.body.stateValue, 'churned',
-        `Churned actor ${i} changed state: ${r.body.stateValue}`);
+      assert.equal(r.status, 409, `Churned actor ${i}: expected 409, got ${r.status}`);
+      assert.equal(r.body.code, 'ACTOR_TERMINATED');
     });
+    const states = await Promise.all(groups.churned.map(getState));
+    states.forEach((r, i) => assert.equal(r.body.stateValue, 'churned',
+      `Churned actor ${i} changed state: ${r.body.stateValue}`));
   });
 
   test('v2 new actors can use extended trial sub-states', async () => {
@@ -339,6 +341,8 @@ describe('SC5-D: Mass event replay — 25 actors × 20 events = 500 total', () =
       for (let e = 0; e < EVENTS_PER_ACTOR; e++) {
         const type = (e === 10 && idx % 5 === 0) ? 'REJECT' : 'NEXT';
         const r = await send(id, type);
+        // Once an actor reaches its final state, further events are a documented 409.
+        if (r.status === 409 && r.body.code === 'ACTOR_TERMINATED') break;
         if (r.status !== 200) errorCount++;
       }
     });

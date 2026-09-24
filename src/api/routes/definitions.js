@@ -49,17 +49,19 @@ import {
   findActorsByDefinition,
   findActorsByMachine,
   findStrandedActors,
+  findStrandedActorsForDeploy,
   bulkTagNeedsRescue,
 } from '../../registry/actorRepo.js';
 import { enqueueJobs, findDecisionsByDeployment } from '../../registry/jobRepo.js';
 import { getEngine }                  from '../../ffi/engine.js';
 import { invalidateMigrationCacheForDefinition, evictFromHotRegistry, invalidateDefinitionCache } from '../../runtime/actorManager.js';
-import { computeHash, computeHistoryHash, fingerprintToBigInt, computeRegionHashes, regionFingerprintsToArray } from '../../ffi/hashUtils.js';
+import { computeHistoryHash, fingerprintToBigInt, computeRegionHashes, regionFingerprintsToArray } from '../../ffi/hashUtils.js';
 import { analyseDefinition }          from '../lib/staticAnalysis.js';
 import { issueToken, consumeToken }   from '../../registry/confirmTokenStore.js';
 import { insertChangepoint, insertParChangepoint } from '../../registry/changepointRepo.js';
 import { normalizeHistoryRegions } from '../../runtime/statePaths.js';
 import { getWriteBuffer } from '../../runtime/writeBuffer.js';
+import { isSafeContextPath } from '../../runtime/actorWorker.js';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -79,55 +81,38 @@ function hashDefinition(definition) {
  * as wouldMigrate without calling the engine (engine uses exact prefix match,
  * not wildcard, for prefix_hash=0).
  */
-async function evaluateMigrationCandidates(machineId, eng, currentTick, hasHistoryTarget = true) {
-  const actors     = await findActorsByMachine(machineId);
+async function evaluateMigrationCandidates(machineId, eng, currentTick, { prefixHash = null, hasHistoryRegions = false } = {}) {
+  // Predicts what a deploy WOULD do. The new definition's change-point is not
+  // registered yet, so asking the engine (as this used to) always answered
+  // "nobody moves". Mirror the deploy logic directly instead:
+  //   wildcard (no historyPath) → every active actor in the family migrates
+  //   historyPath               → actors whose current fingerprint equals the
+  //                               path's prefix hash (what the engine matches)
+  const actors       = await findActorsByMachine(machineId);
   const wouldMigrate = [];
   const wouldStay    = [];
 
-  if (!hasHistoryTarget) {
-    // Wildcard: every active actor on the machine is eligible
-    for (const actor of actors) {
-      wouldMigrate.push({
-        actorId:            actor.id,
-        currentState:       actor.stateValue,
-        definitionId:       actor.definitionId,
-        targetDefinitionId: null,  // not yet known — definition hasn't been stored
-      });
-    }
-    return { eligible: actors.length, wouldMigrate, wouldStay, engineAvailable: eng.available };
-  }
-
   for (const actor of actors) {
-    let targetDefId = null;
-    try {
-      const actorFp = fingerprintToBigInt(actor.historyFingerprint);
-      targetDefId   = eng.computeAccessible(actorFp, BigInt(actor.logicalStartTick), currentTick);
-      if (!targetDefId && actor.regionFingerprints) {
-        const regionArr = regionFingerprintsToArray(actor.regionFingerprints);
-        if (regionArr && regionArr.length > 0) {
-          targetDefId = eng.computeAccessibleParallel(regionArr, BigInt(actor.logicalStartTick), currentTick);
-        }
-      }
-    } catch {}
-
-    if (targetDefId && targetDefId !== actor.definitionId) {
-      wouldMigrate.push({
-        actorId:          actor.id,
-        currentState:     actor.stateValue,
-        definitionId:     actor.definitionId,
-        targetDefinitionId: targetDefId,
-      });
+    let migrates;
+    let reason = 'fingerprint_mismatch';
+    if (hasHistoryRegions) {
+      migrates = false;
+      reason   = 'parallel_regions_not_previewable';
+    } else if (prefixHash === null) {
+      migrates = true;
     } else {
-      wouldStay.push({
-        actorId:      actor.id,
-        currentState: actor.stateValue,
-        definitionId: actor.definitionId,
-        reason:       'fingerprint_mismatch',
-      });
+      try { migrates = fingerprintToBigInt(actor.historyFingerprint) === prefixHash; }
+      catch { migrates = false; }
     }
+    const entry = { actorId: actor.id, currentState: actor.stateValue, definitionId: actor.definitionId };
+    if (migrates) wouldMigrate.push({ ...entry, targetDefinitionId: null /* not stored yet */ });
+    else          wouldStay.push({ ...entry, reason });
   }
 
-  return { eligible: actors.length, wouldMigrate, wouldStay };
+  return {
+    eligible: actors.length, wouldMigrate, wouldStay, engineAvailable: eng.available,
+    ...(hasHistoryRegions ? { note: 'historyRegions (parallel) targeting cannot be previewed; wouldMigrate is not computed.' } : {}),
+  };
 }
 
 export async function definitionRoutes(fastify) {
@@ -281,6 +266,19 @@ export async function definitionRoutes(fastify) {
       });
     }
 
+    // contextTransform paths are applied with dot-notation writes — reject any path
+    // that could reach Object.prototype ('__proto__', 'constructor', 'prototype').
+    if (contextTransform !== undefined && contextTransform !== null) {
+      if (typeof contextTransform !== 'object' || Array.isArray(contextTransform)) {
+        return reply.code(400).send({ error: 'contextTransform must be an object of { "new.path": "old.path" }' });
+      }
+      for (const [to, from] of Object.entries(contextTransform)) {
+        if (!isSafeContextPath(to) || !isSafeContextPath(from)) {
+          return reply.code(400).send({ error: `contextTransform path not allowed: '${to}' ← '${from}'`, code: 'UNSAFE_CONTEXT_PATH' });
+        }
+      }
+    }
+
     // historyPath is matched against an actor's history from its FIRST event (it is a
     // prefix, not a substring). A path like ['REQUEST_INFO','RESUBMIT'] on a machine that
     // starts with SUBMIT can never match anyone, and used to deploy "successfully" with
@@ -310,13 +308,23 @@ export async function definitionRoutes(fastify) {
       machineId = parentDef?.machineId ?? parentId;
     }
 
+    // Stranded check must cover exactly the actors this deploy will move (whole family
+    // for wildcard, fingerprint matches for historyPath). historyRegions keeps the old
+    // parent-only check (per-region matching is not reproducible here).
+    const strandedFor = (validStates) => hasHistoryRegions
+      ? findStrandedActors(parentId, validStates)
+      : findStrandedActorsForDeploy(machineId, validStates, hasHistoryPath ? computeHistoryHash(historyPath) : null);
+
     // ── dryRun: evaluate without writing anything ──────────────────────────────
     if (isDryRun) {
       const dryRunTick = eng.clockTick();
       let migration = { eligible: 0, wouldMigrate: [], wouldStay: [], engineAvailable: eng.available };
 
       if (parentId && eng.available) {
-        const candidates = await evaluateMigrationCandidates(machineId, eng, dryRunTick, hasHistoryTarget);
+        const candidates = await evaluateMigrationCandidates(machineId, eng, dryRunTick, {
+          prefixHash:        hasHistoryPath ? fingerprintToBigInt(computeHistoryHash(historyPath)) : null,
+          hasHistoryRegions: !!hasHistoryRegions,
+        });
         migration = { ...candidates, engineAvailable: true };
       } else if (parentId) {
         const dryActors = await findActorsByMachine(machineId);
@@ -332,7 +340,7 @@ export async function definitionRoutes(fastify) {
       // Compute stranded actors for the dryRun preview
       let dryStrandedActors = [];
       if (parentId) {
-        const strandedGroups = await findStrandedActors(parentId, effectiveValidStates);
+        const strandedGroups = await strandedFor(effectiveValidStates);
         dryStrandedActors    = strandedGroups.map(g => ({ currentState: g.state, count: g.count }));
       }
 
@@ -354,7 +362,7 @@ export async function definitionRoutes(fastify) {
     if (parentId) await getWriteBuffer().flush();
 
     if (parentId) {
-      const strandedGroups = await findStrandedActors(parentId, effectiveValidStates);
+      const strandedGroups = await strandedFor(effectiveValidStates);
       const totalStranded  = strandedGroups.reduce((s, g) => s + g.count, 0);
 
       if (totalStranded > 0) {
@@ -375,7 +383,7 @@ export async function definitionRoutes(fastify) {
                 status:        'requires_confirmation',
                 reason:        result.reason,
                 strandedActors: strandedGroups.map(g => ({ currentState: g.state, count: g.count })),
-                safeActors:    (await findActorsByDefinition(parentId)).length - totalStranded,
+                safeActors:    (strandedGroups.scope ?? (await findActorsByDefinition(parentId)).length) - totalStranded,
                 confirmToken:  fresh.token,
                 expiresIn:     fresh.expiresIn,
                 message:       `${totalStranded} actor(s) will be tagged needs_rescue. Include confirmToken to proceed.`,
@@ -386,7 +394,7 @@ export async function definitionRoutes(fastify) {
           // Token valid — fall through to storage, will tag stranded actors after write
         } else {
           // ── First PUT — no token yet: return preview ─────────────────────
-          const safeActors = (await findActorsByDefinition(parentId)).length - totalStranded;
+          const safeActors = (strandedGroups.scope ?? (await findActorsByDefinition(parentId)).length) - totalStranded;
           const issued = issueToken({
             definitionId:  id,
             parentId,
@@ -549,7 +557,7 @@ export async function definitionRoutes(fastify) {
     // ── Step 4: Tag stranded actors needs_rescue (only reached after confirm) ─
     let strandedTagged = 0;
     if (parentId && confirmToken) {
-      const strandedGroups   = await findStrandedActors(parentId, effectiveValidStates);
+      const strandedGroups   = await strandedFor(effectiveValidStates);
       const strandedActorIds = strandedGroups.flatMap(g => g.actorIds);
       if (strandedActorIds.length > 0) {
         await bulkTagNeedsRescue(strandedActorIds);
@@ -760,15 +768,17 @@ export async function definitionRoutes(fastify) {
         type: 'object',
         required: ['parentId', 'definition'],
         properties: {
-          parentId:    { type: 'string' },
-          definition:  { type: 'object' },
-          historyPath: { type: 'array', items: { type: 'string' } },
+          parentId:     { type: 'string' },
+          definition:   { type: 'object' },
+          historyPath:  { type: 'array', items: { type: 'string' } },
+          stateMapping: { type: 'object', additionalProperties: { type: 'string' } },
         },
       },
     },
   }, async (request, reply) => {
-    const { parentId, definition, historyPath } = request.body;
+    const { parentId, definition, historyPath, stateMapping } = request.body;
     const eng = getEngine();
+    const hasPreviewHistoryPath = Array.isArray(historyPath) && historyPath.length > 0;
 
     const { errors, warnings } = analyseDefinition(definition);
     if (errors.length > 0) {
@@ -782,7 +792,9 @@ export async function definitionRoutes(fastify) {
     let migration = { eligible: 0, wouldMigrate: [], wouldStay: [], engineAvailable: eng.available };
 
     if (previewMachineId && eng.available) {
-      const candidates = await evaluateMigrationCandidates(previewMachineId, eng, dryRunTick);
+      const candidates = await evaluateMigrationCandidates(previewMachineId, eng, dryRunTick, {
+        prefixHash: hasPreviewHistoryPath ? fingerprintToBigInt(computeHistoryHash(historyPath)) : null,
+      });
       migration = { ...candidates, engineAvailable: true };
     } else if (previewMachineId) {
       const actors = await findActorsByMachine(previewMachineId);
@@ -795,18 +807,16 @@ export async function definitionRoutes(fastify) {
       };
     }
 
-    // Log preview decisions to migration_decisions (best-effort)
-    const tick = Number(dryRunTick);
-    const { logDecision } = await import('../../registry/jobRepo.js');
-    for (const entry of migration.wouldMigrate) {
-      logDecision({ actorId: entry.actorId, trigger: 'preview', evaluatedAt: tick, decision: 'migrated', reason: 'fingerprint_match', fromDefinitionId: parentId, toDefinitionId: entry.targetDefinitionId, actorFingerprint: '0', prefixHash: '0' }).catch(() => {});
-    }
-    for (const entry of migration.wouldStay) {
-      logDecision({ actorId: entry.actorId, trigger: 'preview', evaluatedAt: tick, decision: 'stayed', reason: entry.reason ?? 'fingerprint_mismatch', fromDefinitionId: parentId, toDefinitionId: null, actorFingerprint: '0', prefixHash: '0' }).catch(() => {});
-    }
+    // (Previews used to write 'migrated'/'stayed' rows into every actor's real decision
+    // history. A dry run must not touch the audit trail, so nothing is logged here.)
 
+    // Same rule as the real deploy: states that are keys of stateMapping are not stranded.
     const newStateNames  = Object.keys(definition.states ?? {});
-    const strandedGroups = await findStrandedActors(parentId, newStateNames);
+    const validStates    = stateMapping && Object.keys(stateMapping).length > 0
+      ? [...new Set([...newStateNames, ...Object.keys(stateMapping)])]
+      : newStateNames;
+    const strandedGroups = await findStrandedActorsForDeploy(
+      previewMachineId, validStates, hasPreviewHistoryPath ? computeHistoryHash(historyPath) : null);
     const strandedActors = strandedGroups.map(g => ({ currentState: g.state, count: g.count }));
 
     return reply.code(200).send({
@@ -984,8 +994,8 @@ export async function definitionRoutes(fastify) {
       querystring: {
         type: 'object',
         properties: {
-          limit:  { type: 'integer', default: 50 },
-          offset: { type: 'integer', default: 0 },
+          limit:  { type: 'integer', minimum: 1, maximum: 500, default: 50 },
+          offset: { type: 'integer', minimum: 0, default: 0 },
         },
       },
     },

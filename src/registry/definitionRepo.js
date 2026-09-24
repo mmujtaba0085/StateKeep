@@ -166,3 +166,22 @@ export async function listDefinitions({ limit = 50, offset = 0 } = {}) {
   }
   return getStmts().list.all(limit, offset).map(rowToDefinition);
 }
+
+/**
+ * Resolve a machine by the `id` inside its definition JSON (e.g. "loan"), which is
+ * what users naturally call it, as opposed to the root version id ("loan-v1").
+ * Returns the machineIds of every family whose ROOT definition carries that name.
+ */
+export async function findMachineIdsByName(name) {
+  if (isPostgres) {
+    const { queryAll } = await import('./db-postgres.js');
+    const rows = await queryAll(
+      `SELECT machine_id FROM definitions WHERE id = machine_id AND (definition_json::jsonb)->>'id' = $1`,
+      [name]
+    );
+    return rows.map((r) => r.machine_id);
+  }
+  return getDb().prepare(
+    `SELECT machine_id FROM definitions WHERE id = machine_id AND json_extract(definition_json, '$.id') = ?`
+  ).all(name).map((r) => r.machine_id);
+}

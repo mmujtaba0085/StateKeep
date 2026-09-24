@@ -46,10 +46,11 @@ test('full lifecycle: idle → running → paused → running → done', async (
     assert.equal(r.body.stateValue, expected, `After ${type}: expected ${expected}, got ${r.body.stateValue}`);
   }
 
-  // Actor should be done
-  const final = (await post(`/v1/actors/${id}/event`, { type: 'START' })).body;
-  // XState ignores events in final state — should still be done
-  assert.equal(final.stateValue, 'done');
+  // Actor is done — further events get 409 ACTOR_TERMINATED and change nothing
+  const final = await post(`/v1/actors/${id}/event`, { type: 'START' });
+  assert.equal(final.status, 409);
+  const after = await get(`/v1/actors/${id}/state`);
+  assert.equal(after.body.stateValue, 'done');
 });
 
 test('event to non-existent actor returns 404', async () => {

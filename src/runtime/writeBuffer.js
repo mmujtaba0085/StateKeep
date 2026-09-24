@@ -15,6 +15,7 @@
  */
 
 import { getDb, encrypt, isPostgres } from '../registry/db.js';
+import { randomUUID } from 'crypto';
 import { serializeRegionFingerprints } from '../registry/regionFingerprintCodec.js';
 
 const FLUSH_MS   = parseInt(process.env.STATEKEEP_WRITE_BUFFER_MS ?? '50', 10);
@@ -27,6 +28,7 @@ class WriteBuffer {
     this._decisions         = [];
     this._scheduledCancels  = [];
     this._scheduledCreates  = [];
+    this._actionJobs        = [];   // durable action jobs — committed atomically with the state that produced them
     this._pending           = new Set();
     this._stmts             = null;
     this._dbOverride        = _dbOverride;
@@ -100,6 +102,21 @@ class WriteBuffer {
     });
   }
 
+  /**
+   * Queue a durable action job. It is inserted in the SAME transaction as the
+   * state transition that produced it, so a crash can never leave a job for a
+   * transition that was not persisted (or a persisted transition without its job).
+   */
+  queueActionJob({ actorId, actionName, context, event, maxRetries, fireAt }) {
+    const now = Date.now();
+    this._actionJobs.push({
+      id: randomUUID(), actorId, actionName,
+      contextSnap: context != null ? encrypt(Buffer.from(JSON.stringify(context))) : null,
+      eventSnap:   event   != null ? encrypt(Buffer.from(JSON.stringify(event)))   : null,
+      maxRetries:  maxRetries ?? 3, nextRetryAt: fireAt ?? now, createdAt: now,
+    });
+  }
+
   hasPendingEvent(actorId, idempotencyKey) {
     return this._pending.has(`${actorId}:${idempotencyKey}`);
   }
@@ -143,9 +160,10 @@ class WriteBuffer {
     // processed atomically with state writes even when no state rows are pending.
     const scheduledCancels = this._scheduledCancels.splice(0);
     const scheduledCreates = this._scheduledCreates.splice(0);
+    const actionJobs       = this._actionJobs.splice(0);
 
     if (this._states.size === 0 && this._events.length === 0 && this._decisions.length === 0
-        && scheduledCancels.length === 0 && scheduledCreates.length === 0) {
+        && scheduledCancels.length === 0 && scheduledCreates.length === 0 && actionJobs.length === 0) {
       // Nothing new to write — but on Postgres an earlier flush may still be in flight,
       // so wait for it rather than reporting "durable" too early.
       return isPostgres ? this._flushChain : Promise.resolve();
@@ -161,19 +179,19 @@ class WriteBuffer {
     }
 
     if (rows.length === 0 && events.length === 0 && decisions.length === 0
-        && scheduledCancels.length === 0 && scheduledCreates.length === 0) {
+        && scheduledCancels.length === 0 && scheduledCreates.length === 0 && actionJobs.length === 0) {
       // Nothing new to write — but on Postgres an earlier flush may still be in flight,
       // so wait for it rather than reporting "durable" too early.
       return isPostgres ? this._flushChain : Promise.resolve();
     }
 
     if (isPostgres) {
-      return this._flushPostgres(rows, events, decisions, scheduledCancels, scheduledCreates);
+      return this._flushPostgres(rows, events, decisions, scheduledCancels, scheduledCreates, actionJobs);
     }
 
     try {
       const { state: stateStmt, stateNoCtx: stateNoCtxStmt, event: eventStmt, decision: decisionStmt,
-              schedCancel: cancelStmt, schedInsert: insertSched } = this._getStmts();
+              schedCancel: cancelStmt, schedInsert: insertSched, actionJob: actionJobStmt } = this._getStmts();
       this._getDb().transaction(() => {
         for (const row of rows) {
           if (row.context_json === undefined) {
@@ -195,6 +213,9 @@ class WriteBuffer {
             encrypt(row.payload), row.fireAt, Date.now()
           );
         }
+        for (const j of actionJobs) {
+          actionJobStmt.run(j.id, j.actorId, j.actionName, j.contextSnap, j.eventSnap, j.maxRetries, j.nextRetryAt, j.createdAt);
+        }
       })();
       return Promise.resolve();
     } catch (err) {
@@ -203,14 +224,14 @@ class WriteBuffer {
     }
   }
 
-  _flushPostgres(rows, events, decisions, scheduledCancels = [], scheduledCreates = []) {
+  _flushPostgres(rows, events, decisions, scheduledCancels = [], scheduledCreates = [], actionJobs = []) {
     this._flushChain = this._flushChain.then(() =>
-      this._doFlushPostgres(rows, events, decisions, scheduledCancels, scheduledCreates)
+      this._doFlushPostgres(rows, events, decisions, scheduledCancels, scheduledCreates, actionJobs)
     );
     return this._flushChain;
   }
 
-  async _doFlushPostgres(rows, events, decisions, scheduledCancels = [], scheduledCreates = []) {
+  async _doFlushPostgres(rows, events, decisions, scheduledCancels = [], scheduledCreates = [], actionJobs = []) {
     try {
       const { transaction } = await import('../registry/db-postgres.js');
       await transaction(async (client) => {
@@ -271,6 +292,13 @@ class WriteBuffer {
             [row.actorId, row.eventType, encrypt(row.payload), row.fireAt, Date.now()]
           );
         }
+        for (const j of actionJobs) {
+          await client.query(
+            `INSERT INTO action_jobs (id, actor_id, action_name, context_snap, event_snap, max_retries, next_retry_at, status, created_at)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,'pending',$8)`,
+            [j.id, j.actorId, j.actionName, j.contextSnap, j.eventSnap, j.maxRetries, j.nextRetryAt, j.createdAt]
+          );
+        }
       });
     } catch (err) {
       console.error('[writeBuffer] Postgres flush error:', err.message);
@@ -281,6 +309,10 @@ class WriteBuffer {
     if (this._stmts) return this._stmts;
     const db = this._getDb();
     this._stmts = {
+      actionJob: db.prepare(`
+        INSERT INTO action_jobs (id, actor_id, action_name, context_snap, event_snap, max_retries, next_retry_at, status, created_at)
+        VALUES (?,?,?,?,?,?,?,'pending',?)
+      `),
       state: db.prepare(`
         UPDATE actors
         SET state_value         = @state_value,

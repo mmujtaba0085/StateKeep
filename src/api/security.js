@@ -23,7 +23,9 @@ const LOOPBACK      = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
 
 function isAdminRoute(method, url) {
   return url.startsWith('/v1/admin/') || url.startsWith('/v1/internal/')
-      || (method === 'DELETE' && url.startsWith('/v1/health/workers/'));
+      || (method === 'DELETE' && url.startsWith('/v1/health/workers/'))
+      // documented as *(admin)* in docs/API.md — they list every actor's scheduled events
+      || (method === 'GET' && (url === '/v1/scheduled' || url === '/v1/scheduled/dead-letter'));
 }
 
 /** Constant-time string compare (hash first so lengths never leak). */
@@ -32,6 +34,14 @@ export function safeEqual(a, b) {
   const ha = createHash('sha256').update(a).digest();
   const hb = createHash('sha256').update(b).digest();
   return timingSafeEqual(ha, hb);
+}
+
+/** Matched route pattern, or the fully decoded path for unmatched requests (404s). */
+export function canonicalPath(req) {
+  const route = req.routeOptions?.url;
+  if (route) return route;
+  const raw = req.url.split('?')[0];
+  try { return decodeURIComponent(raw); } catch { return raw; }
 }
 
 export function securityConfig(env = process.env) {
@@ -67,7 +77,9 @@ export function registerSecurity(fastify, env = process.env) {
   const { apiKey, adminKey } = securityConfig(env);
 
   fastify.addHook('onRequest', async (req, reply) => {
-    const url = req.url.split('?')[0];
+    // Decide on the ROUTE the router matched, never on the raw URL: the router
+    // percent-decodes paths, so '/%76%31/actors' reaches '/v1/actors'.
+    const url = canonicalPath(req);
     if (!url.startsWith('/v1/')) return;               // dashboard static files, docs, openapi
     if (PUBLIC_ROUTES.has(`${req.method} ${url}`)) return;
 

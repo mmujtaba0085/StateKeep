@@ -381,6 +381,44 @@ export async function findStrandedActors(definitionId, validStates) {
     `).all(definitionId);
   }
 
+  return groupStranded(actors, validStates);
+}
+
+/**
+ * Stranded check over exactly the actors a deploy will move. A wildcard deploy
+ * migrates every active actor in the machine FAMILY (not just the parent version),
+ * so checking only the parent let actors on older versions be stranded without the
+ * confirmation step. A history-targeted deploy moves only actors whose fingerprint
+ * matches, so actors that stay put must not trigger a confirmation either.
+ *
+ * @param {string}      machineId
+ * @param {string[]}    validStates   states that exist (or are mapped) in the new version
+ * @param {string|null} prefixHex     historyPath fingerprint (hex) or null for wildcard
+ */
+export async function findStrandedActorsForDeploy(machineId, validStates, prefixHex = null) {
+  let actors;
+  if (isPostgres) {
+    const { queryAll } = await import('./db-postgres.js');
+    actors = await queryAll(
+      `SELECT a.id, a.state_value, a.history_fingerprint FROM actors a JOIN definitions d ON a.definition_id = d.id
+       WHERE d.machine_id = $1 AND a.status = 'active'`, [machineId]);
+  } else {
+    actors = getDb().prepare(`
+      SELECT a.id, a.state_value, a.history_fingerprint FROM actors a JOIN definitions d ON a.definition_id = d.id
+      WHERE d.machine_id = ? AND a.status = 'active'
+    `).all(machineId);
+  }
+  if (prefixHex !== null) {
+    const norm = (h) => String(h ?? '0').toLowerCase().replace(/^0x/, '').padStart(16, '0');
+    const want = norm(prefixHex);
+    actors = actors.filter((r) => norm(r.history_fingerprint) === want);
+  }
+  const stranded = groupStranded(actors, validStates);
+  stranded.scope = actors.length;        // how many actors the deploy would move in total
+  return stranded;
+}
+
+function groupStranded(actors, validStates) {
   const groups = new Map();
   for (const row of actors) {
     let sv;

@@ -268,7 +268,7 @@ async function processLoop() {
     } catch (err) {
       console.error('[migrate-worker] Error in process loop:', err);
     }
-    await new Promise(r => setTimeout(r, hadWork ? 50 : POLL_INTERVAL));
+    await new Promise(r => { setTimeout(r, hadWork ? 50 : POLL_INTERVAL); });
   }
 }
 

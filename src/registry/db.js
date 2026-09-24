@@ -9,7 +9,7 @@
 
 import Database from 'better-sqlite3';
 import { createCipheriv, createDecipheriv, randomBytes } from 'crypto';
-import { mkdirSync, readFileSync } from 'fs';
+import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { isVersionedRegionFingerprintsPayload } from './regionFingerprintCodec.js';

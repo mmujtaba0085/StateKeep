@@ -119,9 +119,9 @@ export async function createStateKeep({
       try { stopActionJobWorker(); } catch {}
       // Flush pending writes before terminating workers, then close DB
       try { const { getWriteBuffer } = await import('../runtime/writeBuffer.js'); getWriteBuffer().flush(); } catch {}
-      await new Promise(r => setTimeout(r, 100)); // let flush settle
+      await new Promise(r => { setTimeout(r, 100); }); // let flush settle
       try { getWorkerPool().terminate(); } catch {}
-      await new Promise(r => setTimeout(r, 200)); // let workers drain
+      await new Promise(r => { setTimeout(r, 200); }); // let workers drain
       if (isPostgres) {
         try { const { closePool } = await import('../registry/db-postgres.js'); await closePool(); } catch {}
       } else {

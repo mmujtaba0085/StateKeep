@@ -414,7 +414,7 @@ function _processParallelEvent(
  *             scheduledEventOps, tier2Actions, durableActions }}
  */
 export function processEvent(entry, compiledJson, event, registry, pendingSends = []) {
-  const { transitions, transientStates, entryActions, exitActions, afterTransitions, finalStates } = compiledJson;
+  const { transitions, transientStates, entryActions, exitActions, afterTransitions } = compiledJson;
 
   // Detect parallel state; branch to full multi-region dispatch
   const _sv = entry.stateValue;

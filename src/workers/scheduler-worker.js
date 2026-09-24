@@ -10,7 +10,7 @@
  */
 
 import { getDb, encrypt, isPostgres } from '../registry/db.js';
-import { findDueEvents, markFired, markFailed, markDispatchFailed, scheduleRetryOrFail } from '../registry/scheduledEventRepo.js';
+import { findDueEvents, markFired, markDispatchFailed, scheduleRetryOrFail } from '../registry/scheduledEventRepo.js';
 import { startHeartbeat } from './heartbeat.js';
 import { findActorById } from '../registry/actorRepo.js';
 import { sendEvent } from '../runtime/actorManager.js';
@@ -89,7 +89,7 @@ async function loop() {
     try { await tick(); } catch (err) {
       console.error('[scheduler-worker] Unhandled error in tick:', err);
     }
-    await new Promise(r => setTimeout(r, POLL_INTERVAL));
+    await new Promise(r => { setTimeout(r, POLL_INTERVAL); });
   }
 }
 

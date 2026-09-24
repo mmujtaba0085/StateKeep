@@ -41,7 +41,9 @@ function decodeEvents(rows) {
 
 /** RFC-4180 CSV cell escaping. */
 function csvCell(value) {
-  const s = value == null ? '' : String(value);
+  let s = value == null ? '' : String(value);
+  // Neutralise spreadsheet formulas (CSV injection): =, +, -, @, tab, CR at cell start.
+  if (/^[=+\-@\t\r]/.test(s)) s = "'" + s;
   if (s.includes(',') || s.includes('"') || s.includes('\n') || s.includes('\r')) {
     return '"' + s.replace(/"/g, '""') + '"';
   }

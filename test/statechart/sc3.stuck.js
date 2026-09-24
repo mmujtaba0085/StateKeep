@@ -143,10 +143,12 @@ describe('SC3-B: Unreachable state — exists in definition but no path leads th
     const r1 = await send(id, 'GO');
     assert.equal(r1.body.stateValue, 'b');
 
-    // ESCAPE would move from unreachable → b, but we can never GET there
-    // Sending ESCAPE from b is a no-op
+    // ESCAPE would move from unreachable → b, but we can never GET there.
+    // b is final, so ESCAPE is rejected (409 ACTOR_TERMINATED) and changes nothing.
     const r2 = await send(id, 'ESCAPE');
-    assert.equal(r2.body.stateValue, 'b', 'ESCAPE from b does nothing');
+    assert.equal(r2.status, 409);
+    const after = await get(`/v1/actors/${id}`);
+    assert.equal(after.body.stateValue, 'b', 'ESCAPE from b does nothing');
   });
 
   test('[GAP] scenario reveals unreachable state cannot be tested (no path to it)', async () => {

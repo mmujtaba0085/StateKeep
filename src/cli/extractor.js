@@ -8,9 +8,7 @@
 
 import { readFileSync } from 'fs';
 import { extname, resolve } from 'path';
-import { createRequire } from 'module';
 import { spawnSync } from 'child_process';
-import { fileURLToPath } from 'url';
 
 /**
  * Load a definition from `filePath`.

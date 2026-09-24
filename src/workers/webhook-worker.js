@@ -16,7 +16,7 @@
  */
 
 import { createHmac } from 'crypto';
-import { assertSafeWebhookUrl } from '../api/lib/urlGuard.js';
+import { postWebhook } from '../api/lib/urlGuard.js';
 import { getDb, decrypt, isPostgres } from '../registry/db.js';
 import { startHeartbeat } from './heartbeat.js';
 import { engineReady } from '../ffi/engine.js';
@@ -94,23 +94,11 @@ async function deliverOne(delivery) {
   let success      = false;
 
   try {
-    const controller = new AbortController();
-    const timer      = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-
-    // Re-check at delivery time: DNS may now point somewhere internal.
-    await assertSafeWebhookUrl(webhook.url);
-    const res = await fetch(webhook.url, {
-      method:  'POST',
-      redirect: 'manual',            // never follow a redirect into the internal network
-      headers: {
-        'Content-Type':          'application/json',
-        'X-StateKeep-Signature': `sha256=${sig}`,
-      },
-      body:   outbound,
-      signal: controller.signal,
-    });
-
-    clearTimeout(timer);
+    // Connect-time address check + no redirects: see postWebhook() in urlGuard.js
+    const res = await postWebhook(webhook.url, outbound, {
+      'Content-Type':          'application/json',
+      'X-StateKeep-Signature': `sha256=${sig}`,
+    }, REQUEST_TIMEOUT_MS);
     responseCode = res.status;
     success      = res.ok;
   } catch (err) {
@@ -196,7 +184,7 @@ async function webhookLoop() {
     } catch (err) {
       console.error('[webhook-worker] Poll error:', err.message);
     }
-    await new Promise(r => setTimeout(r, POLL_INTERVAL_MS));
+    await new Promise(r => { setTimeout(r, POLL_INTERVAL_MS); });
   }
 }
 

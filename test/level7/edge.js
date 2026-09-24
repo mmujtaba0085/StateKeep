@@ -233,16 +233,18 @@ describe('Edge 7: Event type edge cases', () => {
     assert.ok([200, 400].includes(r.status), `Long event type crashed server: ${r.status}`);
   });
 
-  test('event to actor in final state is silently ignored (state stays done)', async () => {
+  test('event to actor in final state is rejected with 409 (state stays done)', async () => {
     const spawn = await post('/v1/actors', { definitionId: 'edge-linear-v1' });
     const id    = spawn.body.id;
     await post(`/v1/actors/${id}/event`, { type: 'START' });
     await post(`/v1/actors/${id}/event`, { type: 'COMPLETE' });
 
-    // Machine is now in 'done' (final) — further events should be ignored
+    // Machine is now in 'done' (final) — API contract (docs/API.md): 409 ACTOR_TERMINATED
     const r = await post(`/v1/actors/${id}/event`, { type: 'START' });
-    assert.equal(r.status, 200);
-    assert.equal(r.body.stateValue, 'done', 'Final state should not change');
+    assert.equal(r.status, 409);
+    assert.equal(r.body.code, 'ACTOR_TERMINATED');
+    const after = await get(`/v1/actors/${id}`);
+    assert.equal(after.body.stateValue, 'done', 'Final state should not change');
   });
 });
 

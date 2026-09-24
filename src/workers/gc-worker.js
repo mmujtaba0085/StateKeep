@@ -173,7 +173,7 @@ async function gcLoop() {
     } catch (err) {
       console.error('[gc-worker] Error:', err);
     }
-    await new Promise(r => setTimeout(r, INTERVAL_MS));
+    await new Promise(r => { setTimeout(r, INTERVAL_MS); });
   }
 }
 

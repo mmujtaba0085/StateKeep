@@ -228,6 +228,7 @@ LEGACY_FILES=(
   test/test_actor_termination.js
   test/test_concurrent_events.js
   test/test_migration_orchestration.js
+  test/test_security.js
 )
 
 for f in "${LEGACY_FILES[@]}"; do

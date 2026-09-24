@@ -12,7 +12,6 @@ import {
   createScheduledEvent,
   findByActor,
   cancelScheduledEvent,
-  findDueEvents,
   findDeadLetter,
 } from '../../registry/scheduledEventRepo.js';
 import { getDb, isPostgres } from '../../registry/db.js';
@@ -177,7 +176,7 @@ export async function scheduledRoutes(fastify) {
     },
   }, async (request, reply) => {
     const limit = request.query.limit ?? 100;
-    const rows  = findDeadLetter(limit);
+    const rows  = await findDeadLetter(limit);
     return reply.send({ count: rows.length, deadLetter: rows });
   });
 }

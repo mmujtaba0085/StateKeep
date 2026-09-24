@@ -28,7 +28,7 @@ startHeartbeat('snapshot');
 
 async function snapshotLoop() {
   while (true) {
-    await new Promise(r => setTimeout(r, INTERVAL_MS));
+    await new Promise(r => { setTimeout(r, INTERVAL_MS); });
 
     try {
       if (isPostgres) {

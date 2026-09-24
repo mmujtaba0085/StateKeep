@@ -12,7 +12,6 @@
 import { getEngine } from './engine.js';
 import {
   FNV64_OFFSET,
-  bigIntToHex64,
   computeHistoryFingerprint,
   updateFingerprint as updateFingerprintPure,
 } from './fingerprintChain.js';

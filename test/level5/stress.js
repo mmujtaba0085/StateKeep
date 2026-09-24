@@ -109,10 +109,12 @@ describe('S2: Sustained 500 events/sec for 10 seconds', { skip: !RUN_STRESS ? SK
     const latencies = [];
     const errors    = [];
 
-    // Round-robin events across actors
-    const events = ids.map((id, i) => ({ id, type: i % 2 === 0 ? 'FAIL' : 'COMPLETE' }));
+    // Round-robin across actors. Each actor alternates FAIL → RETRY so it stays live for
+    // all 100 of its events. (Previously half the actors got COMPLETE — final on the first
+    // event — so the other 99 events each were rejected: 25 × 99 = 2,475 "errors".)
     const tasks  = Array.from({ length: TOTAL }, (_, i) => {
-      const { id, type } = events[i % events.length];
+      const id   = ids[i % ids.length];
+      const type = Math.floor(i / ids.length) % 2 === 0 ? 'FAIL' : 'RETRY';
       return async () => {
         const t0 = Date.now();
         const r  = await post(`/v1/actors/${id}/event`, { type });

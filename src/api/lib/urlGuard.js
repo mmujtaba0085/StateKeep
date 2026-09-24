@@ -64,3 +64,44 @@ export async function assertSafeWebhookUrl(url) {
   const bad = addrs.find((a) => isBlockedAddress(a.address));
   if (bad) throw new Error(`Webhook url resolves to a non-public address (${bad.address})`);
 }
+
+// ── Delivery with connect-time address pinning (closes DNS rebinding) ──────────
+// assertSafeWebhookUrl() checks what the name resolves to *now*; an attacker's DNS
+// could answer differently a moment later when fetch() connects. Here the check runs
+// inside the socket's own DNS lookup, so the address that is validated is exactly
+// the address that is connected to.
+import https from 'https';
+import http from 'http';
+import dns from 'dns';
+
+export function guardedLookup(hostname, options, callback) {
+  dns.lookup(hostname, { ...options, all: true, verbatim: true }, (err, addresses) => {
+    if (err) return callback(err);
+    const bad = addresses.find((a) => isBlockedAddress(a.address));
+    if (bad) return callback(Object.assign(new Error(`Webhook host resolves to a non-public address (${bad.address})`), { code: 'EBLOCKEDADDR' }));
+    if (options?.all) return callback(null, addresses);
+    return callback(null, addresses[0].address, addresses[0].family);
+  });
+}
+
+/** POST a webhook body. Never follows redirects. Resolves { status }. */
+export async function postWebhook(url, body, headers, timeoutMs = 10_000) {
+  await assertSafeWebhookUrl(url);                       // scheme / literal-IP / syntax checks
+  const u = new URL(url);
+  const testLocal = isTestLocalhost(url);
+  const lib = u.protocol === 'https:' ? https : http;
+  return new Promise((resolve, reject) => {
+    const req = lib.request(u, {
+      method:  'POST',
+      headers: { ...headers, 'Content-Length': Buffer.byteLength(body) },
+      timeout: timeoutMs,
+      ...(testLocal ? {} : { lookup: guardedLookup }),
+    }, (res) => {
+      res.resume();                                      // drain; response body is not used
+      res.on('end', () => resolve({ status: res.statusCode, ok: res.statusCode >= 200 && res.statusCode < 300 }));
+    });
+    req.on('timeout', () => req.destroy(Object.assign(new Error(`Request timed out after ${timeoutMs / 1000}s`), { name: 'AbortError' })));
+    req.on('error', reject);
+    req.end(body);
+  });
+}

@@ -12,7 +12,7 @@
 import { spawnActor, sendEvent, getActorState, terminateActor } from '../../runtime/actorManager.js';
 import { getWriteBuffer } from '../../runtime/writeBuffer.js';
 import { findActorById, getActorIdentity, listActors, findNeedsRescueActors, updateActorStatus, getActorCountsByStatus } from '../../registry/actorRepo.js';
-import { findDefinitionById, findLatestInFamily } from '../../registry/definitionRepo.js';
+import { findDefinitionById, findLatestInFamily, findMachineIdsByName } from '../../registry/definitionRepo.js';
 import { findDecisionsByActor } from '../../registry/jobRepo.js';
 import { cancelAllPendingForActor } from '../../registry/scheduledEventRepo.js';
 import { getDb, isPostgres, encrypt, decrypt } from '../../registry/db.js';
@@ -66,6 +66,18 @@ export async function actorRoutes(fastify) {
     if (!exactDef || exactDef.machineId === rawDefinitionId) {
       const latest = await findLatestInFamily(rawDefinitionId);
       if (latest) resolvedDefinitionId = latest.id;
+    }
+    // Also accept the machine's own name (the `id` inside the definition JSON, e.g.
+    // "loan"), as the API docs show. Refuse if two families share that name.
+    if (!exactDef && resolvedDefinitionId === rawDefinitionId) {
+      const families = await findMachineIdsByName(rawDefinitionId);
+      if (families.length > 1) {
+        return reply.code(409).send({ error: `Machine name '${rawDefinitionId}' is ambiguous — it matches ${families.join(', ')}. Use a definition id.` });
+      }
+      if (families.length === 1) {
+        const latest = await findLatestInFamily(families[0]);
+        if (latest) resolvedDefinitionId = latest.id;
+      }
     }
 
     try {
@@ -165,7 +177,7 @@ export async function actorRoutes(fastify) {
       }
     }
 
-    const event    = { type: eventType, ...(payload ?? {}) };
+    const event    = { ...(payload ?? {}), type: eventType };  // payload must not override the event type
     const _pri     = request.headers['x-priority'];
     const priority = _pri === 'urgent' ? 'urgent' : _pri === 'high' ? 'high' : 'normal';
 
@@ -203,7 +215,7 @@ export async function actorRoutes(fastify) {
       request.log.error(err);
       let code = 400;
       if (err.message.includes('not found')) code = 404;
-      if (err.code === 'ACTOR_NEEDS_RESCUE')  code = 409;
+      if (err.code === 'ACTOR_NEEDS_RESCUE' || err.code === 'ACTOR_TERMINATED' || err.code === 'ACTOR_ARCHIVED') code = 409;
       return reply.code(code).send({
         error:  err.message,
         ...(err.code ? { code: err.code } : {}),
@@ -281,7 +293,7 @@ export async function actorRoutes(fastify) {
       const tick       = eng.clockTick();
       const tickNum    = Number(tick);
       const encPayload = payload ? encrypt(Buffer.from(JSON.stringify(payload))) : null;
-      const event      = { type: eventType, ...(payload ?? {}) };
+      const event      = { ...(payload ?? {}), type: eventType };  // payload must not override the event type
 
       try {
         const result = await sendEvent(id, event, tickNum, {
@@ -304,7 +316,7 @@ export async function actorRoutes(fastify) {
         if (result.done) break;
       } catch (err) {
         results.push({ error: err.message, code: err.code ?? null });
-        if (err.code === 'ACTOR_NEEDS_RESCUE') break;
+        if (err.code === 'ACTOR_NEEDS_RESCUE' || err.code === 'ACTOR_TERMINATED' || err.code === 'ACTOR_ARCHIVED') break;
       }
     }
 
@@ -455,7 +467,14 @@ export async function actorRoutes(fastify) {
       const priority = _pri2 === 'urgent' ? 'urgent' : _pri2 === 'high' ? 'high' : 'normal';
       const cancelled = await cancelAllPendingForActor(id);
       await terminateActor(id, { priority });
-      return reply.code(200).send({ cancelled });
+      const after = await findActorById(id);
+      // Response shape per docs/API.md (plus the number of cancelled scheduled events)
+      return reply.code(200).send({
+        actorId:    id,
+        stateValue: after?.stateValue ?? null,
+        status:     after?.status ?? 'terminated',
+        cancelled,
+      });
     } catch (err) {
       const code = err.message.includes('not found') ? 404 : 500;
       return reply.code(code).send({ error: err.message });
@@ -621,7 +640,12 @@ export async function actorRoutes(fastify) {
           resolvedIdCache.set(raw, raw);
         } else {
           // Family root ID or not found → resolve to latest active in family
-          const latest = await findLatestInFamily(raw);
+          let latest = await findLatestInFamily(raw);
+          if (!latest && !exactDef) {
+            // Machine name from the definition JSON (e.g. "loan"), if unambiguous
+            const families = await findMachineIdsByName(raw);
+            if (families.length === 1) latest = await findLatestInFamily(families[0]);
+          }
           resolvedIdCache.set(raw, latest ? latest.id : raw);
         }
       }

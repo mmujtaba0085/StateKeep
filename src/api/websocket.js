@@ -40,45 +40,46 @@ export function notifyStateChange(actorId, stateValue, context) {
 export async function websocketRoutes(fastify) {
   fastify.get('/v1/actors/:id/stream', { websocket: true }, async (socket, request) => {
     const actorId = request.params.id;
+    let ping = null;
+    let closed = false;
+    const unsubscribe = () => {
+      closed = true;
+      if (ping) clearInterval(ping);
+      const subs = subscribers.get(actorId);
+      if (subs) {
+        subs.delete(socket);
+        if (subs.size === 0) subscribers.delete(actorId);
+      }
+    };
+    // Register before any await: a client that disconnects during the lookup must
+    // not leave a dead socket (and its ping timer) in the subscriber map forever.
+    socket.on('close', () => {
+      unsubscribe();
+      request.log.info(`[ws] Client unsubscribed from actor ${actorId}`);
+    });
 
-    // Verify actor exists and belongs to requesting org
     const actor = await findActorById(actorId);
+    if (closed) return;
     if (!actor) {
       socket.send(JSON.stringify({ type: 'ERROR', message: `Actor ${actorId} not found` }));
       socket.close(4004, 'Actor not found');
       return;
     }
 
-    // Register subscriber
     if (!subscribers.has(actorId)) subscribers.set(actorId, new Set());
     subscribers.get(actorId).add(socket);
     request.log.info(`[ws] Client subscribed to actor ${actorId}`);
 
-    // Send current state immediately
     try {
       const state = await getActorState(actorId);
-      socket.send(JSON.stringify({ type: 'STATE', ...state, timestamp: new Date().toISOString() }));
+      if (!closed) socket.send(JSON.stringify({ type: 'STATE', ...state, timestamp: new Date().toISOString() }));
     } catch {}
 
-    // Keepalive
-    const ping = setInterval(() => {
+    ping = setInterval(() => {
       try { socket.send(JSON.stringify({ type: 'PING' })); } catch {}
     }, 30_000);
+    if (closed) unsubscribe();
 
-    socket.on('close', () => {
-      clearInterval(ping);
-      const subs = subscribers.get(actorId);
-      if (subs) {
-        subs.delete(socket);
-        if (subs.size === 0) subscribers.delete(actorId);
-      }
-      request.log.info(`[ws] Client unsubscribed from actor ${actorId}`);
-    });
-
-    socket.on('error', () => {
-      clearInterval(ping);
-      const subs = subscribers.get(actorId);
-      if (subs) subs.delete(socket);
-    });
+    socket.on('error', unsubscribe);
   });
 }

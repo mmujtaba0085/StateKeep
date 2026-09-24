@@ -13,10 +13,11 @@ before(async () => {
   await put('/v1/definitions', { id: 'term-test-v1', definition: SAMPLE_MACHINE_V1 });
 });
 
-test('DELETE /v1/actors/:id returns 204', async () => {
+test('DELETE /v1/actors/:id returns 200 with terminated status (docs/API.md)', async () => {
   const { id } = (await post('/v1/actors', { definitionId: 'term-test-v1' })).body;
   const r = await del(`/v1/actors/${id}`);
-  assert.equal(r.status, 204);
+  assert.equal(r.status, 200);
+  assert.equal(r.body.status, 'terminated');
 });
 
 test('after DELETE, actor status is terminated in DB', async () => {
@@ -31,11 +32,12 @@ test('after DELETE, actor status is terminated in DB', async () => {
   assert.equal(row.status, 'terminated');
 });
 
-test('sending event to terminated actor returns 400', async () => {
+test('sending event to terminated actor returns 409 ACTOR_TERMINATED', async () => {
   const { id } = (await post('/v1/actors', { definitionId: 'term-test-v1' })).body;
   await del(`/v1/actors/${id}`);
   const r = await post(`/v1/actors/${id}/event`, { type: 'START' });
-  assert.ok([400, 404].includes(r.status), `Expected 400 or 404, got ${r.status}`);
+  assert.equal(r.status, 409, `Expected 409, got ${r.status}`);
+  assert.equal(r.body.code, 'ACTOR_TERMINATED');
 });
 
 test('DELETE non-existent actor returns 404', async () => {
@@ -59,7 +61,7 @@ test('GC worker archives actors idle > 24h', async () => {
 
   // Import and run GC directly
   const { findIdleActors, updateActorStatus } = await import('../src/registry/actorRepo.js');
-  const idle = findIdleActors(24 * 60 * 60 * 1000, 10);
+  const idle = await findIdleActors(24 * 60 * 60 * 1000, 10);   // async since the Postgres backend was added
   const gcActor = idle.find(a => a.id === fakeId);
   assert.ok(gcActor, 'Idle actor should be found by GC query');
 

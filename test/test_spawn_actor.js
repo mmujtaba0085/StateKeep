@@ -33,7 +33,12 @@ test('POST /v1/actors with missing definition returns 400', async () => {
   assert.ok(res.body.error);
 });
 
-test('POST /v1/actors without API key returns 401', async () => {
+// These two need a server started WITH STATEKEEP_API_KEY. The shared test server runs in
+// open (loopback-only) mode, so they are skipped there; test/test_security.js starts its
+// own keyed server and covers 401/403 and the rest of the access-control rules.
+const keyed = !!process.env.STATEKEEP_API_KEY;
+
+test('POST /v1/actors without API key returns 401', { skip: !keyed && 'server not in API-key mode' }, async () => {
   const res = await fetch(`${BASE_URL}/v1/actors`, {
     method:  'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -42,7 +47,7 @@ test('POST /v1/actors without API key returns 401', async () => {
   assert.equal(res.status, 401);
 });
 
-test('POST /v1/actors with wrong API key returns 403', async () => {
+test('POST /v1/actors with wrong API key returns 403', { skip: !keyed && 'server not in API-key mode' }, async () => {
   const res = await post('/v1/actors', { definitionId: 'spawn-test-v1' }, { 'X-API-Key': 'bad-key' });
   assert.equal(res.status, 403);
 });

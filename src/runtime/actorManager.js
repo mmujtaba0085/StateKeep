@@ -5,6 +5,7 @@
  * Public API consumed by the Fastify route handlers.
  */
 
+import { randomUUID } from 'crypto';
 import { randomInt } from 'crypto';
 import { LRUCache } from './lruCache.js';
 import { fingerprintToBigInt, regionFingerprintsToArray } from '../ffi/hashUtils.js';
@@ -22,7 +23,6 @@ import {
   findActorById,
   updateActorState,
   updateActorStatus,
-  findIdleActors,
 } from '../registry/actorRepo.js';
 import { findDefinitionById } from '../registry/definitionRepo.js';
 import { consumePendingNotifications } from '../registry/migrationNotificationRepo.js';
@@ -30,7 +30,6 @@ import { getDb, encrypt, isPostgres } from '../registry/db.js';
 import { serializeRegionFingerprints } from '../registry/regionFingerprintCodec.js';
 import { emitWebhookEvent } from '../api/lib/webhookEmitter.js';
 import { getWildcardChildDef, loadChangepointsAfter, loadParChangepointsAfter } from '../registry/changepointRepo.js';
-import { insertActionJob } from '../registry/actionJobRepo.js';
 import { cancelAllPendingForActor } from '../registry/scheduledEventRepo.js';
 
 const HOT_REGISTRY_SIZE  = parseInt(process.env.HOT_REGISTRY_SIZE    ?? '10000',  10);
@@ -239,7 +238,7 @@ export async function spawnActor({ definitionId, initialContext, logicalStartTic
   const regionFingerprints = initializeRegionFingerprints(def.definitionJson, stateValue, null);
 
   const pool    = getWorkerPool();
-  const actorId = (await import('uuid')).v4();
+  const actorId = randomUUID();
 
   const actorLogicalTick = logicalStartTick ?? def.deployedAt ?? 0;
 
@@ -323,7 +322,8 @@ export async function sendEvent(actorId, event, tick, opts = {}) {
     const actor = await findActorById(actorId);
     if (!actor) throw new Error(`Actor not found: ${actorId}`);
     if (actor.status === 'terminated' || actor.status === 'archived') {
-      throw new Error(`Actor ${actorId} is ${actor.status}`);
+      throw Object.assign(new Error(`Actor ${actorId} is ${actor.status}`),
+        { code: actor.status === 'archived' ? 'ACTOR_ARCHIVED' : 'ACTOR_TERMINATED', statusCode: 409 });
     }
     if (actor.status === 'migrating') {
       throw new Error(`Actor ${actorId} is currently being migrated — retry shortly`);
@@ -543,16 +543,16 @@ export async function sendEvent(actorId, event, tick, opts = {}) {
   }
 
   // Queue durable actions to action_jobs table (retried by actionJobWorker)
-  for (const { name, fn, context: ctx, event: ev, opts } of interpResult.durableActions) {
-    insertActionJob({
-      actorId,
-      actionName:  name,
-      context:     ctx,
-      event:       ev,
-      maxRetries:  opts?.maxRetries ?? 3,
-      fireAt:      Date.now(),
-    }).catch(err => console.error(`[actorManager] insertActionJob failed for '${name}':`, err.message));
-  }
+  // Durable action jobs go through the write buffer so they commit in the same
+  // transaction as this transition (see WriteBuffer.queueActionJob).
+  const _durableJobs = interpResult.durableActions.map(({ name, context: ctx, event: ev, opts }) => ({
+    actorId,
+    actionName:  name,
+    context:     ctx,
+    event:       ev,
+    maxRetries:  opts?.maxRetries ?? 3,
+    fireAt:      Date.now(),
+  }));
 
   // Start invoke services for the new state
   for (const invoke of (interpResult.invokesToStart ?? [])) {
@@ -624,7 +624,10 @@ export async function sendEvent(actorId, event, tick, opts = {}) {
       _omitContextWrite:  !contextChanged,
     });
     if (eventData) buf.queueEvent(eventData);
+    for (const job of _durableJobs) buf.queueActionJob(job);
     if (durability === 'sync') await buf.flush();
+  } else {
+    for (const job of _durableJobs) buf.queueActionJob(job);  // never drop durable work
   }
 
   // ── after: scheduled event lifecycle ──────────────────────────────────────────
@@ -917,7 +920,6 @@ export async function migrateActor(actorId, targetDefinitionId, { priority = 'no
   }
 
   if (hotRegistry.has(actorId)) {
-    const existing = hotRegistry.get(actorId);
     touch(actorId, {
       definitionId:       targetDefinitionId,
       stateValue:         result.stateValue,

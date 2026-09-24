@@ -11,7 +11,7 @@
 
 import { createHash } from 'crypto';
 import { createInterface } from 'readline';
-import { readdirSync, readFileSync, writeFileSync, existsSync, statSync } from 'fs';
+import { readdirSync, readFileSync, writeFileSync } from 'fs';
 import { resolve, relative } from 'path';
 import { createClient } from './client.js';
 import { extractDefinition } from './extractor.js';

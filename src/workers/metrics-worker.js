@@ -123,7 +123,7 @@ async function metricsLoop() {
     } catch (err) {
       console.error('[metrics-worker] Error:', err);
     }
-    await new Promise(r => setTimeout(r, INTERVAL_MS));
+    await new Promise(r => { setTimeout(r, INTERVAL_MS); });
   }
 }
 

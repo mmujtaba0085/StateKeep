@@ -69,8 +69,16 @@ const fastify = Fastify({
       },
     } : {}),
   },
-  trustProxy: true,
-  maxParamLength: 200,
+  // Only trust X-Forwarded-For from proxies you name. Trusting everyone (the old
+  // `true`) let any client pick its own IP and so dodge the per-IP rate limit.
+  // e.g. STATEKEEP_TRUST_PROXY=loopback (Caddy/nginx on the same host) or a CIDR list.
+  trustProxy: (() => {
+    const v = process.env.STATEKEEP_TRUST_PROXY;
+    if (!v || v === 'false') return false;
+    if (v === 'true') return true;
+    return v.split(',').map((x) => x.trim()).filter(Boolean);
+  })(),
+  routerOptions: { maxParamLength: 200 },
   bodyLimit: 1_048_576,
 });
 
@@ -101,7 +109,8 @@ await fastify.register(FastifySwaggerUI, {
   staticCSP:   true,
 });
 
-await fastify.register(FastifyWebSocket);
+// Clients only receive on this socket; cap inbound frames so a peer can't make ws buffer 100 MB (its default).
+await fastify.register(FastifyWebSocket, { options: { maxPayload: 4096 } });
 
 if (process.env.STATEKEEP_RATE_LIMIT !== 'false') {
   await fastify.register(FastifyRateLimit, {
@@ -111,11 +120,26 @@ if (process.env.STATEKEEP_RATE_LIMIT !== 'false') {
     allowList:  (_req, _key) => process.env.NODE_ENV === 'test',
     keyGenerator: (req) => req.ip,
     errorResponseBuilder: (_req, context) => ({
+      statusCode: 429,              // @fastify/rate-limit throws this object; without it the reply was a 500
       error:      'Rate limit exceeded',
       limit:      context.max,
       timeWindow: context.after,
       retryAfter: context.ttl,
     }),
+  });
+}
+
+// ── JSON bodies: accept an empty body (Fastify 4 behaviour) ──────────────────────
+// Fastify 5 rejects `Content-Type: application/json` with an empty body (400
+// FST_ERR_CTP_EMPTY_JSON_BODY). The dashboard, SDK and many HTTP clients send that
+// header on bodiless DELETE/POST calls, so keep them working. Non-empty bodies still
+// go through Fastify's own parser (secure-json-parse, __proto__ poisoning → error).
+{
+  const defaultJson = fastify.getDefaultJsonParser('error', 'error');
+  fastify.removeContentTypeParser('application/json');
+  fastify.addContentTypeParser('application/json', { parseAs: 'string' }, (req, body, done) => {
+    if (body === '' || /^\s*$/.test(body)) return done(null, undefined);
+    return defaultJson(req, body, done);
   });
 }
 
@@ -135,8 +159,10 @@ fastify.addHook('onRequest', async (req, reply) => {
 await fastify.register(FastifyStatic, {
   root:        join(__dirname, '..', 'dashboard'),
   prefix:      '/dashboard/',
-  setHeaders:  (res) => {
-    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+  // @fastify/static >= 10 passes the Fastify reply (older versions passed the raw res).
+  setHeaders:  (reply) => {
+    if (typeof reply.header === 'function') reply.header('Cache-Control', 'no-cache, no-store, must-revalidate');
+    else reply.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
   },
 });
 
@@ -166,7 +192,7 @@ fastify.get('/api-explorer', { schema: { hide: true } }, async (_req, reply) => 
   <title>StateKeep API Explorer</title>
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css">
+  <link rel="stylesheet" href="/docs/static/swagger-ui.css">
   <style>
     body { margin: 0; background: #080a0f; }
     .topbar { display: none !important; }
@@ -174,7 +200,8 @@ fastify.get('/api-explorer', { schema: { hide: true } }, async (_req, reply) => 
   </style>
 </head><body>
 <div id="swagger-ui"></div>
-<script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+<!-- Served locally by @fastify/swagger-ui: no third-party CDN, no floating "@5" version -->
+<script src="/docs/static/swagger-ui-bundle.js"></script>
 <script>
   let ui;
   ui = SwaggerUIBundle({
@@ -184,7 +211,11 @@ fastify.get('/api-explorer', { schema: { hide: true } }, async (_req, reply) => 
     layout: 'BaseLayout',
     deepLinking: true,
     persistAuthorization: true,
-    requestInterceptor: (req) => req,
+    // Reuse the API key the dashboard stored for this tab (if the server requires one).
+    requestInterceptor: (req) => {
+      try { const k = sessionStorage.getItem('statekeep_api_key'); if (k) req.headers['X-API-Key'] = k; } catch (e) {}
+      return req;
+    },
     onComplete: () => {}
   });
 </script>

@@ -4,7 +4,7 @@
  */
 
 import { watch } from 'fs';
-import { readdirSync, statSync } from 'fs';
+import { readdirSync } from 'fs';
 import { join, resolve } from 'path';
 import { pushCommand } from './push.js';
 

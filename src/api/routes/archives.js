@@ -8,7 +8,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from 'fs';
 import { gunzipSync, gzipSync } from 'zlib';
 import { join } from 'path';
-import { getDb, encrypt, isPostgres } from '../../registry/db.js';
+import { getDb, isPostgres } from '../../registry/db.js';
 import { findActorById, createActor, updateActorStatus } from '../../registry/actorRepo.js';
 import { cancelAllPendingForActor } from '../../registry/scheduledEventRepo.js';
 import { evictFromHotRegistry } from '../../runtime/actorManager.js';

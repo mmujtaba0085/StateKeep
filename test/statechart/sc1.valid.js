@@ -105,13 +105,15 @@ describe('SC1-A: Minimal machine (off → on)', () => {
     assert.equal(r.body.done, true);
   });
 
-  test('event after final state is ignored gracefully', async () => {
+  test('event after final state is rejected with 409 and does not change state', async () => {
     const spawnRes = await spawn(defId);
     const id = spawnRes.body.id;
     await send(id, 'TURN_ON');
     const r = await send(id, 'TURN_ON');
-    assert.equal(r.status, 200, 'Should not error on event to final actor');
-    assert.equal(r.body.stateValue, 'on');
+    assert.equal(r.status, 409, 'Event to a finished actor → 409 (docs/API.md)');
+    assert.equal(r.body.code, 'ACTOR_TERMINATED');
+    const after = await get(`/v1/actors/${id}`);
+    assert.equal(after.body.stateValue, 'on');
   });
 });
 

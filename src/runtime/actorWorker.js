@@ -33,21 +33,29 @@ import {
 
 // ── Context transform helpers ─────────────────────────────────────────────────
 
+// Path segments that would reach Object.prototype (prototype pollution).
+const FORBIDDEN_PATH_KEYS = new Set(['__proto__', 'prototype', 'constructor']);
+export function isSafeContextPath(path) {
+  return typeof path === 'string' && path.length > 0 &&
+    path.split('.').every((k) => k.length > 0 && !FORBIDDEN_PATH_KEYS.has(k));
+}
+
 export function getNestedValue(obj, path) {
-  if (!obj || typeof obj !== 'object' || !path) return undefined;
+  if (!obj || typeof obj !== 'object' || !isSafeContextPath(path)) return undefined;
   return String(path).split('.').reduce(
-    (current, key) => current != null ? current[key] : undefined,
+    (current, key) => (current != null && Object.prototype.hasOwnProperty.call(current, key)) ? current[key] : undefined,
     obj
   );
 }
 
 export function setNestedValue(obj, path, value) {
   if (!obj || typeof obj !== 'object' || !path) return obj;
+  if (!isSafeContextPath(path)) throw new Error(`Unsafe context path '${path}'`);
   const keys = String(path).split('.');
   const last = keys.pop();
   let curr = obj;
   for (const key of keys) {
-    if (curr[key] == null || typeof curr[key] !== 'object') curr[key] = {};
+    if (!Object.prototype.hasOwnProperty.call(curr, key) || curr[key] == null || typeof curr[key] !== 'object') curr[key] = {};
     curr = curr[key];
   }
   curr[last] = value;
@@ -297,7 +305,7 @@ function handleHydrate({
 }) {
   removeActorEntry(actorId);
 
-  const { compiledJson, definitionJson } = getOrCompileDefinition(targetDefinitionId, targetDefinitionJson);
+  const { compiledJson } = getOrCompileDefinition(targetDefinitionId, targetDefinitionJson);
   const newStates = targetDefinitionJson.states ?? {};
 
   let transformedContext;
