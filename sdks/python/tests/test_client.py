@@ -83,7 +83,7 @@ class OfflineTest(unittest.TestCase):
         self.assertEqual(svc.handle("POST", "/statekeep/guards/big", headers, body, "/statekeep"), (200, {"result": True}))
         self.assertEqual(svc.handle("POST", "/statekeep/actions/notify", headers, body, "/statekeep")[1]["send"]["type"], "NOTIFIED")
         mh = {"X-StateKeep-Timestamp": ts, "X-StateKeep-Signature": sign("sec", ts, b"")}
-        self.assertEqual(svc.handle("GET", "/statekeep/manifest", mh, b"", "/statekeep")[1], {"guards": ["big"], "actions": ["notify"]})
+        self.assertEqual(svc.handle("GET", "/statekeep/manifest", mh, b"", "/statekeep")[1], {"guards": ["big"], "actions": ["notify"], "delivery": {"notify": "at-most-once"}})
         bad = {"X-StateKeep-Timestamp": ts, "X-StateKeep-Signature": "sha256=forged"}
         self.assertEqual(svc.handle("POST", "/statekeep/guards/big", bad, body, "/statekeep")[0], 401)
 
@@ -107,6 +107,80 @@ class OfflineTest(unittest.TestCase):
         self.assertEqual(calls, ["j1"])
         post(b'{"jobId":"j2"}')
         self.assertEqual(calls, ["j1", "j2"])
+
+
+    def _post(self, svc, path, body):
+        ts = str(int(time.time() * 1000))
+        h = {"X-StateKeep-Timestamp": ts, "X-StateKeep-Signature": sign("sec", ts, body)}
+        return svc.handle("POST", path, h, body, "/statekeep")
+
+    def test_delivery_modes_and_status(self):
+        import os
+        import tempfile
+        path = os.path.join(tempfile.mkdtemp(), "jobs.sqlite")
+        svc = ImplementationService(secret="sec", job_store=path)
+        effects = []
+
+        @svc.action("charge", delivery="idempotent")
+        def charge(req):
+            effects.append(("charge", req["jobId"]))
+            return {"send": {"type": "CHARGED"}}
+
+        @svc.action("notify")                 # durable store → verify by default
+        def notify(req):
+            effects.append(("notify", req["jobId"]))
+            return {"send": {"type": "NOTIFIED"}}
+
+        @svc.action("refund")
+        def refund(req):
+            return {}
+
+        @svc.verifier("refund")
+        def refund_happened(req):
+            return req["jobId"] == "r-yes"
+
+        ts = str(int(time.time() * 1000))
+        mh = {"X-StateKeep-Timestamp": ts, "X-StateKeep-Signature": sign("sec", ts, b"")}
+        self.assertEqual(svc.handle("GET", "/statekeep/manifest", mh, b"", "/statekeep")[1]["delivery"],
+                         {"charge": "idempotent", "notify": "verify", "refund": "verify"})
+
+        # status of a job never seen, with a durable store: certainly not done
+        self.assertEqual(self._post(svc, "/statekeep/actions/notify/status", b'{"jobId":"n1"}'), (200, {"done": False}))
+        self._post(svc, "/statekeep/actions/notify", b'{"jobId":"n1"}')
+        self.assertEqual(self._post(svc, "/statekeep/actions/notify/status", b'{"jobId":"n1"}'),
+                         (200, {"done": True, "send": {"type": "NOTIFIED"}}))
+        # retry replays, no second effect
+        self._post(svc, "/statekeep/actions/notify", b'{"jobId":"n1"}')
+        self.assertEqual(effects, [("notify", "n1")])
+
+        # a job that started and never finished (service crashed mid-action)
+        svc.store.start("n2")
+        self.assertEqual(self._post(svc, "/statekeep/actions/notify/status", b'{"jobId":"n2"}'), (200, {"done": None}))
+        self.assertEqual(self._post(svc, "/statekeep/actions/notify", b'{"jobId":"n2"}')[0], 409)
+        # …but an idempotent action is simply run again
+        svc.store.start("c1")
+        self.assertEqual(self._post(svc, "/statekeep/actions/charge", b'{"jobId":"c1"}')[0], 200)
+
+        # custom verifier answers from the real system
+        self.assertEqual(self._post(svc, "/statekeep/actions/refund/status", b'{"jobId":"r-yes"}')[1], {"done": True})
+        self.assertEqual(self._post(svc, "/statekeep/actions/refund/status", b'{"jobId":"r-no"}')[1], {"done": False})
+
+        # the store survives a restart of the service
+        svc2 = ImplementationService(secret="sec", job_store=path)
+        svc2.action("notify")(notify)
+        self.assertEqual(self._post(svc2, "/statekeep/actions/notify/status", b'{"jobId":"n1"}')[1]["done"], True)
+
+    def test_in_memory_store_is_honest(self):
+        svc = ImplementationService(secret="sec")
+
+        @svc.action("send_sms")
+        def send_sms(req):
+            raise RuntimeError("gateway down")
+
+        # raising = did not happen → 422 (StateKeep may retry)
+        self.assertEqual(self._post(svc, "/statekeep/actions/send_sms", b'{"jobId":"s1"}')[0], 422)
+        # the in-memory store can't know about jobs from before a restart
+        self.assertEqual(self._post(svc, "/statekeep/actions/send_sms/status", b'{"jobId":"zz"}')[1], {"done": None})
 
 
 if __name__ == "__main__":

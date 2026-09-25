@@ -250,6 +250,22 @@ type Request struct {
 	State        any            `json:"state"`
 	Context      map[string]any `json:"context"`
 	Event        map[string]any `json:"event"`
+	// JobID identifies one action job across retries: pass it downstream as an
+	// idempotency key (see docs/side-effects.md).
+	JobID string `json:"jobId,omitempty"`
+}
+
+// Delivery modes: what StateKeep does when an action attempt was sent but never answered.
+const (
+	Idempotent = "idempotent"   // send again; the side effect dedupes on Request.JobID
+	Verify     = "verify"       // ask the Verifier first
+	AtMostOnce = "at-most-once" // never repeat; a human decides (the default)
+)
+
+// VerifyResult answers "did job X happen?". Done=nil means nobody can tell.
+type VerifyResult struct {
+	Done *bool          `json:"done"`
+	Send map[string]any `json:"send,omitempty"`
 }
 
 // ActionResult optionally sends a follow-up event to the actor.
@@ -260,24 +276,49 @@ type ActionResult struct {
 // Implementations is an http.Handler serving remote guards and actions. Mount it at
 // the prefix configured in STATEKEEP_REMOTE_URL, e.g. http.Handle("/statekeep/", http.StripPrefix("/statekeep", impl)).
 type Implementations struct {
-	Secret  string
-	MaxSkew time.Duration
-	guards  map[string]func(Request) (bool, error)
-	actions map[string]func(Request) (*ActionResult, error)
+	Secret    string
+	MaxSkew   time.Duration
+	guards    map[string]func(Request) (bool, error)
+	actions   map[string]func(Request) (*ActionResult, error)
+	delivery  map[string]string
+	verifiers map[string]func(Request) (VerifyResult, error)
 }
 
 // NewImplementations creates an empty handler.
 func NewImplementations(secret string) *Implementations {
 	return &Implementations{Secret: secret, MaxSkew: 5 * time.Minute,
-		guards: map[string]func(Request) (bool, error){}, actions: map[string]func(Request) (*ActionResult, error){}}
+		guards: map[string]func(Request) (bool, error){}, actions: map[string]func(Request) (*ActionResult, error){},
+		delivery: map[string]string{}, verifiers: map[string]func(Request) (VerifyResult, error){}}
 }
 
 // Guard registers a guard.
 func (s *Implementations) Guard(name string, fn func(Request) (bool, error)) { s.guards[name] = fn }
 
-// Action registers an action.
+// Action registers an action. Its delivery mode defaults to AtMostOnce (Verify when a
+// Verifier is registered). Returning an error means "it did not happen" (safe to retry).
 func (s *Implementations) Action(name string, fn func(Request) (*ActionResult, error)) {
 	s.actions[name] = fn
+}
+
+// ActionWithDelivery registers an action with an explicit delivery mode.
+func (s *Implementations) ActionWithDelivery(name, mode string, fn func(Request) (*ActionResult, error)) {
+	s.actions[name] = fn
+	s.delivery[name] = mode
+}
+
+// Verifier registers the "did job X happen?" check used by the Verify mode.
+func (s *Implementations) Verifier(name string, fn func(Request) (VerifyResult, error)) {
+	s.verifiers[name] = fn
+}
+
+func (s *Implementations) deliveryOf(name string) string {
+	if m, ok := s.delivery[name]; ok {
+		return m
+	}
+	if _, ok := s.verifiers[name]; ok {
+		return Verify
+	}
+	return AtMostOnce
 }
 
 func (s *Implementations) verify(r *http.Request, body []byte) bool {
@@ -308,10 +349,29 @@ func (s *Implementations) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		for k := range s.guards {
 			g = append(g, k)
 		}
+		d := map[string]string{}
 		for k := range s.actions {
 			a = append(a, k)
+			d[k] = s.deliveryOf(k)
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"guards": g, "actions": a})
+		writeJSON(w, http.StatusOK, map[string]any{"guards": g, "actions": a, "delivery": d})
+		return
+	}
+	if r.Method == http.MethodPost && len(parts) == 3 && parts[0] == "actions" && parts[2] == "status" {
+		name, _ := url.PathUnescape(parts[1])
+		var req Request
+		_ = json.Unmarshal(body, &req)
+		fn, ok := s.verifiers[name]
+		if !ok {
+			writeJSON(w, http.StatusOK, VerifyResult{}) // no verifier: nobody can tell
+			return
+		}
+		res, err := fn(req)
+		if err != nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, res)
 		return
 	}
 	if r.Method == http.MethodPost && len(parts) == 2 {
@@ -333,7 +393,8 @@ func (s *Implementations) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if fn, ok := s.actions[name]; ok {
 				res, err := fn(req)
 				if err != nil {
-					writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+					// an error return means the action did not happen → 422: safe to retry
+					writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 					return
 				}
 				if res == nil {

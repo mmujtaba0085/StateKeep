@@ -26,6 +26,8 @@ import { getMaxTStar } from '../registry/changepointRepo.js';
 import { seedEngineRegistry, sendEvent } from '../runtime/actorManager.js';
 import { getGlobalRegistry, setGlobalRegistry, loadRegistry } from '../runtime/implementationRegistry.js';
 import { startActionJobWorker } from '../runtime/actionJobWorker.js';
+import { deliverEventOnce } from '../runtime/deliverOnce.js';
+import { actionJobRoutes } from './routes/actionJobs.js';
 import { healthRoutes } from './routes/health.js';
 import { metricsRoutes } from './routes/metrics.js';
 import { actorRoutes } from './routes/actors.js';
@@ -186,6 +188,7 @@ await fastify.register(archiveRoutes);
 await fastify.register(webhookRoutes);
 await fastify.register(adminRoutes);
 await fastify.register(internalRoutes);
+await fastify.register(actionJobRoutes);
 await fastify.register(websocketRoutes);
 
 // ── OpenAPI JSON alias (/openapi.json → /docs/json) ──────────────────────────
@@ -329,16 +332,21 @@ await startCluster(fastify, { onRemoteStateChange: notifyLocalSubscribers });
 
 // In cluster mode the actor may be owned by another server: deliver follow-up events
 // through the routed internal dispatch instead of this process's cache.
-const _dispatchViaServer = async (actorId, event) => {
+const _dispatchViaServer = async (actorId, event, idempotencyKey) => {
   const res = await fetch(`http://127.0.0.1:${PORT}/v1/internal/actors/${encodeURIComponent(actorId)}/dispatch`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-admin-key': process.env.STATEKEEP_ADMIN_KEY ?? '' },
-    body: JSON.stringify({ event }),
+    body: JSON.stringify({ event, ...(idempotencyKey ? { idempotencyKey } : {}) }),
   });
   if (!res.ok) throw new Error(`dispatch ${res.status}`);
 };
+// Follow-up events from actions carry an idempotency key → delivered exactly once.
 startActionJobWorker(
-  (actorId, event, opts = {}) => clusterEnabled() ? _dispatchViaServer(actorId, event) : sendEvent(actorId, event, Date.now(), opts),
+  (actorId, event, opts = {}) => clusterEnabled()
+    ? _dispatchViaServer(actorId, event, opts.idempotencyKey)
+    : opts.idempotencyKey
+      ? deliverEventOnce(actorId, event, opts.idempotencyKey, { mergePayload: opts.mergePayload ?? null })
+      : sendEvent(actorId, event, Date.now(), opts),
   getGlobalRegistry()
 );
 

@@ -242,6 +242,7 @@ LEGACY_FILES=(
   test/test_plan.js
   test/test_sdks.js
   test/test_agent_sessions.js
+  test/test_delivery.js
   packages/xstate-apv/test.js
   packages/durable/test.js
 )

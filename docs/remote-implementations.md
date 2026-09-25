@@ -52,3 +52,14 @@ database the same `STATEKEEP_REMOTE_*` settings (and the same local registry): a
 without an implementation for an action marks that job failed. A claimed job is leased
 (`STATEKEEP_ACTION_LEASE_MS`, default 120 s); if its server dies, the job is claimed again
 after the lease, with the same `jobId`.
+
+## Delivery guarantees (`docs/side-effects.md`)
+
+- The manifest may declare a mode per action: `"delivery": {"chargeCard": "idempotent"}`
+  (`idempotent` | `verify` | `at-most-once`; undeclared actions are `at-most-once`).
+- Action calls carry `Idempotency-Key: <jobId>` and `jobId` in the body.
+- `POST {url}/actions/{name}/status` with the same body answers
+  `{"done": true, "send": {...}}`, `{"done": false}`, `{"done": null}` (unknown) or
+  `{"done": null, "running": true}`. It's used by `verify` after an attempt went unanswered.
+- HTTP 4xx means "not done, safe to retry". 5xx, a timeout or a reset means "maybe done".
+  409 means "already started, not finished".

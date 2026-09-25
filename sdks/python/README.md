@@ -31,3 +31,16 @@ svc.serve(port=8088, prefix="/statekeep")   # or call svc.handle(...) from Flask
 
 Also: `preview`, `import_definition`, `events`, `schedule`, `create_webhook`, `verify_webhook`.
 Tests: `STATEKEEP_URL=http://localhost:3001 python3 -m unittest discover -s tests`.
+
+## Side effects: never silently repeated
+
+```python
+svc = ImplementationService(secret, job_store="jobs.sqlite")   # remembers every job
+
+@svc.action("chargeCard", delivery="idempotent")   # retried; pass req["jobId"] downstream as the idempotency key
+@svc.action("refundOrder")                          # 'verify' (default with a job store)
+@svc.verifier("refundOrder")                        # optional: answer "did job X happen?" from the real system
+@svc.action("sendSms", delivery="at-most-once")     # never repeated; a human decides
+```
+
+Raising from an action means "it did not happen", so StateKeep may retry. See `docs/side-effects.md`.

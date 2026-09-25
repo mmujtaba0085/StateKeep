@@ -10,6 +10,7 @@
 import { evictFromHotRegistry, sendEvent } from '../../runtime/actorManager.js';
 import { notifyStateChange } from '../websocket.js';
 import { getEngine } from '../../ffi/engine.js';
+import { deliverEventOnce } from '../../runtime/deliverOnce.js';
 
 export async function internalRoutes(fastify) {
 
@@ -35,7 +36,7 @@ export async function internalRoutes(fastify) {
       hide: true,
       body: {
         type: 'object', required: ['event'],
-        properties: { event: { type: 'object', required: ['type'] }, tick: { type: 'number' } },
+        properties: { event: { type: 'object', required: ['type'] }, tick: { type: 'number' }, idempotencyKey: { type: 'string', maxLength: 200 } },
       },
     },
   }, async (request, reply) => {
@@ -46,6 +47,12 @@ export async function internalRoutes(fastify) {
       const eng    = getEngine();
       const tick   = eng.available ? Number(eng.clockTick()) : Date.now();
       const isSystem = typeof event.type === 'string' && event.type.startsWith('__SK_');
+      if (request.body.idempotencyKey) {
+        const r = await deliverEventOnce(id, event, request.body.idempotencyKey, { mergePayload: isSystem ? null : event });
+        if (r.duplicate) return reply.send({ actorId: id, duplicate: true });
+        notifyStateChange(id, r.result.stateValue, r.result.context);
+        return reply.send({ actorId: id, stateValue: r.result.stateValue, done: r.result.done });
+      }
       const result = await sendEvent(id, event, tick, { mergePayload: isSystem ? null : event });
       notifyStateChange(id, result.stateValue, result.context);
       return reply.send({ actorId: id, stateValue: result.stateValue, done: result.done });

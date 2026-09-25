@@ -50,27 +50,51 @@ export function signBody(secret, timestamp, body) {
   return 'sha256=' + createHmac('sha256', secret).update(`${timestamp}.${body}`).digest('hex');
 }
 
-async function callRemote(method, path, payload) {
+/**
+ * Errors carry `sent`: false when the request certainly never reached the service
+ * (connection refused, DNS failure) — safe to retry for any action; true when it may
+ * have been processed (timeout, connection reset, HTTP 5xx) — see docs/side-effects.md.
+ * An HTTP 4xx is the service refusing the request, so nothing happened: sent=false
+ * (except 409 IN_PROGRESS: the job was started earlier and never finished).
+ */
+const NOT_SENT_CODES = new Set(['ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'EHOSTUNREACH', 'ENETUNREACH']);
+
+async function callRemote(method, path, payload, extraHeaders = {}) {
   const { url, secret, timeoutMs } = cfg();
   const body = payload === undefined ? '' : JSON.stringify(payload);
   const ts   = String(Date.now());
-  const res  = await fetch(`${url}${path}`, {
-    method,
-    headers: {
-      'Content-Type':          'application/json',
-      'X-StateKeep-Timestamp': ts,
-      'X-StateKeep-Signature': signBody(secret, ts, body),
-    },
-    body:   method === 'GET' ? undefined : body,
-    signal: AbortSignal.timeout(timeoutMs),
-  });
-  const text = await res.text();
-  if (!res.ok) throw new Error(`remote ${path} → HTTP ${res.status} ${text.slice(0, 200)}`);
+  let res;
+  try {
+    res = await fetch(`${url}${path}`, {
+      method,
+      headers: {
+        'Content-Type':          'application/json',
+        'X-StateKeep-Timestamp': ts,
+        'X-StateKeep-Signature': signBody(secret, ts, body),
+        ...extraHeaders,
+      },
+      body:   method === 'GET' ? undefined : body,
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+  } catch (err) {
+    const code = err?.cause?.code ?? err?.code;
+    throw Object.assign(new Error(`remote ${path}: ${err.name === 'TimeoutError' ? `no answer within ${timeoutMs}ms` : (code ?? err.message)}`),
+      { sent: !NOT_SENT_CODES.has(code) });
+  }
+  let text;
+  try { text = await res.text(); }
+  catch (err) { throw Object.assign(new Error(`remote ${path}: response lost (${err.message})`), { sent: true }); }
+  if (!res.ok) {
+    throw Object.assign(new Error(`remote ${path} → HTTP ${res.status} ${text.slice(0, 200)}`),
+      // 409 IN_PROGRESS: the service already started this job and it never finished
+      { sent: res.status >= 500 || res.status === 409, status: res.status });
+  }
   return text ? JSON.parse(text) : {};
 }
 
 // ── Manifest ────────────────────────────────────────────────────────────────
-let manifest = { guards: new Set(), actions: new Set(), fetchedAt: 0 };
+let manifest = { guards: new Set(), actions: new Set(), delivery: {}, fetchedAt: 0 };
+export const DELIVERY_MODES = new Set(['idempotent', 'verify', 'at-most-once']);
 const MANIFEST_TTL_MS = 30_000;
 
 export async function refreshRemoteManifest({ force = false } = {}) {
@@ -78,7 +102,9 @@ export async function refreshRemoteManifest({ force = false } = {}) {
   if (!force && Date.now() - manifest.fetchedAt < MANIFEST_TTL_MS) return manifest;
   try {
     const m = await callRemote('GET', '/manifest');
-    manifest = { guards: new Set(m.guards ?? []), actions: new Set(m.actions ?? []), fetchedAt: Date.now() };
+    const delivery = {};
+    for (const [name, mode] of Object.entries(m.delivery ?? {})) if (DELIVERY_MODES.has(mode)) delivery[name] = mode;
+    manifest = { guards: new Set(m.guards ?? []), actions: new Set(m.actions ?? []), delivery, fetchedAt: Date.now() };
   } catch (err) {
     console.warn(`[remote] manifest fetch failed: ${err.message}`);
   }
@@ -133,15 +159,21 @@ export async function prefetchRemoteGuards({ compiledJson, event, entry, actorId
 const actionStubs = new Map();
 function remoteActionStub(name) {
   if (actionStubs.has(name)) return actionStubs.get(name);
-  const run = async ({ context, event }, meta = {}) => {
-    const r = await callRemote('POST', `/actions/${encodeURIComponent(name)}`,
+  // Returns the service's answer; the action-job worker delivers any `send` follow-up
+  // (exactly once) after recording that the action succeeded.
+  const run = async ({ context, event }, meta = {}) =>
+    callRemote('POST', `/actions/${encodeURIComponent(name)}`,
+      { actorId: meta.actorId ?? null, jobId: meta.jobId ?? null, context, event },
+      meta.jobId ? { 'Idempotency-Key': String(meta.jobId) } : {});
+  // "Did job X happen?" → { done: true, send? } | { done: false } | { done: null } (nobody knows)
+  const verify = async ({ context, event }, meta = {}) =>
+    callRemote('POST', `/actions/${encodeURIComponent(name)}/status`,
       { actorId: meta.actorId ?? null, jobId: meta.jobId ?? null, context, event });
-    if (r && r.send && typeof r.send.type === 'string' && meta.sendEvent) {
-      await meta.sendEvent(r.send);
-    }
-  };
+  const opts = { maxRetries: 5, backoff: 'exponential', timeout: cfg().timeoutMs, originalFn: run, verify, remote: true };
+  // Undeclared actions get the safe default: never repeated when the outcome is unknown.
+  Object.defineProperty(opts, 'delivery', { enumerable: true, get: () => manifest.delivery[name] ?? 'at-most-once' });
   const stub = (...args) => run(...args);
-  stub.__sk_durable = { maxRetries: 5, backoff: 'exponential', timeout: cfg().timeoutMs, originalFn: run, remote: true };
+  stub.__sk_durable = opts;
   actionStubs.set(name, stub);
   return stub;
 }

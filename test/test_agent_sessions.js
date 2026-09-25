@@ -54,7 +54,7 @@ const newSession = async (definitionId = 'support-agent-v1') => (await j('POST',
 before(async () => {
   const pgUrl = await isolatedPostgres('agent');   // own database: no other server may take our jobs
   if (pgUrl) env.STATEKEEP_DB_URL = pgUrl;
-  py = spawn('python3', ['examples/agent/agent_service.py'], { env: { ...process.env, PORT: String(PY_PORT), STATEKEEP_REMOTE_SECRET: SECRET, AGENT_LOG: LOG, AGENT_SLOW_ORDER: '31337' }, stdio: 'ignore' });
+  py = spawn('python3', ['examples/agent/agent_service.py'], { env: { ...process.env, PORT: String(PY_PORT), STATEKEEP_REMOTE_SECRET: SECRET, AGENT_LOG: LOG, AGENT_SLOW_ORDER: '31337', AGENT_JOB_STORE: join(dir, 'agent-jobs.sqlite') }, stdio: 'ignore' });
   await sleep(500);
   await startServer();
   migrator = spawn(process.execPath, ['src/workers/migrate-worker.js'], { env, stdio: 'ignore' });

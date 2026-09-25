@@ -69,3 +69,7 @@ temp/
 node
 __pycache__/
 *.pyc
+agent-jobs.sqlite*
+payments-jobs.sqlite*
+bank.jsonl
+effects.jsonl

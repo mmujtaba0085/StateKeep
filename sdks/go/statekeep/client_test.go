@@ -6,10 +6,12 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -101,6 +103,28 @@ func TestImplementationsHandler(t *testing.T) {
 	}
 	if w := call(http.MethodPost, "/guards/big", body, "sha256=forged"); w.Code != 401 {
 		t.Fatalf("forged signature accepted: %d", w.Code)
+	}
+	// delivery modes, status endpoint, error = "did not happen"
+	impl.ActionWithDelivery("charge", Idempotent, func(r Request) (*ActionResult, error) { return nil, nil })
+	impl.Action("refund", func(r Request) (*ActionResult, error) { return nil, errors.New("bank down") })
+	impl.Verifier("refund", func(r Request) (VerifyResult, error) {
+		done := r.JobID == "j-yes"
+		return VerifyResult{Done: &done}, nil
+	})
+	m := call(http.MethodGet, "/manifest", nil, "").Body.String()
+	for _, want := range []string{`"charge":"idempotent"`, `"notify":"at-most-once"`, `"refund":"verify"`} {
+		if !strings.Contains(m, want) {
+			t.Fatalf("manifest missing %s: %s", want, m)
+		}
+	}
+	if w := call(http.MethodPost, "/actions/refund", body, ""); w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("action error should be 422, got %d", w.Code)
+	}
+	if w := call(http.MethodPost, "/actions/refund/status", []byte(`{"jobId":"j-yes"}`), ""); !strings.Contains(w.Body.String(), `"done":true`) {
+		t.Fatalf("status: %s", w.Body)
+	}
+	if w := call(http.MethodPost, "/actions/notify/status", []byte(`{"jobId":"x"}`), ""); !strings.Contains(w.Body.String(), `"done":null`) {
+		t.Fatalf("no verifier should answer done:null, got %s", w.Body)
 	}
 }
 

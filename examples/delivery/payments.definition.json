@@ -1,0 +1,18 @@
+{
+  "id": "payment",
+  "initial": "idle",
+  "states": {
+    "idle": {
+      "on": { "CHARGE": "charging", "REFUND": "refunding", "NOTIFY": "notifying", "SMS": "texting" }
+    },
+    "charging":  { "entry": ["chargeCard"],    "on": { "CHARGED": "done" } },
+    "refunding": { "entry": ["refundOrder"],   "on": { "REFUNDED": "done" } },
+    "notifying": { "entry": ["notifyPartner"], "on": { "NOTIFIED": "done" } },
+    "texting": {
+      "entry": ["sendSms"],
+      "on": { "SMS_SENT": "done", "__SK_ACTION_UNKNOWN.sendSms": "needs_review" }
+    },
+    "needs_review": { "on": { "SMS_SENT": "done" } },
+    "done": {}
+  }
+}

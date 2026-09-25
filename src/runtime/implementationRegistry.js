@@ -9,9 +9,15 @@ export const StateKeep = {
    * Wrap an async function as a Tier 3 durable action.
    * The background action_jobs worker runs this with retry/backoff.
    */
-  durable(fn, { maxRetries = 3, backoff = 'exponential', timeout = 30_000 } = {}) {
+  durable(fn, { maxRetries = 3, backoff = 'exponential', timeout = 30_000, delivery = 'at-most-once', verify } = {}) {
+    // delivery (docs/side-effects.md): what to do when an attempt was started but never
+    // finished (crash): 'idempotent' → run again (fn gets meta.jobId to dedupe with);
+    // 'verify' → ask verify(args, meta) → { done: true|false|null } first;
+    // 'at-most-once' → don't repeat, mark the job for human review.
+    if (!['idempotent', 'verify', 'at-most-once'].includes(delivery)) throw new Error(`unknown delivery mode ${delivery}`);
+    if (delivery === 'verify' && typeof verify !== 'function') throw new Error("delivery 'verify' needs a verify function");
     const wrapped = (...args) => fn(...args);
-    wrapped.__sk_durable = { maxRetries, backoff, timeout, originalFn: fn };
+    wrapped.__sk_durable = { maxRetries, backoff, timeout, originalFn: fn, delivery, verify };
     return wrapped;
   },
 

@@ -710,6 +710,20 @@ export function getDb() {
     console.log('[db] Migration v25 applied: org_id columns dropped; orgs + api_keys tables removed');
   }
 
+  // v26 — action delivery guarantees: remember that an attempt was *sent* (started_at),
+  // what the implementation returned (result_snap), and outcomes needing a human (outcome).
+  if (!appliedVersions.has(26)) {
+    _db.transaction(() => {
+      const cols = new Set(_db.prepare(`SELECT name FROM pragma_table_info('action_jobs')`).all().map((c) => c.name));
+      if (!cols.has('started_at'))  _db.exec(`ALTER TABLE action_jobs ADD COLUMN started_at INTEGER`);
+      if (!cols.has('outcome'))     _db.exec(`ALTER TABLE action_jobs ADD COLUMN outcome TEXT`);
+      if (!cols.has('result_snap')) _db.exec(`ALTER TABLE action_jobs ADD COLUMN result_snap BLOB`);
+      _db.exec(`CREATE INDEX IF NOT EXISTS idx_action_jobs_outcome ON action_jobs(outcome) WHERE outcome IS NOT NULL`);
+      _db.exec(`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (26, unixepoch())`);
+    })();
+    console.log('[db] Migration v26 applied: action delivery tracking');
+  }
+
   // Graceful shutdown
   process.on('exit',    () => { try { _db.close(); } catch {} });
   process.on('SIGINT',  () => { process.exit(0); });

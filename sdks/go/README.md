@@ -24,3 +24,15 @@ http.Handle("/statekeep/", http.StripPrefix("/statekeep", impl))
 
 Also: `Deploy`, `Preview`, `Import`, `Get`, `Events`, `Terminate`, `Schedule`, `VerifyWebhook`.
 Tests: `STATEKEEP_URL=http://localhost:3001 go test ./...`.
+
+## Side effects: never silently repeated
+
+```go
+impl.ActionWithDelivery("chargeCard", statekeep.Idempotent, charge) // retried; use req.JobID as the idempotency key
+impl.Action("refundOrder", refund)
+impl.Verifier("refundOrder", refundHappened)                          // → Verify mode
+impl.Action("sendSms", sms)                                           // default: AtMostOnce
+```
+
+Returning an error from an action means "it did not happen" (HTTP 422, safe to retry). The Go
+handler has no built-in job store: use `Idempotent` with a key-aware API or a `Verifier`. See `docs/side-effects.md`.

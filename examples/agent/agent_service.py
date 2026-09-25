@@ -25,7 +25,10 @@ import time
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "sdks", "python"))
 from statekeep import ImplementationService  # noqa: E402
 
-svc = ImplementationService(os.environ.get("STATEKEEP_REMOTE_SECRET", "change-me"))
+# job_store: a file that remembers every tool call, so after a crash StateKeep can ask
+# "did this happen?" instead of guessing (docs/side-effects.md)
+svc = ImplementationService(os.environ.get("STATEKEEP_REMOTE_SECRET", "change-me"),
+                            job_store=os.environ.get("AGENT_JOB_STORE", "agent-jobs.sqlite"))
 SIDE_EFFECTS = os.environ.get("AGENT_LOG")      # append-only record of real side effects (tests read it)
 
 PROMPTS = {
