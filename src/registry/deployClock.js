@@ -20,7 +20,7 @@ export async function nextDeployTick(eng) {
       t = BigInt((await queryOne(`SELECT GREATEST(nextval('statekeep_deploy_clock'), $1::bigint) AS t`, [String(cur)])).t);
       await queryOne(`SELECT setval('statekeep_deploy_clock', GREATEST($1::bigint, (SELECT last_value FROM statekeep_deploy_clock)))`, [String(t)]);
     }
-    while (cur < t) cur = BigInt(eng.clockTick());
+    eng.advanceClockTo(t);
   }
   return t;
 }

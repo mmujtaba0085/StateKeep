@@ -20,9 +20,9 @@ export async function getMaxTStar() {
 /**
  * The highest logical tick anything has used: deployments and actors' start ticks. A
  * restarted server resumes its clock after this, so a new deployment is always later
- * than every actor that already exists. (last_event_tick is not used: some paths store
- * a wall-clock time there. Values that look like wall-clock times are ignored too — the
- * engine clock can only be advanced one tick at a time.)
+ * than every actor that already exists. (last_event_tick is not used, and values that
+ * look like wall-clock times are ignored: some paths store Date.now() where no engine
+ * clock was available, and those are not logical ticks.)
  */
 export async function getMaxKnownTick() {
   const maxT = await getMaxTStar();
@@ -121,12 +121,16 @@ export async function loadChangepointsAfter(afterId) {
   if (isPostgres) {
     const { queryAll } = await import('./db-postgres.js');
     return queryAll(
-      'SELECT id, t_star, prefix_hash, refinement, child_def_id FROM changepoints WHERE id>$1 ORDER BY id ASC',
+      `SELECT cp.id, cp.t_star, cp.prefix_hash, cp.refinement, cp.child_def_id, d.machine_id
+         FROM changepoints cp LEFT JOIN definitions d ON d.id = cp.child_def_id
+        WHERE cp.id>$1 ORDER BY cp.id ASC`,
       [afterId]
     );
   }
   const db = getDb();
-  return db.prepare('SELECT id, t_star, prefix_hash, refinement, child_def_id FROM changepoints WHERE id > ? ORDER BY id ASC').all(afterId);
+  return db.prepare(`SELECT cp.id, cp.t_star, cp.prefix_hash, cp.refinement, cp.child_def_id, d.machine_id
+    FROM changepoints cp LEFT JOIN definitions d ON d.id = cp.child_def_id
+    WHERE cp.id > ? ORDER BY cp.id ASC`).all(afterId);
 }
 
 export async function insertParChangepoint({ tStar, regionHashesHexMap, regionHashesHexArr, refinement, childDefId }) {
@@ -155,12 +159,16 @@ export async function loadParChangepointsAfter(afterId) {
   if (isPostgres) {
     const { queryAll } = await import('./db-postgres.js');
     return queryAll(
-      'SELECT id, t_star, region_hashes, refinement, child_def_id FROM par_changepoints WHERE id>$1 ORDER BY id ASC',
+      `SELECT cp.id, cp.t_star, cp.region_hashes, cp.refinement, cp.child_def_id, d.machine_id
+         FROM par_changepoints cp LEFT JOIN definitions d ON d.id = cp.child_def_id
+        WHERE cp.id>$1 ORDER BY cp.id ASC`,
       [afterId]
     );
   }
   const db = getDb();
   return db.prepare(
-    'SELECT id, t_star, region_hashes, refinement, child_def_id FROM par_changepoints WHERE id > ? ORDER BY id ASC'
+    `SELECT cp.id, cp.t_star, cp.region_hashes, cp.refinement, cp.child_def_id, d.machine_id
+       FROM par_changepoints cp LEFT JOIN definitions d ON d.id = cp.child_def_id
+      WHERE cp.id > ? ORDER BY cp.id ASC`
   ).all(afterId);
 }

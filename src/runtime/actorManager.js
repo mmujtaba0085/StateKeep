@@ -11,7 +11,7 @@ import { randomInt } from 'crypto';
 import { LRUCache } from './lruCache.js';
 import { fingerprintToBigInt, regionFingerprintsToArray } from '../ffi/hashUtils.js';
 import { computeHistoryFingerprint } from '../ffi/fingerprintChain.js';
-import { getEngine } from '../ffi/engine.js';
+import { getEngine, scopeOf } from '../ffi/engine.js';
 import { getWorkerPool } from './workerPool.js';
 import { getWriteBuffer, makeActionJobRow } from './writeBuffer.js';
 import { processEvent, computeInitialSnapshot } from './interpreter.js';
@@ -95,17 +95,21 @@ let _lastCpId = 0, _lastParCpId = 0;
 async function syncChangepointsFromDb() {
   const eng = getEngine();
   if (!eng.available) return;
+  // (A row whose definition is not visible yet is retried on the next poll: it cannot
+  //  be registered in its family's scope without knowing the family.)
   const rows = await loadChangepointsAfter(_lastCpId);
   for (const row of rows) {
-    try { eng.registerChangepoint(BigInt(row.t_star), BigInt(row.prefix_hash), BigInt(row.refinement), row.child_def_id); } catch {}
+    if (!row.machine_id) break;
+    try { eng.registerChangepoint(BigInt(row.t_star), BigInt(row.prefix_hash), BigInt(row.refinement), row.child_def_id, scopeOf(row.machine_id)); } catch {}
     _lastCpId = Math.max(_lastCpId, Number(row.id));
   }
   const par = await loadParChangepointsAfter(_lastParCpId);
   for (const row of par) {
+    if (!row.machine_id) break;
     try {
       const stored = JSON.parse(row.region_hashes);
       const arr = Array.isArray(stored) ? stored.map((h) => BigInt(`0x${String(h).padStart(16, '0')}`)) : regionFingerprintsToArray(stored);
-      if (arr?.length) eng.registerChangepointParallel(BigInt(row.t_star), arr, BigInt(row.refinement), row.child_def_id);
+      if (arr?.length) eng.registerChangepointParallel(BigInt(row.t_star), arr, BigInt(row.refinement), row.child_def_id, scopeOf(row.machine_id));
     } catch {}
     _lastParCpId = Math.max(_lastParCpId, Number(row.id));
   }
@@ -461,10 +465,14 @@ async function _sendEventLocked(actorId, event, tick, opts = {}) {
           : BigInt(entry.logicalStartTick ?? 0);
 
         // Scalar path
+        // Asked in the actor's own workflow family (engine scope): another family's
+        // change-point can no longer come first and hide this one.
+        const scope = scopeOf(currentDef?.machineId);
         targetDefId = eng.computeAccessible(
           fingerprintToBigInt(fp),
           logicalTime,
-          currentTick
+          currentTick,
+          scope
         );
 
         // Wildcard fallback: C engine performs exact prefix matching, so prefix_hash=0
@@ -484,7 +492,8 @@ async function _sendEventLocked(actorId, event, tick, opts = {}) {
             targetDefId = eng.computeAccessibleParallel(
               regionArr,
               logicalTime,
-              currentTick
+              currentTick,
+              scope
             );
           }
         }
@@ -1144,7 +1153,8 @@ export async function seedEngineRegistry() {
           BigInt(row.t_star),
           BigInt(row.prefix_hash),
           BigInt(row.refinement),
-          row.child_def_id
+          row.child_def_id,
+          scopeOf(row.machine_id)
         );
       } catch (e) {
         console.warn(`[actorManager] seedEngineRegistry skip ${row.child_def_id}: ${e.message}`);
@@ -1164,7 +1174,8 @@ export async function seedEngineRegistry() {
           BigInt(row.t_star),
           regionArr,
           BigInt(row.refinement),
-          row.child_def_id
+          row.child_def_id,
+          scopeOf(row.machine_id)
         );
       } catch (e) {
         console.warn(`[actorManager] seedEngineRegistry skip parallel ${row.child_def_id}: ${e.message}`);

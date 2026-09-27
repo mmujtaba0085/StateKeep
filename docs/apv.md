@@ -220,7 +220,7 @@ This starts from `FNV_OFFSET` and chains `fnv1aUpdate` for each event type — i
 
 ## 8. The APV Engine (APV Registry)
 
-The core routing logic runs in a WebAssembly module compiled from C via Emscripten. At startup, `src/ffi/engine.js` imports `src/ffi/apv-engine.mjs` (the Emscripten-generated loader with the WASM binary inlined), which initialises the WebAssembly instance and exposes the APV C functions as JavaScript-callable methods. The JavaScript layer wraps these into a unified object.
+The core routing logic runs in a WebAssembly module compiled from C (see `src/ffi/Makefile`). At startup, `src/ffi/engine.js` imports `src/ffi/apv-engine.mjs` (a small loader with the WASM binary inlined), which initialises the WebAssembly instance and exposes the APV C functions as JavaScript-callable methods. The JavaScript layer wraps these into a unified object.
 
 The pre-built WASM engine (`src/ffi/apv-engine.mjs`) is included in the repository — no build step is required. Rebuilding the engine requires proprietary C source not included in the open-source release.
 
@@ -241,6 +241,30 @@ The pre-built WASM engine (`src/ffi/apv-engine.mjs`) is included in the reposito
 | `apv_fnv1a_final` | Finalize the hash |
 | `apv_register_changepoint_parallel` | Register a parallel (multi-region) change-point |
 | `apv_compute_accessible_parallel` | Route an actor by its per-region fingerprint array |
+
+### Added in the current engine build
+
+| C Function | Purpose |
+|---|---|
+| `apv_clock_now` | Read the clock without advancing it |
+| `apv_clock_advance_to` | `clock = max(clock, t)` in O(1) — restores the clock after a restart (before, the server called `apv_clock_tick` once per past tick) |
+| `apv_register_changepoint_scoped` / `apv_compute_accessible_scoped` | Scalar change-points in a **scope** |
+| `apv_register_changepoint_parallel_scoped` / `apv_compute_accessible_parallel_scoped` | Parallel change-points in a scope |
+
+**Scopes.** The registry is shared by every workflow on a server. Unscoped, the first
+change-point a lookup found could belong to *another* workflow; StateKeep discarded that
+answer, and the actor silently stayed on its old version (found by the workflow chaos
+simulation). StateKeep now registers each change-point in its workflow family's scope
+(`scopeOf(machineId)`, a 64-bit FNV-1a of the family id) and looks up in the actor's
+family scope, so workflows can no longer hide each other's deployments. The unscoped
+functions are scope 0 and behave exactly as before.
+
+**Other engine changes in this build:** parallel registration refuses ambiguous selectors
+(`-2`, as the previous shipped build did); parallel lookups use a per-t\* index (a lookup
+across 2,000 parallel change-points went from ~13 s to ~10 ms in a native benchmark);
+registration is all-or-nothing under out-of-memory; duplicate region hashes in a selector
+are ignored (selectors are sets). `test/test_apv_conformance.js` checks the engine against
+a reference model of all of these rules.
 
 ### Engine Requirement
 

@@ -1,12 +1,15 @@
 /**
  * src/ffi/engine.js
  *
- * Loads the APV engine from the pre-built WASM binary (apv-engine.mjs +
- * apv-engine.wasm), compiled from apv-engine-fixed.c via Emscripten.
+ * Loads the APV engine from the pre-built WebAssembly module (apv-engine.mjs, which
+ * embeds the binary). See src/ffi/Makefile for how it is built.
  *
- * Build: make wasm -C src/ffi
+ * All uint64 values cross the JS/WASM boundary as BigInt.
  *
- * All uint64 values cross the JS/WASM boundary as BigInt (WASM_BIGINT=1).
+ * Scopes: every change-point is registered in the scope of its workflow family
+ * (scopeOf(machineId)) and every lookup asks in the actor's family scope, so one
+ * workflow's deployment can never answer — or hide — another workflow's lookup.
+ * Scope 0n is the engine's original, unscoped registry.
  */
 
 import { existsSync } from 'fs';
@@ -15,6 +18,14 @@ import { dirname, join } from 'path';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const OUTPUT_BUFFER_SIZE = 512;
+
+/** The engine scope of a workflow family: 64-bit FNV-1a of its machine id (never 0). */
+export function scopeOf(machineId) {
+  if (machineId == null || machineId === '') return 0n;
+  let h = 0xcbf29ce484222325n;
+  for (const b of Buffer.from(String(machineId), 'utf8')) { h ^= BigInt(b); h = (h * 0x100000001b3n) & 0xffffffffffffffffn; }
+  return h === 0n ? 1n : h;
+}
 
 function regionHashesToBuffer(rHashes) {
   const buf = Buffer.alloc(rHashes.length * 8, 0);
@@ -53,14 +64,28 @@ async function loadEngine() {
   // JS-side count of registered change-points. actorManager's inline migration
   // check fast-exits when this is 0; without it the check was skipped forever.
   let changepoints = 0;
+  // Engine builds with scopes and an O(1) clock restore (all current builds).
+  const scoped = typeof wasm._apv_register_changepoint_scoped === 'function'
+              && typeof wasm._apv_clock_advance_to === 'function';
 
   return {
     available: true,
     mode: 'wasm',
+    scoped,
 
     changepointCount() { return changepoints; },
 
     clockTick() { return wasm._apv_clock_tick(reg); },
+    /** Current clock value without advancing it. */
+    clockNow() { return scoped ? wasm._apv_clock_now(reg) : null; },
+    /** Make every future tick later than t (restores the clock after a restart). */
+    advanceClockTo(t) {
+      const target = BigInt(t);
+      if (scoped) return wasm._apv_clock_advance_to(reg, target);
+      let cur = BigInt(wasm._apv_clock_tick(reg));           // older engine builds: tick up to it
+      while (cur < target) cur = BigInt(wasm._apv_clock_tick(reg));
+      return cur;
+    },
     fnv1aInit() { return wasm._apv_fnv1a_init(); },
     fnv1aFinal(h) { return wasm._apv_fnv1a_final(BigInt(h)); },
 
@@ -71,16 +96,23 @@ async function loadEngine() {
       finally { wasm._free(p); }
     },
 
-    registerChangepoint(tStar, pH, ref, cid) {
+    registerChangepoint(tStar, pH, ref, cid, scope = 0n) {
       const p = strPtr(cid);
-      try   { const rc = wasm._apv_register_changepoint(reg, BigInt(tStar), BigInt(pH), BigInt(ref), p); if (rc === 0) changepoints++; return rc; }
-      finally { wasm._free(p); }
+      try {
+        const rc = scoped
+          ? wasm._apv_register_changepoint_scoped(reg, BigInt(scope), BigInt(tStar), BigInt(pH), BigInt(ref), p)
+          : wasm._apv_register_changepoint(reg, BigInt(tStar), BigInt(pH), BigInt(ref), p);
+        if (rc === 0) changepoints++;
+        return rc;
+      } finally { wasm._free(p); }
     },
 
-    computeAccessible(pH, logT, curT) {
+    computeAccessible(pH, logT, curT, scope = 0n) {
       const out = wasm._malloc(OUTPUT_BUFFER_SIZE);
       try {
-        const rc = wasm._apv_compute_accessible(reg, BigInt(pH), BigInt(logT), BigInt(curT), out, OUTPUT_BUFFER_SIZE);
+        const rc = scoped
+          ? wasm._apv_compute_accessible_scoped(reg, BigInt(scope), BigInt(pH), BigInt(logT), BigInt(curT), out, OUTPUT_BUFFER_SIZE)
+          : wasm._apv_compute_accessible(reg, BigInt(pH), BigInt(logT), BigInt(curT), out, OUTPUT_BUFFER_SIZE);
         if (rc !== 1) return null;
         const s = wasm.UTF8ToString(out, OUTPUT_BUFFER_SIZE);
         return s.length > 0 ? s : null;
@@ -91,18 +123,25 @@ async function loadEngine() {
     actorStopped(tStar, pH)  { wasm._apv_actor_stopped(reg, BigInt(tStar), BigInt(pH)); },
     vacatePrefix(tStar, pH)  { wasm._apv_vacate_prefix(reg, BigInt(tStar), BigInt(pH)); },
 
-    registerChangepointParallel(tStar, rHashes, ref, cid) {
+    registerChangepointParallel(tStar, rHashes, ref, cid, scope = 0n) {
       const rp = toPtr(regionHashesToBuffer(rHashes));
       const sp = strPtr(cid);
-      try   { const rc = wasm._apv_register_changepoint_parallel(reg, BigInt(tStar), rp, rHashes.length, BigInt(ref), sp); if (rc === 0) changepoints++; return rc; }
-      finally { wasm._free(rp); wasm._free(sp); }
+      try {
+        const rc = scoped
+          ? wasm._apv_register_changepoint_parallel_scoped(reg, BigInt(scope), BigInt(tStar), rp, rHashes.length, BigInt(ref), sp)
+          : wasm._apv_register_changepoint_parallel(reg, BigInt(tStar), rp, rHashes.length, BigInt(ref), sp);
+        if (rc === 0) changepoints++;
+        return rc;
+      } finally { wasm._free(rp); wasm._free(sp); }
     },
 
-    computeAccessibleParallel(rHashes, logT, curT) {
+    computeAccessibleParallel(rHashes, logT, curT, scope = 0n) {
       const rp  = toPtr(regionHashesToBuffer(rHashes));
       const out = wasm._malloc(OUTPUT_BUFFER_SIZE);
       try {
-        const rc = wasm._apv_compute_accessible_parallel(reg, rp, rHashes.length, BigInt(logT), BigInt(curT), out, OUTPUT_BUFFER_SIZE);
+        const rc = scoped
+          ? wasm._apv_compute_accessible_parallel_scoped(reg, BigInt(scope), rp, rHashes.length, BigInt(logT), BigInt(curT), out, OUTPUT_BUFFER_SIZE)
+          : wasm._apv_compute_accessible_parallel(reg, rp, rHashes.length, BigInt(logT), BigInt(curT), out, OUTPUT_BUFFER_SIZE);
         if (rc !== 1) return null;
         const s = wasm.UTF8ToString(out, OUTPUT_BUFFER_SIZE);
         return s.length > 0 ? s : null;

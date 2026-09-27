@@ -46,8 +46,7 @@ export async function createStateKeep({
     const maxTStar = await getMaxTStar();
     if (maxTStar > 0) {
       const eng = getEngine();
-      let t = eng.clockTick();
-      while (Number(t) <= maxTStar) t = eng.clockTick();
+      eng.advanceClockTo(maxTStar);
     }
   } catch {}
 

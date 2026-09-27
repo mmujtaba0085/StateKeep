@@ -12,7 +12,7 @@ import { regionFingerprintsToArray } from '../ffi/hashUtils.js';
 import { incrementMigrated, incrementFailed, updateDeploymentStatus, findDeploymentById } from '../registry/deploymentRepo.js';
 import { seedEngineRegistry } from '../runtime/actorManager.js';
 import { insertMigrationNotification } from '../registry/migrationNotificationRepo.js';
-import { getEngine, engineReady } from '../ffi/engine.js';
+import { getEngine, engineReady, scopeOf } from '../ffi/engine.js';
 import { loadChangepointsAfter, loadParChangepointsAfter } from '../registry/changepointRepo.js';
 
 const BATCH_SIZE    = 500;
@@ -49,7 +49,7 @@ async function syncRegistry() {
   const rows = await loadChangepointsAfter(_lastChangepointId);
   for (const row of rows) {
     try {
-      eng.registerChangepoint(BigInt(row.t_star), BigInt(row.prefix_hash), BigInt(row.refinement), row.child_def_id);
+      eng.registerChangepoint(BigInt(row.t_star), BigInt(row.prefix_hash), BigInt(row.refinement), row.child_def_id, scopeOf(row.machine_id));
       _lastChangepointId = row.id;
     } catch (e) {
       console.warn(`[migrate-worker] syncRegistry skip ${row.child_def_id}: ${e.message}`);
@@ -67,7 +67,7 @@ async function syncRegistry() {
         ? storedRegions.map(h => BigInt(`0x${String(h).padStart(16, '0')}`))
         : regionFingerprintsToArray(storedRegions);
       if (!regionArr || regionArr.length === 0) { _lastParChangepointId = row.id; continue; }
-      eng.registerChangepointParallel(BigInt(row.t_star), regionArr, BigInt(row.refinement), row.child_def_id);
+      eng.registerChangepointParallel(BigInt(row.t_star), regionArr, BigInt(row.refinement), row.child_def_id, scopeOf(row.machine_id));
       _lastParChangepointId = row.id;
     } catch (e) {
       console.warn(`[migrate-worker] syncRegistry skip parallel ${row.child_def_id}: ${e.message}`);

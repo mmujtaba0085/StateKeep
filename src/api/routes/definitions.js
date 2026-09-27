@@ -56,7 +56,7 @@ import {
 } from '../../registry/actorRepo.js';
 import { enqueueJobs, findDecisionsByDeployment } from '../../registry/jobRepo.js';
 import { nextDeployTick } from '../../registry/deployClock.js';
-import { getEngine }                  from '../../ffi/engine.js';
+import { getEngine, scopeOf }         from '../../ffi/engine.js';
 import { invalidateMigrationCacheForDefinition, evictFromHotRegistry, invalidateDefinitionCache } from '../../runtime/actorManager.js';
 import { computeHistoryHash, fingerprintToBigInt, computeRegionHashes, regionFingerprintsToArray } from '../../ffi/hashUtils.js';
 import { analyseDefinition }          from '../lib/staticAnalysis.js';
@@ -545,7 +545,7 @@ export async function definitionRoutes(fastify) {
         // If insertParChangepoint then fails, the in-memory engine entry is already
         // registered, but on next restart the DB re-seeds the engine from the DB
         // changepointpar table — so divergence is limited to the current process lifetime.
-        const rc = eng.registerChangepointParallel(tStar, regionArr, BigInt(refinement), id);
+        const rc = eng.registerChangepointParallel(tStar, regionArr, BigInt(refinement), id, scopeOf(machineId));
         if (rc === -2) {
           // Engine rejected this selector as ambiguous (Proposition 5.14 violation).
           // The definition row was already written to DB; without a matching changepoint
@@ -561,7 +561,7 @@ export async function definitionRoutes(fastify) {
       // DB first so that if the engine call below throws, the changepoint is already
       // persisted and will be re-loaded into the engine on next server restart.
       await insertChangepoint({ tStar: Number(tStar), prefixHash: prefixHash.toString(), refinement, childDefId: id });
-      eng.registerChangepoint(tStar, prefixHash, BigInt(refinement), id);
+      eng.registerChangepoint(tStar, prefixHash, BigInt(refinement), id, scopeOf(machineId));
     }
 
     // Invalidate inline migration + definition cache for the parent definition
@@ -630,13 +630,13 @@ export async function definitionRoutes(fastify) {
                 ? BigInt(currentDeployedAt) + 1n
                 : BigInt(logicalStartTick);
 
-              targetDefId = eng.computeAccessible(actorPrefixHash, logicalTime, currentTick);
+              targetDefId = eng.computeAccessible(actorPrefixHash, logicalTime, currentTick, scopeOf(machineId));
 
               // Parallel path: check per-region fingerprints when scalar found nothing
               if (!targetDefId && actor.regionFingerprints) {
                 const regionArr = regionFingerprintsToArray(actor.regionFingerprints);
                 if (regionArr && regionArr.length > 0) {
-                  targetDefId = eng.computeAccessibleParallel(regionArr, logicalTime, currentTick);
+                  targetDefId = eng.computeAccessibleParallel(regionArr, logicalTime, currentTick, scopeOf(machineId));
                 }
               }
             } catch (e) {

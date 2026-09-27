@@ -270,11 +270,9 @@ try {
       eng.seedTick(maxTStar);
       console.log(`[server] Fallback tick seeded to ${maxTStar + 1} (max known t_star: ${maxTStar})`);
     } else {
-      // Real engine: advance by burning ticks. Safe because t_star only increments
-      // once per definition deployment (typically < 10 000 total).
-      let current = eng.clockTick();
-      while (Number(current) <= maxTStar) current = eng.clockTick();
-      console.log(`[server] APV engine clock advanced to ${current} (max known t_star: ${maxTStar})`);
+      // O(1) on current engine builds (apv_clock_advance_to); older builds tick up to it.
+      const current = eng.advanceClockTo(maxTStar);
+      console.log(`[server] APV engine clock restored to ${current} (highest known tick: ${maxTStar})`);
     }
   }
 } catch (e) {

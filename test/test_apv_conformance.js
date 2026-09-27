@@ -131,3 +131,101 @@ test('FNV-1a matches the reference', async () => {
     w._free(p);
   }
 });
+
+// ── Scopes, canonical selectors and clock restore (engine builds that export them) ──
+class ScopedRef {
+  cps = new Map(); par = new Map(); clock = 0n;
+  register(sc, t, ph, r, child) {
+    if (r === 0n) return -1;
+    const k = `${sc}|${t}|${ph}`;
+    if (this.cps.has(k) && r <= this.cps.get(k).r) return 0;
+    this.cps.set(k, { sc, t, ph, r, child });
+    return 0;
+  }
+  compute(sc, ph, T) {
+    const min = (p) => [...this.cps.values()].filter((c) => c.sc === sc && c.ph === p && c.t >= T).sort((a, b) => (a.t < b.t ? -1 : 1))[0];
+    let best = min(ph);
+    if (ph !== 0n) { const w = min(0n); if (w && (!best || w.t < best.t)) best = w; }
+    return best ? best.child : '-';
+  }
+  registerPar(sc, t, raw, r, child) {
+    if (r === 0n || raw.length === 0) return -1;
+    const hs = [...new Set(raw)];
+    const k = `${sc}|${t}|${compose(hs)}`;
+    if (!(this.par.has(k) && r <= this.par.get(k).r)) {
+      const sameT = [...this.par.entries()].filter(([kk, e]) => e.sc === sc && e.t === t && kk !== k).map(([, e]) => e);
+      for (const e of sameT) {
+        if (e.hs.length === hs.length && e.child !== child) {
+          const union = new Set([...e.hs, ...hs]);
+          if (!sameT.some((f) => f.hs.length > hs.length && f.hs.every((x) => union.has(x)))) return -2;
+        }
+      }
+    }
+    if (this.par.has(k) && r <= this.par.get(k).r) return 0;
+    this.par.set(k, { sc, t, hs, r, child, c: compose(hs) });
+    return 0;
+  }
+  computePar(sc, hs, T) {
+    const actor = new Set(hs);
+    const times = [...new Set([...this.par.values()].filter((e) => e.sc === sc).map((e) => e.t))].filter((t) => t >= T).sort((a, b) => (a < b ? -1 : 1));
+    for (const t of times) {
+      const c = [...this.par.values()].filter((e) => e.sc === sc && e.t === t && e.hs.every((x) => actor.has(x)));
+      if (c.length) {
+        c.sort((a, b) => (b.hs.length - a.hs.length) || (a.r === b.r ? 0 : a.r > b.r ? -1 : 1)
+          || (a.c === b.c ? 0 : a.c < b.c ? -1 : 1) || (a.child < b.child ? -1 : a.child > b.child ? 1 : 0));
+        return c[0].child;
+      }
+    }
+    return '-';
+  }
+}
+
+test('scoped change-points, canonical selectors and clock restore match the model', async (t) => {
+  const { default: createModule } = await import('../src/ffi/apv-engine.mjs');
+  const probe = await createModule();
+  if (typeof probe._apv_register_changepoint_scoped !== 'function') { t.skip('engine build without scopes'); return; }
+  const SCRIPTS = Number(process.env.APV_CONFORMANCE_SCRIPTS ?? 400);
+  const seed0 = Number(process.env.APV_CONFORMANCE_SEED ?? Date.now() % 1e9) + 7919;
+  for (let n = 0; n < SCRIPTS; n++) {
+    const w = await createModule();
+    const reg = w._apv_registry_create();
+    const out = w._malloc(512);
+    const str = (s) => { const b = new TextEncoder().encode(s + '\0'); const p = w._malloc(b.length); w.HEAPU8.set(b, p); return p; };
+    const arr = (hs) => { const p = w._malloc(Math.max(8, hs.length * 8)); const dv = new DataView(w.HEAPU8.buffer); hs.forEach((h, i) => dv.setBigUint64(p + i * 8, h, true)); return p; };
+    const g = rng(seed0 + n);
+    const ref = new ScopedRef();
+    const T = BigInt(g.pick([8, 30, 200]));
+    const phs = [0n, ...Array.from({ length: g.pick([2, 5, 12]) }, g.big)];
+    const pool = Array.from({ length: 6 }, g.big);
+    const scopes = [0n, 1n, 7n, g.big()];
+    const kids = Array.from({ length: 8 }, (_, i) => `def-${i}`);
+    const ops = [];
+    for (let k = 0, m = g.int(5, 120); k < m; k++) {
+      const x = g.r(); const sc = g.pick(scopes);
+      let op, got, want;
+      if (x < 0.33) {
+        const t = BigInt(g.int(0, Number(T))), ph = g.pick(phs), r = BigInt(g.pick([0, 1, 1, 2, 3, 7])), c = g.pick(kids);
+        op = `registerScoped ${sc} ${t} ${ph} ${r} ${c}`; const p = str(c); got = w._apv_register_changepoint_scoped(reg, sc, t, ph, r, p); w._free(p); want = ref.register(sc, t, ph, r, c);
+      } else if (x < 0.63) {
+        const ph = g.r() < 0.9 ? g.pick(phs) : g.big(), t = BigInt(g.int(0, Number(T) + 2));
+        op = `accessibleScoped ${sc} ${ph} ${t}`; const rc = w._apv_compute_accessible_scoped(reg, sc, ph, t, 0n, out, 512); got = rc === 1 ? w.UTF8ToString(out, 512) : rc === 0 ? '-' : 'ERR'; want = ref.compute(sc, ph, t);
+      } else if (x < 0.76) {
+        let hs = [...pool].sort(() => g.r() - 0.5).slice(0, g.int(1, 3)); if (g.r() < 0.2) hs = [...hs, hs[0]];
+        const t = BigInt(g.int(0, Number(T))), r = BigInt(g.pick([1, 2, 3])), c = g.pick(kids);
+        op = `registerParallelScoped ${sc} ${t} [${hs}] ${r} ${c}`; const p = arr(hs), q = str(c); got = w._apv_register_changepoint_parallel_scoped(reg, sc, t, p, hs.length, r, q); w._free(p); w._free(q); want = ref.registerPar(sc, t, hs, r, c);
+      } else if (x < 0.89) {
+        const hs = [...pool].sort(() => g.r() - 0.5).slice(0, g.int(1, 6)), t = BigInt(g.int(0, Number(T) + 2));
+        op = `accessibleParallelScoped ${sc} [${hs}] ${t}`; const p = arr(hs); const rc = w._apv_compute_accessible_parallel_scoped(reg, sc, p, hs.length, t, 0n, out, 512); w._free(p);
+        got = rc === 1 ? w.UTF8ToString(out, 512) : rc === 0 ? '-' : 'ERR'; want = ref.computePar(sc, hs, t);
+      } else if (x < 0.95) {
+        const v = g.pick([0n, ref.clock, ref.clock + BigInt(g.int(1, 1e9))]);
+        op = `clockAdvanceTo ${v}`; got = BigInt.asUintN(64, BigInt(w._apv_clock_advance_to(reg, v))); if (v > ref.clock) ref.clock = v; want = ref.clock;
+      } else {
+        op = 'clockTick'; got = BigInt.asUintN(64, BigInt(w._apv_clock_tick(reg))); ref.clock += 1n; want = ref.clock;
+      }
+      ops.push(op);
+      assert.deepEqual(got, want, `seed ${seed0 + n}, operation #${k}: ${op}\nexpected ${want}, engine returned ${got}\nafter:\n${ops.slice(-20).join('\n')}`);
+    }
+    w._apv_registry_destroy(reg);
+  }
+});
