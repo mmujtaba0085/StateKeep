@@ -63,3 +63,5 @@ after the lease, with the same `jobId`.
   `{"done": null, "running": true}`. It's used by `verify` after an attempt went unanswered.
 - HTTP 4xx means "not done, safe to retry". 5xx, a timeout or a reset means "maybe done".
   409 means "already started, not finished".
+- `rerunApproved: true` in an action call means an earlier unanswered attempt was cleared
+  (a reviewer said it did not happen, or `status` answered `done: false`).

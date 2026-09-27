@@ -23,6 +23,11 @@ per action, instead of guessing.
 
 Jobs are leased while they run, and the lease is renewed, so a long action is never picked up twice.
 
+Retry budget: 10 attempts for `idempotent` actions (always safe to repeat), 5 for others,
+with exponential backoff capped by `STATEKEEP_ACTION_BACKOFF_MAX_MS` (default 5 min). When
+the budget runs out, `failed` is used only if no attempt could have happened; otherwise
+the job goes to review.
+
 ## Delivery modes
 
 | Mode | When the outcome is unknown | Use it for |
@@ -55,7 +60,9 @@ def sms(req): ...
 ```
 
 The SDK's job store records `started` before your function runs and `done` + the answer
-after. A retry of a finished job replays the answer, and a job still running answers `409`.
+after. A job left `started` (the service died mid-call) is only run again once StateKeep
+says it is clear: a human resolved it as "did not happen", or the verifier answered
+`done: false` (the request then carries `rerunApproved: true`). A retry of a finished job replays the answer, and a job still running answers `409`.
 With a file-backed store, `status` answers `done: false` for jobs it has never seen, so
 `verify` works. The in-memory store can't know about jobs from before a restart, so it
 advertises `at-most-once` unless you declare otherwise.

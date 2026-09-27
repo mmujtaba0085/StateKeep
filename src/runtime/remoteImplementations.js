@@ -127,7 +127,7 @@ function remoteGuardStub(name) {
 function reachableRemoteGuards(compiledJson, eventType, localGuards) {
   const names = new Set();
   const consider = (c) => {
-    if (c?.guard && typeof c.guard === 'string' && !localGuards[c.guard] && isRemoteGuard(c.guard)) names.add(c.guard);
+    if (c?.guard && typeof c.guard === 'string' && !localGuards[c.guard] && !c.guard.startsWith('cond:')) names.add(c.guard);
   };
   for (const [key, candidates] of Object.entries(compiledJson.transitions ?? {})) {
     if (key.endsWith(`:${eventType}`)) (candidates ?? []).forEach(consider);
@@ -163,13 +163,16 @@ function remoteActionStub(name) {
   // (exactly once) after recording that the action succeeded.
   const run = async ({ context, event }, meta = {}) =>
     callRemote('POST', `/actions/${encodeURIComponent(name)}`,
-      { actorId: meta.actorId ?? null, jobId: meta.jobId ?? null, context, event },
+      { actorId: meta.actorId ?? null, jobId: meta.jobId ?? null, context, event, ...(meta.rerunApproved ? { rerunApproved: true } : {}) },
       meta.jobId ? { 'Idempotency-Key': String(meta.jobId) } : {});
   // "Did job X happen?" → { done: true, send? } | { done: false } | { done: null } (nobody knows)
   const verify = async ({ context, event }, meta = {}) =>
     callRemote('POST', `/actions/${encodeURIComponent(name)}/status`,
       { actorId: meta.actorId ?? null, jobId: meta.jobId ?? null, context, event });
-  const opts = { maxRetries: 5, backoff: 'exponential', timeout: cfg().timeoutMs, originalFn: run, verify, remote: true };
+  const opts = { backoff: 'exponential', timeout: cfg().timeoutMs, originalFn: run, verify, remote: true };
+  // Retrying an idempotent action is always safe, so it gets a bigger budget before a
+  // human is asked; the others stop sooner.
+  Object.defineProperty(opts, 'maxRetries', { enumerable: true, get: () => (manifest.delivery[name] === 'idempotent' ? 10 : 5) });
   // Undeclared actions get the safe default: never repeated when the outcome is unknown.
   Object.defineProperty(opts, 'delivery', { enumerable: true, get: () => manifest.delivery[name] ?? 'at-most-once' });
   const stub = (...args) => run(...args);
@@ -180,23 +183,35 @@ function remoteActionStub(name) {
 
 import { conditionGuard } from './conditionGuards.js';
 
+const RESERVED = new Set(['then', 'toJSON', 'constructor', 'prototype', '__proto__', 'hasOwnProperty', 'valueOf', 'toString', 'inspect']);
+
 /**
  * Wrap a registry with the built-in extensions:
  *   - `cond:<expression>` guards (see conditionGuards.js) — always available
  *   - names missing locally but listed in the remote manifest → remote stubs
  * Local implementations always take precedence.
  */
-export function withRemote(registry) {
+export function withRemote(registry, { strict = false } = {}) {
   const base   = registry ?? { guards: {}, actions: {}, services: {} };
+  // strict (deploy-time validation): only names the service's manifest lists count as
+  // implemented, so typos are caught before anything runs.
   const remote = remoteEnabled();
+  const hasGuard  = (n) => !strict || isRemoteGuard(n);
+  const hasAction = (n) => !strict || isRemoteAction(n);
+  // With a remote service configured, every name that is not implemented locally is the
+  // service's — whether or not its manifest could be fetched just now. (Deciding by the
+  // manifest meant a server that restarted during a service outage silently dropped
+  // durable actions and treated remote guards as missing.) Names are checked against the
+  // manifest when a definition is deployed.
+  const special = (name) => typeof name !== 'string' || RESERVED.has(name);
   const guards = new Proxy(base.guards ?? {}, {
     get: (t, name) => {
-      if (typeof name !== 'string' || name in t) return t[name];
-      return conditionGuard(name) ?? ((remote && isRemoteGuard(name)) ? remoteGuardStub(name) : undefined);
+      if (special(name) || name in t) return t[name];
+      return conditionGuard(name) ?? (remote && hasGuard(name) ? remoteGuardStub(name) : undefined);
     },
   });
   const actions = remote ? new Proxy(base.actions ?? {}, {
-    get: (t, name) => (typeof name === 'string' && !(name in t) && isRemoteAction(name)) ? remoteActionStub(name) : t[name],
+    get: (t, name) => (!special(name) && !(name in t) && hasAction(name)) ? remoteActionStub(name) : t[name],
   }) : (base.actions ?? {});
   return { ...base, guards, actions };
 }

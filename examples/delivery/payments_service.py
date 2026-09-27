@@ -45,6 +45,8 @@ def effect(kind, req):
 
 def hooks(req):
     ctx = req.get("context") or {}
+    if ctx.get("crashFirstAttempt") and not req.get("rerunApproved"):
+        os._exit(5)                                           # dies mid-call: the job store says "started"
     if ctx.get("hangFirstAttempt") and req.get("jobId") not in _seen_attempts:
         _seen_attempts.add(req.get("jobId"))
         time.sleep(ctx["hangFirstAttempt"] / 1000)          # simulate a lost request: no effect, no answer

@@ -136,6 +136,17 @@ test('at-most-once: a request that never answers → review; "it did not happen"
   assert.equal(effects(id, 'sms').length, 1);
 });
 
+test('at-most-once: the service dies mid-call → review; "did not happen" re-runs even though the service had it as started', async () => {
+  const id = await newPayment({ crashFirstAttempt: true });
+  await j('POST', `/v1/actors/${id}/event`, { type: 'SMS' });
+  await until(id, 'needs_review');
+  await startService();
+  const job = (await j('GET', '/v1/action-jobs')).body.jobs.find((x) => x.actorId === id);
+  assert.equal((await j('POST', `/v1/action-jobs/${job.id}/resolve`, { happened: false })).status, 200);
+  await until(id, 'done');
+  assert.equal(effects(id, 'sms').length, 1);
+});
+
 test('service down (connection refused): nothing was sent, so even at-most-once is retried', async () => {
   py.kill('SIGKILL');
   await sleep(300);

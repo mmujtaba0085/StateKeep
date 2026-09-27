@@ -101,6 +101,18 @@ jobs:
           PGPASSWORD=statekeep psql -h 127.0.0.1 -U statekeep -d statekeep -c 'CREATE DATABASE statekeep_cluster'
           STATEKEEP_DB_URL=postgresql://statekeep:statekeep@127.0.0.1:5432/statekeep_cluster \
             node --test --test-timeout=60000 test/cluster/cluster.test.js
+      - name: Chaos simulation — new random faults every run (seed = run number)
+        run: |
+          PGPASSWORD=statekeep psql -h 127.0.0.1 -U statekeep -d statekeep -c 'CREATE DATABASE statekeep_chaos'
+          node test/chaos/simulate.mjs --seed ${{ github.run_number }} --rounds 3 --per-round 15 \
+            --backend cluster --intensity hard --out chaos-report.json \
+            --db postgresql://statekeep:statekeep@127.0.0.1:5432/statekeep_chaos
+      - name: Upload chaos report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: chaos-report
+          path: chaos-report.json
 
   audit:
     name: "Dependency audit"

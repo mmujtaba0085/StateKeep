@@ -472,7 +472,7 @@ export async function definitionRoutes(fastify) {
     // (manifest) names — so remote-only setups also get typo checks at deploy time.
     if (remoteEnabled()) await refreshRemoteManifest({ force: true });
     const _globalRegistry = (getGlobalRegistry() || remoteEnabled())
-      ? withRemote(getGlobalRegistry() ?? { guards: {}, actions: {}, services: {} })
+      ? withRemote(getGlobalRegistry() ?? { guards: {}, actions: {}, services: {} }, { strict: true })
       : null;
     // `cond:` guards are checked even without a registry: a malformed expression would
     // otherwise silently evaluate to false forever.

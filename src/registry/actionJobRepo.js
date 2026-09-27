@@ -86,10 +86,10 @@ export async function retryActionJob(id, retryCount, nextRetryAt) {
 export async function markActionJobFailed(id) {
   if (isPostgres) {
     const { query } = await import('./db-postgres.js');
-    await query(`UPDATE action_jobs SET status='failed' WHERE id=$1`, [id]);
+    await query(`UPDATE action_jobs SET status='failed', outcome='failed' WHERE id=$1`, [id]);
     return;
   }
-  getDb().prepare(`UPDATE action_jobs SET status='failed' WHERE id=?`).run(id);
+  getDb().prepare(`UPDATE action_jobs SET status='failed', outcome='failed' WHERE id=?`).run(id);
 }
 
 // ── Delivery tracking (docs/side-effects.md) ────────────────────────────────
@@ -163,7 +163,10 @@ export async function resolveActionJob(id, happened) {
   const res = happened
     ? await run(`UPDATE action_jobs SET status='done', outcome='resolved-happened' WHERE id=$1 AND outcome='unknown'`,
                 `UPDATE action_jobs SET status='done', outcome='resolved-happened' WHERE id=? AND outcome='unknown'`, [id])
-    : await run(`UPDATE action_jobs SET status='pending', outcome=NULL, started_at=NULL, next_retry_at=$1 WHERE id=$2 AND outcome='unknown'`,
-                `UPDATE action_jobs SET status='pending', outcome=NULL, started_at=NULL, next_retry_at=? WHERE id=? AND outcome='unknown'`, [Date.now(), id]);
+    // 'rerun-approved' travels with the next attempt, so an implementation that still has
+    // the job marked as started (e.g. it crashed mid-call) knows a human cleared it.
+    // A fresh retry budget: earlier failures belong to the attempt that was reviewed.
+    : await run(`UPDATE action_jobs SET status='pending', outcome='rerun-approved', started_at=NULL, retry_count=0, next_retry_at=$1 WHERE id=$2 AND outcome='unknown'`,
+                `UPDATE action_jobs SET status='pending', outcome='rerun-approved', started_at=NULL, retry_count=0, next_retry_at=? WHERE id=? AND outcome='unknown'`, [Date.now(), id]);
   return (res.rowCount ?? res.changes ?? 0) > 0;
 }

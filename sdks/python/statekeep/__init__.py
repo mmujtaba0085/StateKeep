@@ -323,7 +323,10 @@ class ImplementationService:
             busy = job in self._running
             if not busy:
                 self._running.add(job)
-        if busy or (prev and prev[0] == "started" and self.delivery_of(name) != "idempotent"):
+        # A job left 'started' (the service died mid-call) stays blocked until a human
+        # confirms it did not happen: StateKeep then sends rerunApproved=true.
+        cleared = bool(req.get("rerunApproved"))
+        if busy or (prev and prev[0] == "started" and self.delivery_of(name) != "idempotent" and not cleared):
             if not busy:
                 with self._running_lock:
                     self._running.discard(job)

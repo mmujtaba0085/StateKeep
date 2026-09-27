@@ -29,6 +29,7 @@ import { getGlobalRegistry } from './implementationRegistry.js';
 import { withRemote, remoteEnabled, refreshRemoteManifest } from './remoteImplementations.js';
 
 const POLL_MS    = 1_000;
+const BACKOFF_MAX_MS = parseInt(process.env.STATEKEEP_ACTION_BACKOFF_MAX_MS ?? '300000', 10);
 const MAX_ACTIVE = 50;
 let _sendEvent = null;        // (actorId, event, { idempotencyKey, mergePayload }) => Promise
 let _registry  = null;
@@ -105,8 +106,14 @@ async function processJob(job) {
   if (remoteEnabled()) await refreshRemoteManifest();
   const fn = withRemote(getGlobalRegistry() ?? _registry)?.actions?.[job.action_name];
   if (!fn) {
+    // Nothing can run it (no local implementation and no remote service configured):
+    // it never happened. Tell the actor so it is not left waiting.
     console.warn(`[actionJobWorker] No action fn for '${job.action_name}' — marking failed`);
     await markActionJobFailed(job.id).catch(() => {});
+    if (_sendEvent) {
+      await _sendEvent(job.actor_id, { type: `__SK_ACTION_FAILED.${job.action_name}`, data: { error: 'no implementation' } },
+        { idempotencyKey: `failed:${job.id}`, mergePayload: null }).catch(() => {});
+    }
     return;
   }
   const opts     = fn.__sk_durable ?? {};
@@ -114,7 +121,8 @@ async function processJob(job) {
   const actualFn = opts.originalFn ?? fn;
   const context  = snap(job.context_snap) ?? {};
   const event    = snap(job.event_snap) ?? {};
-  const meta     = { actorId: job.actor_id, jobId: job.id, key: job.id };
+  // rerunApproved: a human (resolve) or the verifier confirmed an earlier attempt did not happen
+  const meta     = { actorId: job.actor_id, jobId: job.id, key: job.id, rerunApproved: job.outcome === 'rerun-approved' };
 
   // 1. The action already succeeded earlier; only its follow-up delivery is pending.
   if (job.outcome === 'succeeded') return complete(job, snap(job.result_snap));
@@ -134,10 +142,16 @@ async function processJob(job) {
         return retryActionJobAfter(job.id, job.retry_count ?? 0, Date.now() + 1000, { sent: true });
       }
       if (status?.done !== false) return unknownOutcome(job, 'the implementation cannot tell whether it happened');
-      // done === false: it certainly did not happen → run it
+      // done === false: it certainly did not happen → run it, telling the implementation the
+      // earlier attempt was cleared (its own bookkeeping may still say "started")
+      meta.rerunApproved = true;
     }
     // idempotent (or verified not done): run again with the same job id
   }
+
+  // An idempotent re-send after an unanswered attempt: until one attempt is answered
+  // with success, the earlier attempt may have happened — keep treating it as sent.
+  const uncertainBefore = job.started_at != null && delivery === 'idempotent';
 
   // 3. Attempt. Record "sent" durably BEFORE sending.
   await markActionJobStarted(job.id);
@@ -147,7 +161,7 @@ async function processJob(job) {
   } catch (err) {
     // Remote errors say whether the request may have been processed; a local function
     // that throws is reporting that it did not complete.
-    const sent = opts.remote ? err.sent !== false : false;
+    const sent = (opts.remote ? err.sent !== false : false) || uncertainBefore;
     if (sent && delivery === 'at-most-once') return unknownOutcome(job, err.message);
     return retryLater(job, opts, err, { sent });
   }
@@ -159,7 +173,9 @@ async function retryLater(job, opts, err, { sent }) {
   const newRetryCount = (job.retry_count ?? 0) + 1;
   const maxRetries    = opts.maxRetries ?? job.max_retries ?? 3;
   if (newRetryCount >= maxRetries) {
-    if (sent && (opts.delivery ?? 'at-most-once') !== 'idempotent') {
+    // Out of retries. 'failed' promises the action did not happen, so it is only used
+    // when no attempt could have happened; otherwise a human decides.
+    if (sent) {
       return unknownOutcome(job, `gave up after ${newRetryCount} attempts: ${err.message}`);
     }
     await markActionJobFailed(job.id).catch(() => {});
@@ -170,6 +186,6 @@ async function retryLater(job, opts, err, { sent }) {
     return;
   }
   // Exponential backoff: 1s, 2s, 4s, …, capped at 5 minutes
-  const backoffMs = Math.min(1000 * 2 ** (newRetryCount - 1), 300_000);
+  const backoffMs = Math.min(1000 * 2 ** (newRetryCount - 1), BACKOFF_MAX_MS);
   await retryActionJobAfter(job.id, newRetryCount, Date.now() + backoffMs, { sent }).catch(() => {});
 }

@@ -29,7 +29,7 @@ export async function actionJobRoutes(fastify) {
       querystring: {
         type: 'object',
         properties: {
-          outcome: { type: 'string', enum: ['unknown', 'resolved-happened', 'succeeded'], default: 'unknown' },
+          outcome: { type: 'string', enum: ['unknown', 'resolved-happened', 'rerun-approved', 'succeeded', 'failed'], default: 'unknown' },
           limit:   { type: 'integer', minimum: 1, maximum: 500, default: 100 },
         },
       },
