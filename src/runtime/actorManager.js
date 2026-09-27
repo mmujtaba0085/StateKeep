@@ -10,9 +10,10 @@ import { randomUUID } from 'crypto';
 import { randomInt } from 'crypto';
 import { LRUCache } from './lruCache.js';
 import { fingerprintToBigInt, regionFingerprintsToArray } from '../ffi/hashUtils.js';
+import { computeHistoryFingerprint } from '../ffi/fingerprintChain.js';
 import { getEngine } from '../ffi/engine.js';
 import { getWorkerPool } from './workerPool.js';
-import { getWriteBuffer } from './writeBuffer.js';
+import { getWriteBuffer, makeActionJobRow } from './writeBuffer.js';
 import { processEvent, computeInitialSnapshot } from './interpreter.js';
 import { compileMachine }    from './definitionCompiler.js';
 import { initializeRegionFingerprints } from './statePaths.js';
@@ -31,7 +32,7 @@ import { consumePendingNotifications } from '../registry/migrationNotificationRe
 import { getDb, encrypt, isPostgres } from '../registry/db.js';
 import { serializeRegionFingerprints } from '../registry/regionFingerprintCodec.js';
 import { emitWebhookEvent } from '../api/lib/webhookEmitter.js';
-import { getWildcardChildDef, loadChangepointsAfter, loadParChangepointsAfter } from '../registry/changepointRepo.js';
+import { getWildcardChildDef, findFamilyChangepoint, loadChangepointsAfter, loadParChangepointsAfter } from '../registry/changepointRepo.js';
 import { cancelAllPendingForActor } from '../registry/scheduledEventRepo.js';
 
 const HOT_REGISTRY_SIZE  = parseInt(process.env.HOT_REGISTRY_SIZE    ?? '10000',  10);
@@ -87,8 +88,33 @@ setInterval(() => {
 // Poll migration_notifications every 500ms instead of a per-event DB read.
 // migrate-worker writes to this table after each migration; we evict the affected
 // actor from the hot registry so the next event sees the new definition.
+// Change-points deployed through another API server (or another process) are
+// registered here too — otherwise this server's inline check never routed its actors
+// to them. Incremental by row id.
+let _lastCpId = 0, _lastParCpId = 0;
+async function syncChangepointsFromDb() {
+  const eng = getEngine();
+  if (!eng.available) return;
+  const rows = await loadChangepointsAfter(_lastCpId);
+  for (const row of rows) {
+    try { eng.registerChangepoint(BigInt(row.t_star), BigInt(row.prefix_hash), BigInt(row.refinement), row.child_def_id); } catch {}
+    _lastCpId = Math.max(_lastCpId, Number(row.id));
+  }
+  const par = await loadParChangepointsAfter(_lastParCpId);
+  for (const row of par) {
+    try {
+      const stored = JSON.parse(row.region_hashes);
+      const arr = Array.isArray(stored) ? stored.map((h) => BigInt(`0x${String(h).padStart(16, '0')}`)) : regionFingerprintsToArray(stored);
+      if (arr?.length) eng.registerChangepointParallel(BigInt(row.t_star), arr, BigInt(row.refinement), row.child_def_id);
+    } catch {}
+    _lastParCpId = Math.max(_lastParCpId, Number(row.id));
+  }
+  if (rows.length + par.length > 0) migrationCheckCache.clear();   // stale "stay" answers
+}
+
 export const _migrationPollTimer = setInterval(async () => {
   try {
+    await syncChangepointsFromDb().catch(() => {});
     const actorIds = await consumePendingNotifications();
     for (const id of actorIds) {
       hotRegistry.delete(id);        // delete (not evict) to avoid overwriting DB status
@@ -224,14 +250,17 @@ async function ensureInWorker(actorId, actor, priority = 'normal') {
  */
 const _emptyRegistry = withConditions({ guards: {}, actions: {}, services: {} });
 
-export async function spawnActor({ definitionId, initialContext, logicalStartTick }) {
+export async function spawnActor({ definitionId, initialContext, logicalStartTick, spawnKey = null, spawnEventTick = null }) {
   const def = await cachedFindDefinition(definitionId);
   if (!def) throw new Error(`Definition not found: ${definitionId}`);
 
   // Compute initial snapshot on the main thread so we can do a single DB write
   // with the full state — eliminating the two-write window (null stateValue → real state).
   const compiledJson = def.compiledJson ?? compileMachine(def.definitionJson);
-  const snapResult   = computeInitialSnapshot(compiledJson, def.definitionJson, initialContext ?? {}, _emptyRegistry);
+  // Same implementations as events use: the initial state's entry actions run and its
+  // timers are scheduled (before, spawn used an empty registry and dropped both).
+  const spawnRegistry = withRemote(getGlobalRegistry() ?? { guards: {}, actions: {}, services: {} });
+  const snapResult   = computeInitialSnapshot(compiledJson, def.definitionJson, initialContext ?? {}, spawnRegistry);
   if (snapResult.error) throw new Error(`Failed to compute initial snapshot: ${snapResult.error}`);
 
   const stateValue         = snapResult.stateValue;
@@ -244,7 +273,23 @@ export async function spawnActor({ definitionId, initialContext, logicalStartTic
 
   const actorLogicalTick = logicalStartTick ?? def.deployedAt ?? 0;
 
-  // Single write: full initial state on actor creation — no intermediate null-state.
+  // Single write: the actor with its full initial state, its initial entry-action jobs
+  // and timers, its SPAWN audit event and the client's idempotency key — one transaction,
+  // committed before the spawn is acknowledged. (Before, the jobs and timers followed in
+  // a later write: a crash in between left an actor whose first actions never ran.)
+  const actionJobs = (snapResult.durableActions ?? []).map((d) => makeActionJobRow({
+    actorId, actionName: d.name, context: d.context, event: d.event,
+    maxRetries: d.opts?.maxRetries ?? 3, fireAt: Date.now() }));
+  const timers = [];
+  if (!snapResult.done) {
+    for (const op of snapResult.scheduledEventOps ?? []) {
+      if (op.op !== 'create') continue;
+      for (const { eventType, delayMs } of op.entries) {
+        timers.push({ eventType, fireAt: Date.now() + delayMs,
+          payloadEnc: encrypt(JSON.stringify({ stateEntryId: op.newEntryId })) });
+      }
+    }
+  }
   await dbCreateActor({
     id:                 actorId,
     definitionId,
@@ -253,7 +298,17 @@ export async function spawnActor({ definitionId, initialContext, logicalStartTic
     logicalStartTick:   actorLogicalTick,
     historyFingerprint,
     regionFingerprints,
+    // A machine can finish during spawn (eventless transitions into a final state):
+    // it is created finished, like one that finishes on an event.
+    status:             snapResult.done ? 'terminated' : 'active',
+    stateEntryId:       snapResult.stateEntryId ?? 0,   // the initial state's timers carry it
+    spawnKey, actionJobs, timers,
+    spawnEvent:         spawnEventTick != null ? { tick: Number(spawnEventTick), processedAt: Date.now() } : null,
   });
+  if (snapResult.done) {
+    return { id: actorId, logicalStartTick: actorLogicalTick, actorId, stateValue, context: effectiveContext,
+      historyFingerprint, regionFingerprints, status: 'done', done: true };
+  }
 
   // Pre-load worker with snapshot (skips re-computation in worker for idempotent reload).
   await pool.send(actorId, {
@@ -273,6 +328,7 @@ export async function spawnActor({ definitionId, initialContext, logicalStartTic
     regionFingerprints,
     lastEventTick:    null,
     logicalStartTick: actorLogicalTick,
+    stateEntryId:     snapResult.stateEntryId ?? 0,
     lastAccess:       Date.now(),
   });
 
@@ -312,7 +368,32 @@ export async function spawnActor({ definitionId, initialContext, logicalStartTic
 // acknowledged events can be lost on a crash. 'sync': flush alone, per event.
 const DEFAULT_DURABILITY = process.env.STATEKEEP_DURABILITY ?? 'group';
 
+// ── Per-actor serialization ───────────────────────────────────────────────────
+// Everything that reads an actor's state and writes a new one (events, migrations)
+// runs one at a time per actor. Without this, two requests for one actor that
+// interleaved across an await (a cold load, a definition lookup, a remote guard)
+// both computed from the same old state, and a batch migration in another process
+// could overwrite events processed meanwhile.
+const _actorLocks = new Map();   // actorId → tail promise
+export async function withActorLock(actorId, fn) {
+  const prev = _actorLocks.get(actorId) ?? Promise.resolve();
+  let release;
+  const mine = new Promise((r) => { release = r; });
+  const tail = prev.then(() => mine);
+  _actorLocks.set(actorId, tail);
+  await prev;
+  try { return await fn(); }
+  finally {
+    release();
+    if (_actorLocks.get(actorId) === tail) _actorLocks.delete(actorId);
+  }
+}
+
 export async function sendEvent(actorId, event, tick, opts = {}) {
+  return withActorLock(actorId, () => _sendEventLocked(actorId, event, tick, opts));
+}
+
+async function _sendEventLocked(actorId, event, tick, opts = {}) {
   const { eventData, priority = 'normal', durability = DEFAULT_DURABILITY, mergePayload = null } = opts;
   const pool = getWorkerPool();
 
@@ -359,6 +440,7 @@ export async function sendEvent(actorId, event, tick, opts = {}) {
   let migratedTo = null;
   const fromDefId = entry.definitionId;  // capture before any migration reassigns entry
 
+
   if (eng.available && typeof eng.changepointCount === 'function' && eng.changepointCount() > 0) {
     const currentTick = BigInt(tick ?? eng.clockTick());
     const fp          = entry.historyFingerprint;
@@ -374,7 +456,7 @@ export async function sendEvent(actorId, event, tick, opts = {}) {
         // definition's t_star to avoid routing backward to an older version.
         const currentDef        = await cachedFindDefinition(entry.definitionId);
         const currentDeployedAt = currentDef?.deployedAt ?? 0;
-        const logicalTime = currentDeployedAt > (entry.logicalStartTick ?? 0)
+        const logicalTime = currentDeployedAt >= (entry.logicalStartTick ?? 0)
           ? BigInt(currentDeployedAt) + 1n
           : BigInt(entry.logicalStartTick ?? 0);
 
@@ -414,7 +496,12 @@ export async function sendEvent(actorId, event, tick, opts = {}) {
         if (targetDefId && targetDefId !== entry.definitionId) {
           const targetDef = await cachedFindDefinition(targetDefId);
           if (targetDef && currentDef && targetDef.machineId !== currentDef.machineId) {
-            targetDefId = null;
+            // Another workflow's change-point came first in the engine's global registry;
+            // that does not mean this actor's own family has none. (Before, the actor
+            // simply stayed — a deployment was missed whenever another workflow had
+            // deployed in between.)
+            targetDefId = await findFamilyChangepoint(entry.definitionId,
+              fingerprintToBigInt(fp).toString(), logicalTime);
           }
         }
 
@@ -443,7 +530,7 @@ export async function sendEvent(actorId, event, tick, opts = {}) {
       // Version swap: migrate first, then process event on new definition
       // fromDefId is captured in outer scope above
       try {
-        await migrateActor(actorId, targetDefId, { priority });
+        await migrateActor(actorId, targetDefId, { priority, trigger: 'inline' });
         // Evict ALL cached decisions for this actor/fromDef (key now includes fingerprint)
         const _prefix = `${actorId}:${fromDefId}:`;
         for (const key of migrationCheckCache.keys()) {
@@ -452,6 +539,7 @@ export async function sendEvent(actorId, event, tick, opts = {}) {
         // Reload entry — migrateActor updated hot registry
         entry = hotRegistry.get(actorId) ?? entry;
         migratedTo = targetDefId;
+
         logDecision({
           actorId, trigger: 'inline_event', evaluatedAt: currentTick,
           decision: 'migrated', reason: 'fingerprint_match',
@@ -787,9 +875,13 @@ export async function terminateActor(actorId, { priority = 'normal' } = {}) {
  * Migrate an actor to a new definition (called by migrate-worker and inline).
  * Throws with code 'STATE_NOT_MAPPABLE' if the actor's state cannot be resolved.
  */
-export async function migrateActor(actorId, targetDefinitionId, { priority = 'normal' } = {}) {
+export async function migrateActor(actorId, targetDefinitionId, { priority = 'normal', trigger = null } = {}) {
   // APV: fingerprint-based routing means no event replay — only the current snapshot is mapped to the new definition
   const pool   = getWorkerPool();
+  // The mapping starts from the database row, so first write anything the hot path has
+  // processed but not yet saved (a stale row would undo those events, and a pending
+  // state write flushed after this migration would overwrite it).
+  await getWriteBuffer().flush();
   const actor  = await findActorById(actorId);
   if (!actor) throw new Error(`Actor not found: ${actorId}`);
 
@@ -828,6 +920,14 @@ export async function migrateActor(actorId, targetDefinitionId, { priority = 'no
 
   const newLogicalStartTick = Number(targetDef.deployedAt) + 1;
   const newEntryId          = randomInt(0, 2 ** 32);
+  // Audit: the MIGRATED event is written in the same transaction as the migration, so
+  // an actor's history always replays to its current state (no gap after a crash, and
+  // it is ordered before any event processed on the new version).
+  const auditPayload = encrypt(Buffer.from(JSON.stringify({
+    fromDefinitionId: actor.definitionId, toDefinitionId: targetDefinitionId,
+    fromState: actor.stateValue, toState: result.stateValue, ...(trigger ? { trigger } : {}),
+  })));
+  const auditTick = (() => { try { return Number(getEngine().clockTick()); } catch { return Date.now(); } })();
 
   // ── Atomic DB update ───────────────────────────────────────────────────────
   // SQLite: single transaction cancels old after: timers, updates actor,
@@ -845,6 +945,10 @@ export async function migrateActor(actorId, targetDefinitionId, { priority = 'no
         `UPDATE scheduled_events SET status='cancelled'
          WHERE actor_id=? AND event_type LIKE '__SK_TIMEOUT_%' AND status='pending'`
       ).run(actorId);
+
+      db.prepare(
+        `INSERT INTO events (actor_id, event_type, event_payload, tick, processed_at) VALUES (?, 'MIGRATED', ?, ?, ?)`
+      ).run(actorId, auditPayload, auditTick, Date.now());
 
       // 2. Update actor definition, state, and stateEntryId atomically
       db.prepare(
@@ -893,6 +997,10 @@ export async function migrateActor(actorId, targetDefinitionId, { priority = 'no
       ? encrypt(Buffer.from(JSON.stringify(result.context)))
       : null;
     await pgTransaction(async (client) => {
+      await client.query(
+        `INSERT INTO events (actor_id, event_type, event_payload, tick, processed_at) VALUES ($1, 'MIGRATED', $2, $3, $4)`,
+        [actorId, auditPayload, auditTick, Date.now()]
+      );
       // 1. Update actor definition and state atomically
       await client.query(
         `UPDATE actors SET
@@ -942,7 +1050,10 @@ export async function migrateActor(actorId, targetDefinitionId, { priority = 'no
     console.warn(`[actorManager] actorStarted notification failed for ${actorId}: ${e.message}`);
   }
 
-  if (hotRegistry.has(actorId)) {
+  // Always (not only when the actor is already hot): an inline migration of an actor
+  // that was just loaded from the database continues with the hot entry, and must not
+  // go on processing on the old version (seen after a server restart).
+  {
     touch(actorId, {
       definitionId:       targetDefinitionId,
       stateValue:         result.stateValue,
@@ -960,6 +1071,60 @@ export async function migrateActor(actorId, targetDefinitionId, { priority = 'no
 }
 
 /**
+ * A batch migration, applied by the server that owns the actor — under the actor's lock,
+ * against its current state (not a copy another process read earlier). Re-checks that
+ * the move is still valid at this moment. Used by the migrate worker through
+ * POST /v1/internal/actors/:id/migrate.
+ *
+ * @returns {{ outcome: 'migrated'|'already'|'skipped'|'needs_rescue', reason?, stateValue? }}
+ */
+export async function migrateActorOwned(actorId, targetDefinitionId, { deploymentId = null } = {}) {
+  return withActorLock(actorId, async () => {
+    const actor = await findActorById(actorId);
+    if (!actor) return { outcome: 'skipped', reason: 'not_found' };
+    if (['terminated', 'archived'].includes(actor.status)) return { outcome: 'skipped', reason: 'finished' };
+    const hot = hotRegistry.get(actorId);
+    const currentDefId = hot?.definitionId ?? actor.definitionId;
+    if (currentDefId === targetDefinitionId) return { outcome: 'already' };
+    const [currentDef, targetDef] = await Promise.all([cachedFindDefinition(currentDefId), cachedFindDefinition(targetDefinitionId)]);
+    if (!targetDef) return { outcome: 'skipped', reason: 'target_not_found' };
+    if (currentDef && currentDef.machineId !== targetDef.machineId) return { outcome: 'skipped', reason: 'different_workflow' };
+    if (currentDef && Number(currentDef.deployedAt) >= Number(targetDef.deployedAt)) return { outcome: 'skipped', reason: 'already_newer' };
+    const path = targetDef.definitionJson?._historyPath;
+    if (Array.isArray(path) && path.length > 0) {
+      const fp = hot?.historyFingerprint ?? actor.historyFingerprint;
+      if (computeHistoryFingerprint(path) !== fp) return { outcome: 'skipped', reason: 'fingerprint_changed' };
+    }
+    // make sure the database has everything the owner processed for this actor —
+    // its events too, so they sit before the MIGRATED marker in its history
+    await getWriteBuffer().flush();
+    try {
+      const result = await migrateActor(actorId, targetDefinitionId, { priority: 'low', trigger: 'batch' });
+      return { outcome: 'migrated', stateValue: result.stateValue };
+    } catch (err) {
+      if (err.code !== 'STATE_NOT_MAPPABLE' && err.code !== 'CONTEXT_TRANSFORM_FAILED') throw err;
+      // Stranded: park it for a rescue deployment (as before), recorded in its history.
+      hotRegistry.delete(actorId);
+      await updateActorStatus(actorId, 'needs_rescue');
+      const payload = encrypt(Buffer.from(JSON.stringify({ fromDefinitionId: currentDefId, toDefinitionId: targetDefinitionId,
+        reason: err.code, stateValue: err.currentStateValue ?? null, deploymentId })));
+      if (isPostgres) {
+        const { query } = await import('../registry/db-postgres.js');
+        await query(`UPDATE actors SET definition_id=$1 WHERE id=$2`, [targetDefinitionId, actorId]);
+        await query(`INSERT INTO events (actor_id, event_type, event_payload, tick, processed_at) VALUES ($1,'MIGRATION_FAILED',$2,$3,$4)`, [actorId, payload, Date.now(), Date.now()]);
+      } else {
+        const db = getDb();
+        db.transaction(() => {
+          db.prepare(`UPDATE actors SET definition_id = ? WHERE id = ?`).run(targetDefinitionId, actorId);
+          db.prepare(`INSERT INTO events (actor_id, event_type, event_payload, tick, processed_at) VALUES (?, 'MIGRATION_FAILED', ?, ?, ?)`).run(actorId, payload, Date.now(), Date.now());
+        })();
+      }
+      return { outcome: 'needs_rescue', reason: err.code, stateValue: err.currentStateValue ?? null };
+    }
+  });
+}
+
+/**
  * Seed the in-process APV engine registry from all changepoints persisted in the DB.
  * Call once at API server startup — the engine starts with an empty registry after
  * every process restart, so changepoints deployed before the restart must be re-registered.
@@ -972,6 +1137,7 @@ export async function seedEngineRegistry() {
   const eng = getEngine();
   if (eng.available) {
     const scalars = await loadChangepointsAfter(0);
+    for (const row of scalars) _lastCpId = Math.max(_lastCpId, Number(row.id));
     for (const row of scalars) {
       try {
         eng.registerChangepoint(
@@ -986,6 +1152,7 @@ export async function seedEngineRegistry() {
     }
 
     const parallels = await loadParChangepointsAfter(0);
+    for (const row of parallels) _lastParCpId = Math.max(_lastParCpId, Number(row.id));
     for (const row of parallels) {
       try {
         const storedRegions = JSON.parse(row.region_hashes);

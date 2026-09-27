@@ -18,6 +18,7 @@
     "start": "node --env-file=.env src/api/server.js",
     "migrate-worker": "node src/workers/migrate-worker.js",
     "chaos": "node test/chaos/simulate.mjs",
+    "chaos:workflows": "node test/chaos/workflow/simulate.mjs",
     "gc-worker": "node src/workers/gc-worker.js",
     "snapshot-worker": "node src/workers/snapshot-worker.js",
     "metrics-worker": "node src/workers/metrics-worker.js",

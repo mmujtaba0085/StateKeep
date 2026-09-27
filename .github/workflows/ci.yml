@@ -107,12 +107,20 @@ jobs:
           node test/chaos/simulate.mjs --seed ${{ github.run_number }} --rounds 3 --per-round 15 \
             --backend cluster --intensity hard --out chaos-report.json \
             --db postgresql://statekeep:statekeep@127.0.0.1:5432/statekeep_chaos
-      - name: Upload chaos report
+      - name: Workflow chaos simulation — random workflows, versions and faults (seed = run number)
+        run: |
+          PGPASSWORD=statekeep psql -h 127.0.0.1 -U statekeep -d statekeep -c 'CREATE DATABASE statekeep_wfchaos'
+          node test/chaos/workflow/simulate.mjs --seed ${{ github.run_number }} --rounds 3 --per-round 20 \
+            --backend cluster --intensity hard --out wf-chaos-report.json \
+            --db postgresql://statekeep:statekeep@127.0.0.1:5432/statekeep_wfchaos
+      - name: Upload chaos reports
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: chaos-report
-          path: chaos-report.json
+          path: |
+            chaos-report.json
+            wf-chaos-report.json
 
   audit:
     name: "Dependency audit"

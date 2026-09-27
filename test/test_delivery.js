@@ -165,3 +165,17 @@ test('an action longer than the lease is not started twice (lease renewal)', asy
   await until(id, 'done');
   assert.equal(effects(id, 'sms').length, 1);
 });
+
+test('a retried spawn with the same idempotency key returns the first actor, never a second', async () => {
+  const body = { definitionId: 'payment-v1', initialContext: {}, idempotencyKey: `spawn-${Date.now()}` };
+  const [a, b] = await Promise.all([j('POST', '/v1/actors', body), j('POST', '/v1/actors', body)]);   // concurrent retries
+  const c = await j('POST', '/v1/actors', body);                                                          // a later retry
+  assert.ok(a.body.id);
+  assert.equal(b.body.id, a.body.id);
+  assert.equal(c.body.id, a.body.id);
+  assert.equal(c.status, 200);
+  assert.equal(c.body.duplicate, true);
+  assert.equal(await historyCount(a.body.id, 'SPAWN'), 1);
+  const other = await j('POST', '/v1/actors', { ...body, idempotencyKey: `${body.idempotencyKey}-other` });
+  assert.notEqual(other.body.id, a.body.id);
+});

@@ -172,15 +172,33 @@ export async function startCluster(fastify, { onRemoteStateChange } = {}) {
   heartbeatTimer.unref();
 
   const { default: pgLib } = await import('pg');
-  listener = new pgLib.Client({ connectionString: process.env.STATEKEEP_DB_URL });
-  await listener.connect();
-  await listener.query('LISTEN statekeep_state');
-  listener.on('notification', (msg) => {
+  let closing = false;
+  // The LISTEN connection must survive a dropped database connection: an unhandled
+  // 'error' on a pg Client crashed the whole API server.
+  const connectListener = async () => {
+    const client = new pgLib.Client({ connectionString: process.env.STATEKEEP_DB_URL });
+    client.on('error', (err) => {
+      fastify.log.warn(`[cluster] LISTEN connection lost: ${err.message} — reconnecting`);
+      client.end().catch(() => {});
+      if (!closing) setTimeout(() => connectListener().catch(() => {}), 1000).unref();
+    });
+    client.on('notification', (msg) => {
+      try {
+        const m = JSON.parse(msg.payload);
+        if (m.from !== NODE_ID) onRemoteStateChange?.(m.actorId, m.stateValue, m.context);
+      } catch {}
+    });
     try {
-      const m = JSON.parse(msg.payload);
-      if (m.from !== NODE_ID) onRemoteStateChange?.(m.actorId, m.stateValue, m.context);
-    } catch {}
-  });
-  fastify.addHook('onClose', async () => { clearInterval(heartbeatTimer); await listener?.end().catch(() => {}); });
+      await client.connect();
+      await client.query('LISTEN statekeep_state');
+      listener = client;
+    } catch (err) {
+      fastify.log.warn(`[cluster] LISTEN connect failed: ${err.message} — retrying`);
+      client.end().catch(() => {});
+      if (!closing) setTimeout(() => connectListener().catch(() => {}), 1000).unref();
+    }
+  };
+  await connectListener();
+  fastify.addHook('onClose', async () => { closing = true; clearInterval(heartbeatTimer); await listener?.end().catch(() => {}); });
   fastify.log.info(`[cluster] node ${NODE_ID} at ${myUrl} (ttl ${TTL_MS()}ms)`);
 }

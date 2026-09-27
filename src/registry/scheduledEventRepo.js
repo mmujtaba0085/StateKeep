@@ -187,6 +187,31 @@ export async function findDeadLetter(limit = 100) {
   return getStmts().findDeadLetter.all(limit).map(decodeRow);
 }
 
+/**
+ * Try again soon without spending a retry: the timer itself is fine, the API server that
+ * delivers it was unreachable (restarting, or its database connection dropped).
+ */
+export async function retryScheduledEventSoon(id, at, error) {
+  const sql = `UPDATE scheduled_events SET status='pending', next_retry_at=$1, error=$2 WHERE id=$3`;
+  if (isPostgres) {
+    const { query } = await import('./db-postgres.js');
+    await query(sql, [at, error, id]);
+    return;
+  }
+  getDb().prepare(sql.replace(/\$\d+/g, '?')).run(at, error, id);
+}
+
+/** The actor finished: its timer will never be wanted (as when it leaves the state). */
+export async function cancelScheduledEventById(id, error) {
+  const sql = `UPDATE scheduled_events SET status='cancelled', error=$1 WHERE id=$2`;
+  if (isPostgres) {
+    const { query } = await import('./db-postgres.js');
+    await query(sql, [error, id]);
+    return;
+  }
+  getDb().prepare(sql.replace(/\$\d+/g, '?')).run(error, id);
+}
+
 export async function cancelScheduledEvent(id, actorId) {
   if (isPostgres) {
     const { query } = await import('./db-postgres.js');

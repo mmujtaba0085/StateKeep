@@ -55,6 +55,7 @@ import {
   bulkTagNeedsRescue,
 } from '../../registry/actorRepo.js';
 import { enqueueJobs, findDecisionsByDeployment } from '../../registry/jobRepo.js';
+import { nextDeployTick } from '../../registry/deployClock.js';
 import { getEngine }                  from '../../ffi/engine.js';
 import { invalidateMigrationCacheForDefinition, evictFromHotRegistry, invalidateDefinitionCache } from '../../runtime/actorManager.js';
 import { computeHistoryHash, fingerprintToBigInt, computeRegionHashes, regionFingerprintsToArray } from '../../ffi/hashUtils.js';
@@ -427,7 +428,7 @@ export async function definitionRoutes(fastify) {
     }
 
     // ── Step 3: Store definition ─────────────────────────────────────────────
-    let tStar = eng.clockTick();
+    let tStar = await nextDeployTick(eng);   // unique across API servers (Postgres)
 
     // prefix_hash answers: "which actors are eligible for this deployment?"
     //
@@ -641,7 +642,12 @@ export async function definitionRoutes(fastify) {
             } catch (e) {
               request.log.warn(`[definitions] computeAccessible failed for ${actor.id}: ${e.message}`);
             }
-            if (targetDefId && targetDefId !== actor.definitionId) {
+            // Only this deployment's own version. The engine's registry is shared by every
+            // workflow, so for an actor that does not match this history it could answer
+            // with another workflow's wildcard change-point — which moved that actor into
+            // a different workflow (then needs_rescue). Other matches belong to their own
+            // deployments and to the inline check.
+            if (targetDefId === id && targetDefId !== actor.definitionId) {
               pendingJobs.push({ actor_id: actor.id, target_def_id: targetDefId });
             }
           }

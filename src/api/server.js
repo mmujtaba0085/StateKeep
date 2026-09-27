@@ -22,7 +22,7 @@ import { randomUUID } from 'crypto';
 
 import { engineReady, getEngine } from '../ffi/engine.js';
 import { getDb, isPostgres } from '../registry/db.js';
-import { getMaxTStar } from '../registry/changepointRepo.js';
+import { getMaxKnownTick as getMaxTStar } from '../registry/changepointRepo.js';
 import { seedEngineRegistry, sendEvent } from '../runtime/actorManager.js';
 import { getGlobalRegistry, setGlobalRegistry, loadRegistry } from '../runtime/implementationRegistry.js';
 import { startActionJobWorker } from '../runtime/actionJobWorker.js';

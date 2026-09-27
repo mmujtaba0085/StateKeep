@@ -20,6 +20,18 @@ import { serializeRegionFingerprints } from '../registry/regionFingerprintCodec.
 
 const FLUSH_MS   = parseInt(process.env.STATEKEEP_WRITE_BUFFER_MS ?? '50', 10);
 const HIGH_WATER = 200;
+const DURABLE_RETRIES = parseInt(process.env.STATEKEEP_DURABLE_RETRIES ?? '8', 10);  // ≈ 5 s of retries
+
+/** An action_jobs row (encrypted snapshots), as queued here or written at spawn. */
+export function makeActionJobRow({ actorId, actionName, context, event, maxRetries, fireAt }) {
+  const now = Date.now();
+  return {
+    id: randomUUID(), actorId, actionName,
+    contextSnap: context != null ? encrypt(Buffer.from(JSON.stringify(context))) : null,
+    eventSnap:   event   != null ? encrypt(Buffer.from(JSON.stringify(event)))   : null,
+    maxRetries:  maxRetries ?? 3, nextRetryAt: fireAt ?? now, createdAt: now,
+  };
+}
 
 class WriteBuffer {
   constructor(_dbOverride = null) {
@@ -94,10 +106,18 @@ class WriteBuffer {
       setImmediate(() => {
         this._durableScheduled = false;
         const waiters = this._durableWaiters.splice(0);
-        this.flush().then(
+        // A failed flush puts its rows back, and they will be written by a later
+        // flush — so failing the request at once would tell the client "no" about a
+        // change that is going to be saved. Ride out a short outage (a dropped
+        // connection, a busy database) first; only a longer one becomes an error.
+        const attempt = (n) => this.flush().then(
           () => { for (const w of waiters) w.resolve(); },
-          (err) => { for (const w of waiters) w.reject(err); },
+          (err) => {
+            if (n < DURABLE_RETRIES) { setTimeout(() => attempt(n + 1), Math.min(100 * 2 ** n, 1000)); return; }
+            for (const w of waiters) w.reject(err);
+          },
         );
+        attempt(0);
       });
     });
   }
@@ -107,14 +127,8 @@ class WriteBuffer {
    * state transition that produced it, so a crash can never leave a job for a
    * transition that was not persisted (or a persisted transition without its job).
    */
-  queueActionJob({ actorId, actionName, context, event, maxRetries, fireAt }) {
-    const now = Date.now();
-    this._actionJobs.push({
-      id: randomUUID(), actorId, actionName,
-      contextSnap: context != null ? encrypt(Buffer.from(JSON.stringify(context))) : null,
-      eventSnap:   event   != null ? encrypt(Buffer.from(JSON.stringify(event)))   : null,
-      maxRetries:  maxRetries ?? 3, nextRetryAt: fireAt ?? now, createdAt: now,
-    });
+  queueActionJob(args) {
+    this._actionJobs.push(makeActionJobRow(args));
   }
 
   hasPendingEvent(actorId, idempotencyKey) {
@@ -141,9 +155,16 @@ class WriteBuffer {
         : [row.state_value, row.context_json, row.history_fingerprint,
            row.region_fingerprints, row.last_event_tick, row.status, row.updated_at,
            row.state_entry_id, row.id];
-      return import('../registry/db-postgres.js').then(({ query }) =>
-        query(sql, args).catch(e => console.error(`[writeBuffer] flushActor PG ${actorId}:`, e.message))
+      // Behind any flush in flight, so an older batch cannot overwrite this newer row.
+      const run = this._flushChain.then(() => import('../registry/db-postgres.js')).then(({ query }) =>
+        query(sql, args).catch((e) => {
+          console.error(`[writeBuffer] flushActor PG ${actorId} (will retry):`, e.message);
+          if (!this._states.has(actorId)) this._states.set(actorId, row);
+          throw e;
+        })
       );
+      this._flushChain = run.catch(() => {});
+      return run;
     }
     try {
       const stmts = this._getStmts();
@@ -151,8 +172,24 @@ class WriteBuffer {
       return Promise.resolve();
     } catch (err) {
       console.error(`[writeBuffer] flushActor(${actorId}) error:`, err.message);
+      if (!this._states.has(actorId)) this._states.set(actorId, row);
       return Promise.reject(err);
     }
+  }
+
+  /**
+   * A flush that failed wrote nothing (its transaction rolled back), but the hot
+   * registry has already moved on. Put the batch back at the front, in order, so the
+   * next flush retries it; a newer queued state for the same actor supersedes the old.
+   */
+  _requeue({ rows = [], events = [], decisions = [], scheduledCancels = [], scheduledCreates = [], actionJobs = [] }) {
+    for (const row of rows) if (!this._states.has(row.id)) this._states.set(row.id, row);
+    this._events.unshift(...events);
+    for (const ev of events) if (ev.idempotency_key) this._pending.add(`${ev.actor_id}:${ev.idempotency_key}`);
+    this._decisions.unshift(...decisions);
+    this._scheduledCancels.unshift(...scheduledCancels);
+    this._scheduledCreates.unshift(...scheduledCreates);
+    this._actionJobs.unshift(...actionJobs);
   }
 
   flush() {
@@ -219,16 +256,20 @@ class WriteBuffer {
       })();
       return Promise.resolve();
     } catch (err) {
-      console.error('[writeBuffer] flush error:', err.message);
+      console.error('[writeBuffer] flush error (will retry):', err.message);
+      this._requeue({ rows, events, decisions, scheduledCancels, scheduledCreates, actionJobs });
       return Promise.reject(err);
     }
   }
 
   _flushPostgres(rows, events, decisions, scheduledCancels = [], scheduledCreates = [], actionJobs = []) {
-    this._flushChain = this._flushChain.then(() =>
+    // The chain itself never rejects (the next cycle must still run); this cycle's
+    // own promise does, so durable() callers are told their write did not commit.
+    const run = this._flushChain.then(() =>
       this._doFlushPostgres(rows, events, decisions, scheduledCancels, scheduledCreates, actionJobs)
     );
-    return this._flushChain;
+    this._flushChain = run.catch(() => {});
+    return run;
   }
 
   async _doFlushPostgres(rows, events, decisions, scheduledCancels = [], scheduledCreates = [], actionJobs = []) {
@@ -295,13 +336,16 @@ class WriteBuffer {
         for (const j of actionJobs) {
           await client.query(
             `INSERT INTO action_jobs (id, actor_id, action_name, context_snap, event_snap, max_retries, next_retry_at, status, created_at)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,'pending',$8)`,
+             VALUES ($1,$2,$3,$4,$5,$6,$7,'pending',$8)
+             ON CONFLICT (id) DO NOTHING`,
             [j.id, j.actorId, j.actionName, j.contextSnap, j.eventSnap, j.maxRetries, j.nextRetryAt, j.createdAt]
           );
         }
       });
     } catch (err) {
-      console.error('[writeBuffer] Postgres flush error:', err.message);
+      console.error('[writeBuffer] Postgres flush error (will retry):', err.message);
+      this._requeue({ rows, events, decisions, scheduledCancels, scheduledCreates, actionJobs });
+      throw err;
     }
   }
 

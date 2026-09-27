@@ -88,7 +88,21 @@ const snap = (buf) => {
 async function complete(job, answer) {
   const send = answer && typeof answer === 'object' ? answer.send : null;
   if (send && typeof send.type === 'string' && _sendEvent) {
-    await _sendEvent(job.actor_id, send, { idempotencyKey: `job:${job.id}`, mergePayload: send });
+    try {
+      await _sendEvent(job.actor_id, send, { idempotencyKey: `job:${job.id}`, mergePayload: send });
+    } catch (err) {
+      // The actor finished (or was archived/deleted) while the action ran: the action
+      // did happen, and there is nobody left to tell. Before, this threw on every retry
+      // and the job was re-claimed forever.
+      const gone = ['ACTOR_TERMINATED', 'ACTOR_ARCHIVED'].includes(err.code)
+        || /is (terminated|archived)|not found|dispatch (404|409)/.test(err.message ?? '');
+      if (!gone) {
+        // delivery failed for another reason: keep the answer, try the delivery again soon
+        await retryActionJobAfter(job.id, job.retry_count ?? 0, Date.now() + 1000, { sent: true });
+        return;
+      }
+      console.warn(`[actionJobWorker] '${job.action_name}' job ${job.id} succeeded but actor ${job.actor_id} is gone: follow-up ${send.type} dropped`);
+    }
   }
   await markActionJobDone(job.id);
 }

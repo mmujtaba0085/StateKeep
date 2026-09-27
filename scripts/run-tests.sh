@@ -243,6 +243,9 @@ LEGACY_FILES=(
   test/test_sdks.js
   test/test_agent_sessions.js
   test/test_delivery.js
+  test/test_apv_conformance.js
+  test/test_writebuffer_retry.js
+  test/test_apv_families.js
   packages/xstate-apv/test.js
   packages/durable/test.js
 )

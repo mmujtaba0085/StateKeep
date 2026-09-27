@@ -466,6 +466,17 @@ This works because every definition has a `machineId` — the ID of the first de
 
 `requestedAs` is present whenever the id was resolved to a different version.
 
+**Retrying safely:** pass `"idempotencyKey": "<your id>"` (or an `Idempotency-Key` header). If the
+answer was lost (a crash, a timeout, a dropped connection) and the client sends the same
+spawn again, it gets **200** with the actor the first attempt created (`"duplicate": true`)
+instead of a second actor. The actor, its first entry-action jobs and timers, its `SPAWN`
+history event and the key are written in one transaction, so a crash never leaves half of
+them. A database that is briefly unreachable answers **503** (retry with the same key).
+
+An actor spawned with the family alias is dated by the version it got, so every later
+deployment applies to it. An actor pinned to an exact older version after a newer one was
+deployed is, by design, not moved by that deployment.
+
 ---
 
 ### POST /v1/actors/bulk

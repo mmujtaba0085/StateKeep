@@ -67,16 +67,22 @@ export async function queryAll(sql, params = []) {
 
 export async function transaction(fn) {
   const client = await getPool().connect();
+  // A checked-out client whose connection drops emits 'error'; the pool only listens on
+  // idle clients, so without this the unhandled event crashed the whole server.
+  let broken = null;
+  const onError = (err) => { broken = err; };
+  client.on('error', onError);
   try {
     await client.query('BEGIN');
     const result = await fn(client);
     await client.query('COMMIT');
     return result;
   } catch (err) {
-    await client.query('ROLLBACK');
+    try { await client.query('ROLLBACK'); } catch { /* connection gone: nothing to roll back */ }
     throw err;
   } finally {
-    client.release();
+    client.off('error', onError);
+    client.release(broken ? broken : undefined);   // a broken connection is discarded, not reused
   }
 }
 

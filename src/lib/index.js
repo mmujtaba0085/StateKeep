@@ -41,7 +41,7 @@ export async function createStateKeep({
   }
 
   // Seed APV clock past the highest changepoint tick from a prior run
-  const { getMaxTStar } = await import('../registry/changepointRepo.js');
+  const { getMaxKnownTick: getMaxTStar } = await import('../registry/changepointRepo.js');
   try {
     const maxTStar = await getMaxTStar();
     if (maxTStar > 0) {

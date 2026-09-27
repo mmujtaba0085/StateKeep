@@ -142,31 +142,61 @@ export async function createActor({
   historyFingerprint = '0',
   regionFingerprints = null,
   stateEntryId = 0,
+  status = 'active',
+  // Written in the SAME transaction as the actor, so a crash can never leave an actor
+  // without its first jobs/timers/audit event, or a key without its actor:
+  spawnKey = null,          // client idempotency key (a retried spawn returns this actor)
+  actionJobs = [],          // rows shaped like writeBuffer.makeActionJobRow()
+  timers = [],              // { eventType, payloadEnc, fireAt }
+  spawnEvent = null,        // { tick, processedAt } → the SPAWN audit event
 } = {}) {
   const ts = now();
+  const extras = spawnKey || actionJobs.length || timers.length || spawnEvent;
   const encContext = context != null
     ? encrypt(Buffer.from(JSON.stringify(context)))
     : null;
   const encRegions = serializeRegionFingerprints(regionFingerprints);
 
+  const extraSql = {
+    key:   `INSERT INTO spawn_keys (key, actor_id, created_at) VALUES ($1,$2,$3)`,
+    job:   `INSERT INTO action_jobs (id, actor_id, action_name, context_snap, event_snap, max_retries, next_retry_at, status, created_at)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,'pending',$8)`,
+    timer: `INSERT INTO scheduled_events (actor_id, event_type, payload_enc, fire_at, status, created_at) VALUES ($1,$2,$3,$4,'pending',$5)`,
+    event: `INSERT INTO events (actor_id, event_type, event_payload, tick, processed_at) VALUES ($1,'SPAWN',NULL,$2,$3)`,
+  };
+  const extraArgs = () => [
+    ...(spawnKey ? [['key', [spawnKey, id, ts]]] : []),
+    ...actionJobs.map((j) => ['job', [j.id, id, j.actionName, j.contextSnap, j.eventSnap, j.maxRetries, j.nextRetryAt, j.createdAt]]),
+    ...timers.map((t) => ['timer', [id, t.eventType, t.payloadEnc, t.fireAt, ts]]),
+    ...(spawnEvent ? [['event', [id, spawnEvent.tick, spawnEvent.processedAt]]] : []),
+  ];
+  const keyTaken = (e) => /spawn_keys/.test(e.message ?? '') || e.constraint === 'spawn_keys_pkey'
+    ? Object.assign(new Error(`spawn key already used: ${spawnKey}`), { code: 'SPAWN_KEY_EXISTS' }) : e;
+
   if (isPostgres) {
-    const { query } = await import('./db-postgres.js');
-    await query(
-      `INSERT INTO actors
+    const { query, transaction } = await import('./db-postgres.js');
+    const actorSql = `INSERT INTO actors
          (id, definition_id, state_value, context_json,
           logical_start_tick, history_fingerprint, region_fingerprints, last_event_tick,
           state_entry_id, status, created_at, updated_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
-      [id, definitionId,
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`;
+    const actorArgs = [id, definitionId,
        stateValue != null ? JSON.stringify(stateValue) : null,
        encContext, logicalStartTick, String(historyFingerprint),
-       encRegions, null, stateEntryId ?? 0, 'active', ts, ts]
-    );
+       encRegions, null, stateEntryId ?? 0, status, ts, ts];
+    if (!extras) { await query(actorSql, actorArgs); return id; }
+    try {
+      await transaction(async (client) => {
+        await client.query(actorSql, actorArgs);
+        for (const [k, args] of extraArgs()) await client.query(extraSql[k], args);
+      });
+    } catch (e) { throw keyTaken(e); }
     return id;
   }
 
   const s = getStmts();
-  s.insert.run({
+  const db = getDb();
+  const insertActor = () => s.insert.run({
     id,
     definition_id:        definitionId,
     state_value:          stateValue != null ? JSON.stringify(stateValue) : null,
@@ -176,11 +206,27 @@ export async function createActor({
     region_fingerprints:  encRegions,
     last_event_tick:      null,
     state_entry_id:       stateEntryId ?? 0,
-    status:               'active',
+    status,
     created_at:           ts,
     updated_at:           ts,
   });
+  if (!extras) { insertActor(); return id; }
+  try {
+    db.transaction(() => {
+      insertActor();
+      for (const [k, args] of extraArgs()) db.prepare(extraSql[k].replace(/\$\d+/g, '?')).run(...args);
+    })();
+  } catch (e) { throw keyTaken(e); }
   return id;
+}
+
+/** The actor a spawn idempotency key created, if any. */
+export async function findActorIdBySpawnKey(key) {
+  if (isPostgres) {
+    const { queryOne } = await import('./db-postgres.js');
+    return (await queryOne(`SELECT actor_id FROM spawn_keys WHERE key=$1`, [key]))?.actor_id ?? null;
+  }
+  return getDb().prepare(`SELECT actor_id FROM spawn_keys WHERE key=?`).get(key)?.actor_id ?? null;
 }
 
 export async function findActorById(id) {

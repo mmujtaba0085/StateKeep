@@ -11,6 +11,7 @@ import { evictFromHotRegistry, sendEvent } from '../../runtime/actorManager.js';
 import { notifyStateChange } from '../websocket.js';
 import { getEngine } from '../../ffi/engine.js';
 import { deliverEventOnce } from '../../runtime/deliverOnce.js';
+import { migrateActorOwned } from '../../runtime/actorManager.js';
 
 export async function internalRoutes(fastify) {
 
@@ -59,6 +60,24 @@ export async function internalRoutes(fastify) {
     } catch (err) {
       const code = err.statusCode ?? (err.code === 'ACTOR_NEEDS_RESCUE' ? 409 : err.message.includes('not found') ? 404 : 500);
       return reply.code(code).send({ error: err.message, ...(err.code ? { code: err.code } : {}) });
+    }
+  });
+
+  // POST /v1/internal/actors/:id/migrate — a batch migration applied by the server that
+  // owns the actor (the migrate worker used to write the actor from its own process,
+  // racing with events this server was processing).
+  fastify.post('/v1/internal/actors/:id/migrate', {
+    schema: {
+      hide: true,
+      body: { type: 'object', required: ['targetDefinitionId'], properties: { targetDefinitionId: { type: 'string' }, deploymentId: { type: ['string', 'null'] } } },
+    },
+  }, async (request, reply) => {
+    try {
+      const r = await migrateActorOwned(request.params.id, request.body.targetDefinitionId, { deploymentId: request.body.deploymentId ?? null });
+      if (r.outcome === 'migrated') notifyStateChange(request.params.id, r.stateValue, undefined);
+      return reply.send(r);
+    } catch (err) {
+      return reply.code(500).send({ error: err.message });
     }
   });
 }

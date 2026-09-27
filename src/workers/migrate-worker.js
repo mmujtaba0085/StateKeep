@@ -4,33 +4,22 @@
  * Background process: processes migration_jobs in batches.
  */
 
-import { getDb, encrypt, isPostgres } from '../registry/db.js';
+import { getDb, isPostgres } from '../registry/db.js';
 import { startHeartbeat } from './heartbeat.js';
-import { claimBatch, markDone, markFailed, resetProcessingJobs } from '../registry/jobRepo.js';
-import { findActorById, updateActorStatus } from '../registry/actorRepo.js';
-import { findDefinitionById } from '../registry/definitionRepo.js';
-import { fingerprintToBigInt, regionFingerprintsToArray } from '../ffi/hashUtils.js';
+import { claimBatch, markDone, markFailed, resetProcessingJobs, releaseJob } from '../registry/jobRepo.js';
+import { findActorById } from '../registry/actorRepo.js';
+import { regionFingerprintsToArray } from '../ffi/hashUtils.js';
 import { incrementMigrated, incrementFailed, updateDeploymentStatus, findDeploymentById } from '../registry/deploymentRepo.js';
-import { migrateActor, invalidateDefinitionCache, seedEngineRegistry } from '../runtime/actorManager.js';
+import { seedEngineRegistry } from '../runtime/actorManager.js';
 import { insertMigrationNotification } from '../registry/migrationNotificationRepo.js';
 import { getEngine, engineReady } from '../ffi/engine.js';
-import { getWildcardChildDef, loadChangepointsAfter, loadParChangepointsAfter } from '../registry/changepointRepo.js';
+import { loadChangepointsAfter, loadParChangepointsAfter } from '../registry/changepointRepo.js';
 
 const BATCH_SIZE    = 500;
 const POLL_INTERVAL = 500;
 
 const API_PORT  = process.env.PORT ?? 3001;
 const ADMIN_KEY = process.env.STATEKEEP_ADMIN_KEY ?? '';
-
-async function evictFromApiCache(actorId) {
-  try {
-    await fetch(`${process.env.STATEKEEP_INTERNAL_URL ?? `http://127.0.0.1:${API_PORT}`}/v1/internal/cache/evict`, {
-      method:  'POST',
-      headers: { 'Content-Type': 'application/json', 'x-admin-key': ADMIN_KEY },
-      body:    JSON.stringify({ actorId }),
-    });
-  } catch {}
-}
 
 console.log('[migrate-worker] Starting...');
 
@@ -91,20 +80,6 @@ async function syncRegistry() {
 
 await syncRegistry();
 
-async function insertEvent(actorId, eventType, payload, tick) {
-  const encPayload = encrypt(Buffer.from(JSON.stringify(payload)));
-  if (isPostgres) {
-    const { query } = await import('../registry/db-postgres.js');
-    await query(
-      `INSERT INTO events (actor_id, event_type, event_payload, tick, processed_at) VALUES ($1,$2,$3,$4,$5)`,
-      [actorId, eventType, encPayload, tick, Date.now()]
-    );
-  } else {
-    getDb().prepare(
-      `INSERT INTO events (actor_id, event_type, event_payload, tick, processed_at) VALUES (?, ?, ?, ?, ?)`
-    ).run(actorId, eventType, encPayload, tick, Date.now());
-  }
-}
 
 async function insertDecision(actorId, deploymentId, tick, decision, reason, fromDefId, toDefId, fingerprint) {
   try {
@@ -128,107 +103,44 @@ async function insertDecision(actorId, deploymentId, tick, decision, reason, fro
 
 async function processJob(job) {
   const { id, actor_id, target_def_id, deployment_id } = job;
-
-  const actorBefore = await findActorById(actor_id);
-  const fromState   = actorBefore?.stateValue ?? null;
-  const fromDefId   = actorBefore?.definitionId ?? null;
-
   const eng = getEngine();
   const currentTick = Number(eng.clockTick());
+  const actorBefore = await findActorById(actor_id);
+  const fromDefId   = actorBefore?.definitionId ?? null;
 
-  const targetDefForRecheck = actorBefore ? await findDefinitionById(target_def_id) : null;
-  const isWildcardDeploy    = !targetDefForRecheck?.definitionJson?._historyPath &&
-                              !targetDefForRecheck?.definitionJson?._historyRegions;
-
-  if (eng.available && actorBefore && actorBefore.status !== 'needs_rescue' && !isWildcardDeploy) {
-    let recheck = null;
-    try {
-      const actorCurrentDef    = await findDefinitionById(actorBefore.definitionId);
-      const currentDeployedAt  = actorCurrentDef?.deployedAt ?? 0;
-      const logicalStartTick   = actorBefore.logicalStartTick ?? 0;
-      const wildcardLowerBound = currentDeployedAt > logicalStartTick ? currentDeployedAt : logicalStartTick;
-      const recheckLogicalTime = currentDeployedAt > logicalStartTick
-        ? BigInt(currentDeployedAt) + 1n
-        : BigInt(logicalStartTick);
-
-      recheck = eng.computeAccessible(fingerprintToBigInt(actorBefore.historyFingerprint), recheckLogicalTime, BigInt(currentTick));
-
-      if (!recheck) recheck = await getWildcardChildDef(actorBefore.definitionId, wildcardLowerBound);
-
-      if (!recheck && actorBefore.regionFingerprints) {
-        const regionArr = regionFingerprintsToArray(actorBefore.regionFingerprints);
-        if (regionArr && regionArr.length > 0) {
-          recheck = eng.computeAccessibleParallel(regionArr, recheckLogicalTime, BigInt(currentTick));
-        }
-      }
-    } catch {}
-
-    if (!recheck || recheck !== target_def_id) {
-      await markFailed(id, 'cancelled: fingerprint_changed');
-      await insertDecision(actor_id, deployment_id, currentTick, 'cancelled', 'fingerprint_changed', fromDefId, target_def_id, actorBefore.historyFingerprint);
-      await incrementFailed(deployment_id);
-      return;
-    }
+  // The server that owns the actor applies the migration, under the actor's lock and
+  // against its current state; it also re-checks that the move is still valid.
+  let r;
+  try {
+    const res = await fetch(`${process.env.STATEKEEP_INTERNAL_URL ?? `http://127.0.0.1:${API_PORT}`}/v1/internal/actors/${encodeURIComponent(actor_id)}/migrate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-admin-key': ADMIN_KEY },
+      body: JSON.stringify({ targetDefinitionId: target_def_id, deploymentId: deployment_id }),
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    r = await res.json();
+  } catch (err) {
+    // server unreachable (restarting, failing over): try this job again later
+    console.warn(`[migrate-worker] Job ${id}: owner unreachable (${err.message}) — will retry`);
+    await releaseJob(id);
+    return;
   }
 
-  await updateActorStatus(actor_id, 'migrating');
-
-  try {
-    invalidateDefinitionCache(target_def_id);
-    const result = await migrateActor(actor_id, target_def_id, { priority: 'low' });
-
-    const targetDef     = await findDefinitionById(target_def_id);
-    const migratedActor = await findActorById(actor_id);
-    if (migratedActor && targetDef) {
-      try {
-        eng.actorStarted(BigInt(targetDef.deployedAt), fingerprintToBigInt(migratedActor.historyFingerprint));
-      } catch (e) {
-        console.warn(`[migrate-worker] actorStarted notification failed for ${actor_id}: ${e.message}`);
-      }
-    }
-
-    // Mark job done before inserting the audit event so a transient DB error on
-    // insertEvent cannot leave the job in 'migrating' state and trigger a re-migration.
+  if (r.outcome === 'migrated' || r.outcome === 'already') {
     await markDone(id);
     await incrementMigrated(deployment_id);
-    await insertEvent(actor_id, 'MIGRATED', {
-      fromDefinitionId: fromDefId,
-      toDefinitionId:   target_def_id,
-      fromState,
-      toState:          result.stateValue,
-    }, currentTick).catch(err =>
-      console.warn(`[migrate-worker] MIGRATED event insert failed for ${actor_id}:`, err.message)
-    );
-    await insertMigrationNotification(actor_id, fromDefId, target_def_id).catch(() => {});
-    evictFromApiCache(actor_id);
-  } catch (err) {
-    if (err.code === 'STATE_NOT_MAPPABLE' || err.code === 'CONTEXT_TRANSFORM_FAILED') {
-      console.warn(`[migrate-worker] Job ${id}: actor ${actor_id} needs_rescue — ${err.message}`);
-      await updateActorStatus(actor_id, 'needs_rescue');
-
-      // Advance actor to target definition so future rescue deployments find it
-      if (isPostgres) {
-        const { query } = await import('../registry/db-postgres.js');
-        await query(`UPDATE actors SET definition_id=$1 WHERE id=$2`, [target_def_id, actor_id]);
-      } else {
-        getDb().prepare(`UPDATE actors SET definition_id = ? WHERE id = ?`).run(target_def_id, actor_id);
-      }
-      evictFromApiCache(actor_id);
-
-      await insertEvent(actor_id, 'MIGRATION_FAILED', {
-        fromDefinitionId: fromDefId,
-        toDefinitionId:   target_def_id,
-        reason:           err.code,
-        stateValue:       err.currentStateValue ?? null,
-        message:          err.message,
-      }, currentTick);
-
-      await markFailed(id, `${err.code}: ${err.currentStateValue ?? err.message}`);
-    } else {
-      console.error(`[migrate-worker] Job ${id} failed for actor ${actor_id}:`, err.message);
-      await updateActorStatus(actor_id, 'active');
-      await markFailed(id, err.message);
+    if (r.outcome === 'migrated') {
+      await insertMigrationNotification(actor_id, fromDefId, target_def_id).catch(() => {});
+      await insertDecision(actor_id, deployment_id, currentTick, 'migrated', 'batch', fromDefId, target_def_id, actorBefore?.historyFingerprint ?? '0');
     }
+  } else if (r.outcome === 'needs_rescue') {
+    console.warn(`[migrate-worker] Job ${id}: actor ${actor_id} needs_rescue — ${r.reason}`);
+    await markFailed(id, `${r.reason}: ${JSON.stringify(r.stateValue)}`);
+    await incrementFailed(deployment_id);
+  } else {
+    await markFailed(id, `cancelled: ${r.reason}`);
+    await insertDecision(actor_id, deployment_id, currentTick, 'cancelled', r.reason, fromDefId, target_def_id, actorBefore?.historyFingerprint ?? '0');
     await incrementFailed(deployment_id);
   }
 }

@@ -96,7 +96,10 @@ export function getDb() {
   // Bootstrap schema — wrapped in a transaction so concurrent fresh-DB
   // processes don't see a partially-initialised schema mid-exec.
   const schema = readFileSync(join(__dirname, 'schema.sql'), 'utf8');
-  _db.transaction(() => _db.exec(schema))();
+  // IMMEDIATE (take the write lock up front) and retried: a worker process starting
+  // while the API server is writing used to die here with SQLITE_BUSY — a deferred
+  // transaction that must upgrade to a write lock fails at once instead of waiting.
+  retryBusy(() => _db.transaction(() => _db.exec(schema)).immediate());
 
   // ── Live migrations (applied to existing databases) ──────────────────────
   // Each migration is guarded by INSERT OR IGNORE into schema_migrations so it
@@ -724,12 +727,33 @@ export function getDb() {
     console.log('[db] Migration v26 applied: action delivery tracking');
   }
 
+  // v27 — spawn idempotency keys: a client that retries POST /v1/actors after a lost
+  // answer gets the actor its first attempt created, not a second one.
+  if (!appliedVersions.has(27)) {
+    _db.transaction(() => {
+      _db.exec(`CREATE TABLE IF NOT EXISTS spawn_keys (key TEXT PRIMARY KEY, actor_id TEXT NOT NULL, created_at INTEGER NOT NULL)`);
+      _db.exec(`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (27, unixepoch())`);
+    })();
+    console.log('[db] Migration v27 applied: spawn idempotency keys');
+  }
+
   // Graceful shutdown
   process.on('exit',    () => { try { _db.close(); } catch {} });
   process.on('SIGINT',  () => { process.exit(0); });
   process.on('SIGTERM', () => { process.exit(0); });
 
   return _db;
+}
+
+function retryBusy(fn, timeoutMs = 30_000) {
+  const until = Date.now() + timeoutMs;
+  const pause = new Int32Array(new SharedArrayBuffer(4));
+  for (;;) {
+    try { return fn(); } catch (err) {
+      if (err?.code !== 'SQLITE_BUSY' || Date.now() > until) throw err;
+      Atomics.wait(pause, 0, 0, 50);    // synchronous back-off: this runs during startup
+    }
+  }
 }
 
 export default getDb;

@@ -10,13 +10,15 @@
  */
 
 import { getDb, encrypt, isPostgres } from '../registry/db.js';
-import { findDueEvents, markFired, markDispatchFailed, scheduleRetryOrFail } from '../registry/scheduledEventRepo.js';
+import { findDueEvents, markFired, markDispatchFailed, scheduleRetryOrFail, retryScheduledEventSoon, cancelScheduledEventById } from '../registry/scheduledEventRepo.js';
 import { startHeartbeat } from './heartbeat.js';
 import { findActorById } from '../registry/actorRepo.js';
 import { getEngine, engineReady } from '../ffi/engine.js';
 
 const POLL_INTERVAL = parseInt(process.env.SCHEDULER_POLL_INTERVAL ?? '5000', 10);
 const SKIP_STATUSES = new Set(['terminated', 'archived', 'needs_rescue']);
+const FINISHED      = new Set(['terminated', 'archived']);
+const UNREACHABLE_RETRY_MS = parseInt(process.env.SCHEDULER_UNREACHABLE_RETRY_MS ?? '2000', 10);
 
 // Where the API server listens for internal calls from workers.
 const INTERNAL_URL = process.env.STATEKEEP_INTERNAL_URL ?? `http://127.0.0.1:${process.env.PORT ?? 3001}`;
@@ -44,7 +46,9 @@ async function tick() {
     const actor = await findActorById(row.actorId ?? row.actor_id);
     if (!actor || SKIP_STATUSES.has(actor.status)) {
       const reason = `actor ${actor ? actor.status : 'not found'}`;
-      await scheduleRetryOrFail(row, reason);
+      // A finished actor never needs its timer again; only a stranded one may come back.
+      if (actor && FINISHED.has(actor.status)) await cancelScheduledEventById(row.id, reason);
+      else await scheduleRetryOrFail(row, reason);
       continue;
     }
 
@@ -64,12 +68,14 @@ async function tick() {
       const res = await fetch(`${INTERNAL_URL}/v1/internal/actors/${encodeURIComponent(row.actorId ?? row.actor_id)}/dispatch`, {
         method:  'POST',
         headers: { 'Content-Type': 'application/json', ...(ADMIN_KEY ? { 'x-admin-key': ADMIN_KEY } : {}) },
-        body:    JSON.stringify({ event, tick: clockTick }),
+        // idempotencyKey: the fired timer is recorded in the actor's history (same commit
+        // as its transition) and a retry after a crash cannot fire it twice
+        body:    JSON.stringify({ event, tick: clockTick, idempotencyKey: `timer:${row.id}` }),
         signal:  AbortSignal.timeout(15_000),
       });
       if (!res.ok) {
         const body = await res.text().catch(() => '');
-        throw new Error(`dispatch failed: HTTP ${res.status} ${body.slice(0, 200)}`);
+        throw Object.assign(new Error(`dispatch failed: HTTP ${res.status} ${body.slice(0, 200)}`), { status: res.status, body });
       }
 
       // Write SCHEDULED_EVENT_FIRED to event log
@@ -91,6 +97,18 @@ async function tick() {
 
     } catch (err) {
       const errMsg = err.message ?? String(err);
+      // The actor finished while the timer was due: nothing to deliver, ever.
+      if (err.status === 409 && /terminated|archived/.test(err.body ?? '')) {
+        await cancelScheduledEventById(row.id, errMsg);
+        continue;
+      }
+      // The API server could not be reached or had a transient failure: the timer is not
+      // at fault, so it neither spends a retry nor waits 30 s+ — it is late by seconds.
+      if (err.status === undefined || err.status >= 500) {
+        await retryScheduledEventSoon(row.id, Date.now() + UNREACHABLE_RETRY_MS, errMsg);
+        console.warn(`[scheduler-worker] Scheduled event ${row.id}: server unreachable, retrying soon (${errMsg})`);
+        continue;
+      }
       await markDispatchFailed(row.id, errMsg);
       // Re-fetch row to get current retry_count before retry decision
       const refreshed = { ...row, status: 'failed' };

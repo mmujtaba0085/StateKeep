@@ -17,6 +17,53 @@ export async function getMaxTStar() {
   return Math.max(row?.max_t ?? 0, parRow?.max_t ?? 0);
 }
 
+/**
+ * The highest logical tick anything has used: deployments and actors' start ticks. A
+ * restarted server resumes its clock after this, so a new deployment is always later
+ * than every actor that already exists. (last_event_tick is not used: some paths store
+ * a wall-clock time there. Values that look like wall-clock times are ignored too — the
+ * engine clock can only be advanced one tick at a time.)
+ */
+export async function getMaxKnownTick() {
+  const maxT = await getMaxTStar();
+  const sql = `SELECT MAX(logical_start_tick) AS a FROM actors WHERE logical_start_tick < 1000000000`;
+  let r;
+  if (isPostgres) {
+    const { queryOne } = await import('./db-postgres.js');
+    r = await queryOne(sql);
+  } else {
+    r = getDb().prepare(sql).get();
+  }
+  return Math.max(maxT, Number(r?.a ?? 0));
+}
+
+/**
+ * The APV scalar rule, restricted to one workflow family: the change-point with the
+ * smallest t* >= logicalTime whose prefix is the actor's fingerprint, unless a wildcard
+ * (prefix 0) one is strictly earlier. The engine's registry is global — its answer can
+ * be another family's change-point that happens to come first, which the caller must
+ * discard; this finds the one that actually applies.
+ */
+export async function findFamilyChangepoint(definitionId, prefixDecimal, logicalTime) {
+  const sql = `SELECT cp.child_def_id AS child, cp.t_star AS t, cp.prefix_hash AS p
+    FROM changepoints cp JOIN definitions d ON d.id = cp.child_def_id
+    WHERE d.machine_id = (SELECT machine_id FROM definitions WHERE id = $1)
+      AND cp.t_star >= $2 AND cp.prefix_hash IN ($3, '0')
+    ORDER BY cp.t_star ASC`;
+  const args = [definitionId, Number(logicalTime), String(prefixDecimal)];
+  let rows;
+  if (isPostgres) {
+    const { queryAll } = await import('./db-postgres.js');
+    rows = await queryAll(sql, args);
+  } else {
+    rows = getDb().prepare(sql.replace(/\$\d+/g, '?')).all(...args);
+  }
+  const exact = rows.find((r) => r.p === String(prefixDecimal) && String(prefixDecimal) !== '0');
+  const wild  = rows.find((r) => r.p === '0');
+  if (exact && (!wild || Number(wild.t) >= Number(exact.t))) return exact.child;
+  return wild?.child ?? null;
+}
+
 export async function getWildcardChildDef(definitionId, logicalStartTick) {
   if (isPostgres) {
     const { queryOne } = await import('./db-postgres.js');

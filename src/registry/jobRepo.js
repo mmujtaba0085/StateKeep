@@ -197,3 +197,13 @@ export async function findDecisionsByDeployment(deploymentId, { limit = 100, off
     LIMIT ? OFFSET ?
   `).all(deploymentId, limit, offset);
 }
+
+/** Put a claimed job back in the queue (the owning API server was unreachable). */
+export async function releaseJob(jobId) {
+  if (isPostgres) {
+    const { query } = await import('./db-postgres.js');
+    await query(`UPDATE migration_jobs SET status='pending', updated_at=$1 WHERE id=$2 AND status='processing'`, [Date.now(), jobId]);
+    return;
+  }
+  getDb().prepare(`UPDATE migration_jobs SET status='pending', updated_at=? WHERE id=? AND status='processing'`).run(Date.now(), jobId);
+}
