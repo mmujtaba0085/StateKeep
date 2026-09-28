@@ -52,10 +52,9 @@ import {
   findActorsByMachine,
   findStrandedActors,
   findStrandedActorsForDeploy,
-  bulkTagNeedsRescue,
 } from '../../registry/actorRepo.js';
 import { enqueueJobs, findDecisionsByDeployment } from '../../registry/jobRepo.js';
-import { nextDeployTick } from '../../registry/deployClock.js';
+import { nextDeployTick, withFamilyDeployLock } from '../../registry/deployClock.js';
 import { getEngine, scopeOf }         from '../../ffi/engine.js';
 import { invalidateMigrationCacheForDefinition, evictFromHotRegistry, invalidateDefinitionCache } from '../../runtime/actorManager.js';
 import { computeHistoryHash, fingerprintToBigInt, computeRegionHashes, regionFingerprintsToArray } from '../../ffi/hashUtils.js';
@@ -168,6 +167,15 @@ export async function definitionRoutes(fastify) {
       },
     },
   }, async (request, reply) => {
+    // Deployments of one workflow are serialized (deployClock.js): their times are then
+    // committed in order, which the completeness of routing relies on.
+    const { id: _id, parentId: _parentId } = request.body;
+    let family = _id;
+    if (_parentId) family = (await findDefinitionById(_parentId))?.machineId ?? _parentId;
+    return withFamilyDeployLock(family, () => deployDefinitionHandler(request, reply));
+  });
+
+  async function deployDefinitionHandler(request, reply) {
     const { id, parentId, definition, refinement = 1, confirmToken, historyPath, stateMapping, historyRegions, contextTransform } = request.body;
     const isDryRun          = request.query?.dryRun === 'true';
     const eng               = getEngine();
@@ -547,12 +555,12 @@ export async function definitionRoutes(fastify) {
         // changepointpar table — so divergence is limited to the current process lifetime.
         const rc = eng.registerChangepointParallel(tStar, regionArr, BigInt(refinement), id, scopeOf(machineId));
         if (rc === -2) {
-          // Engine rejected this selector as ambiguous (Proposition 5.14 violation).
+          // Engine rejected this selector as ambiguous (the registration rule for parallel selectors, docs/apv.md).
           // The definition row was already written to DB; without a matching changepoint
           // it is inert — no actors will be migrated to it. Deploy under a different
           // version ID or adjust the selector to resolve the conflict.
           return reply.code(409).send({
-            error: 'Ambiguous deployment: this historyRegions selector conflicts with an existing changepoint at the same deployment tick. Ensure selectors are pairwise incompatible or use a covering union selector (Proposition 5.14).',
+            error: 'Ambiguous deployment: this historyRegions selector conflicts with an existing changepoint at the same deployment tick. Ensure selectors are pairwise incompatible or add a larger selector covering their union.',
           });
         }
         await insertParChangepoint({ tStar: Number(tStar), regionHashesHexMap: regionHexMap, refinement, childDefId: id });
@@ -577,12 +585,20 @@ export async function definitionRoutes(fastify) {
     if (parentId && confirmToken) {
       const strandedGroups   = await strandedFor(effectiveValidStates);
       const strandedActorIds = strandedGroups.flatMap(g => g.actorIds);
-      if (strandedActorIds.length > 0) {
-        await bulkTagNeedsRescue(strandedActorIds);
-        evictFromHotRegistry(...strandedActorIds);
-        strandedTagged = strandedActorIds.length;
-        request.log.info(`[definitions] Tagged ${strandedTagged} actors as needs_rescue after deploying ${id}`);
+      // Strand them through the routing itself, on the owning server under the actor's
+      // lock (the internal route is forwarded to the owner in cluster mode). A tag written
+      // from here raced with the owner's in-flight events, and the name-based check can
+      // report actors that a chain of pending deployments would in fact map.
+      for (const actorId of strandedActorIds) {
+        const r = await fastify.inject({
+          method: 'POST', url: `/v1/internal/actors/${encodeURIComponent(actorId)}/migrate`,
+          payload: { targetDefinitionId: id },
+          headers: process.env.STATEKEEP_ADMIN_KEY ? { 'x-admin-key': process.env.STATEKEEP_ADMIN_KEY } : {},
+        });
+        const out = r.json?.() ?? {};
+        if (out.outcome === 'needs_rescue') strandedTagged++;
       }
+      if (strandedTagged > 0) request.log.info(`[definitions] ${strandedTagged} actors stranded (needs_rescue) by deploying ${id}`);
     }
 
     // ── Step 5: Enqueue migration jobs for safe actors ───────────────────────
@@ -626,9 +642,7 @@ export async function definitionRoutes(fastify) {
               const currentDeployedAt = actorCurrentDef?.deployedAt ?? 0;
               const logicalStartTick  = actor.logicalStartTick ?? 0;
 
-              const logicalTime = currentDeployedAt > logicalStartTick
-                ? BigInt(currentDeployedAt) + 1n
-                : BigInt(logicalStartTick);
+              const logicalTime = BigInt(Math.max(Number(logicalStartTick), Number(currentDeployedAt) + 1));
 
               targetDefId = eng.computeAccessible(actorPrefixHash, logicalTime, currentTick, scopeOf(machineId));
 
@@ -642,12 +656,10 @@ export async function definitionRoutes(fastify) {
             } catch (e) {
               request.log.warn(`[definitions] computeAccessible failed for ${actor.id}: ${e.message}`);
             }
-            // Only this deployment's own version. The engine's registry is shared by every
-            // workflow, so for an actor that does not match this history it could answer
-            // with another workflow's wildcard change-point — which moved that actor into
-            // a different workflow (then needs_rescue). Other matches belong to their own
-            // deployments and to the inline check.
-            if (targetDefId === id && targetDefId !== actor.definitionId) {
+            // Any pending route (lookups are scoped to this workflow). An actor whose earliest
+            // pending deployment is an older one is queued too: its owner routes it to a
+            // fixpoint, through that deployment and then through this one.
+            if (targetDefId && targetDefId !== actor.definitionId) {
               pendingJobs.push({ actor_id: actor.id, target_def_id: targetDefId });
             }
           }
@@ -678,7 +690,7 @@ export async function definitionRoutes(fastify) {
       idempotent:      false,
       warnings,        // soft warnings included even on success
     });
-  });
+  }
 
   // ── GET /v1/definitions/:id/status ────────────────────────────────────────
   fastify.get('/v1/definitions/:id/status', {

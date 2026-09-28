@@ -24,3 +24,44 @@ export async function nextDeployTick(eng) {
   }
   return t;
 }
+
+/**
+ * Deployments of one workflow family are serialized: its deployment times are drawn and
+ * committed in the same order, so a deployment is always later than every deployment of
+ * the family that committed before it (the clock invariant of the APV model, docs/apv.md).
+ * Postgres: a session advisory lock keyed by the family, held on a dedicated connection
+ * for the whole deployment (every API server honours it). SQLite: one writer process, so
+ * an in-process queue per family is enough.
+ */
+const localQueues = new Map();
+function localLock(key, fn) {
+  const prev = localQueues.get(key) ?? Promise.resolve();
+  const run = prev.catch(() => {}).then(fn);
+  const tail = run.catch(() => {});
+  localQueues.set(key, tail);
+  tail.then(() => { if (localQueues.get(key) === tail) localQueues.delete(key); });
+  return run;
+}
+
+function lockKey(family) {
+  let h = 0xcbf29ce484222325n;
+  for (const b of Buffer.from(`deploy:${family}`, 'utf8')) { h ^= BigInt(b); h = (h * 0x100000001b3n) & 0xffffffffffffffffn; }
+  return BigInt.asIntN(64, h).toString();
+}
+
+export async function withFamilyDeployLock(family, fn) {
+  return localLock(family, async () => {
+    if (!isPostgres) return fn();
+    const { getPool } = await import('./db-postgres.js');
+    const client = await getPool().connect();
+    let broken = false;
+    client.on('error', () => { broken = true; });
+    try {
+      await client.query('SELECT pg_advisory_lock($1::bigint)', [lockKey(family)]);
+      try { return await fn(); }
+      finally { await client.query('SELECT pg_advisory_unlock($1::bigint)', [lockKey(family)]).catch(() => { broken = true; }); }
+    } finally {
+      client.release(broken);
+    }
+  });
+}

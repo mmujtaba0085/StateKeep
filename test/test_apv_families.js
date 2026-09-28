@@ -66,3 +66,28 @@ test('after a restart, a new deployment still reaches actors spawned before it',
   await j('POST', `/v1/actors/${actor.id}/event`, { type: 'GO' });
   assert.equal((await j('GET', `/v1/actors/${actor.id}`)).body.definitionId, 'fam-a-v3');
 });
+
+test('routing reaches a fixpoint: an earlier wildcard and a later history-targeted deployment both apply before the event', async () => {
+  assert.equal((await deploy('chain-v1', machine('chain'))).status, 201);
+  const actor = (await j('POST', '/v1/actors', { definitionId: 'chain-v1' })).body;
+  await j('POST', `/v1/actors/${actor.id}/event`, { type: 'GO' });                       // history: GO, state b
+  assert.equal((await deploy('chain-v2', machine('chain', { c: {} }), 'chain-v1')).status, 201);    // wildcard
+  const v3 = await j('PUT', '/v1/definitions', { id: 'chain-v3', parentId: 'chain-v2', historyPath: ['GO'],
+    definition: machine('chain', { c: {}, d: {} }) });                                             // exact history [GO]
+  assert.equal(v3.status, 201, JSON.stringify(v3.body));
+  await j('POST', `/v1/actors/${actor.id}/event`, { type: 'GO' });
+  assert.equal((await j('GET', `/v1/actors/${actor.id}`)).body.definitionId, 'chain-v3');
+});
+
+test('an actor pinned to an old version after a deployment is not moved by that deployment, but by later ones', async () => {
+  assert.equal((await deploy('pin-v1', machine('pin'))).status, 201);
+  assert.equal((await deploy('pin-v2', machine('pin', { c: {} }), 'pin-v1')).status, 201);
+  assert.equal((await deploy('pin-v3', machine('pin', { c: {}, d: {} }), 'pin-v2')).status, 201);   // wildcard
+  const pinned = (await j('POST', '/v1/actors', { definitionId: 'pin-v2' })).body;   // pinned to the older v2
+  assert.equal(pinned.definitionId, 'pin-v2');
+  await j('POST', `/v1/actors/${pinned.id}/event`, { type: 'GO' });
+  assert.equal((await j('GET', `/v1/actors/${pinned.id}`)).body.definitionId, 'pin-v2', 'v3 was deployed before the spawn');
+  assert.equal((await deploy('pin-v4', machine('pin', { c: {}, d: {}, e: {} }), 'pin-v3')).status, 201);
+  await j('POST', `/v1/actors/${pinned.id}/event`, { type: 'GO' });
+  assert.equal((await j('GET', `/v1/actors/${pinned.id}`)).body.definitionId, 'pin-v4', 'deployments after the spawn apply');
+});

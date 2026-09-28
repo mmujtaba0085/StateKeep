@@ -107,6 +107,16 @@ export async function findDefinitionsByMachine(machineId) {
   return getStmts().findByMachine.all(machineId).map(rowToDefinition);
 }
 
+/** Highest deployment time in a family, whatever the status of its versions. */
+export async function findMaxDeployedAtInFamily(machineId) {
+  const sql = `SELECT MAX(deployed_at) AS t FROM definitions WHERE machine_id = $1`;
+  if (isPostgres) {
+    const { queryOne } = await import('./db-postgres.js');
+    return Number((await queryOne(sql, [machineId]))?.t ?? 0);
+  }
+  return Number(getDb().prepare(sql.replace('$1', '?')).get(machineId)?.t ?? 0);
+}
+
 export async function findLatestInFamily(machineId) {
   if (isPostgres) {
     const { queryOne } = await import('./db-postgres.js');

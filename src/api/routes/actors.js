@@ -13,7 +13,7 @@ import { claimNew } from '../../cluster/cluster.js';
 import { spawnActor, sendEvent, getActorState, terminateActor } from '../../runtime/actorManager.js';
 import { getWriteBuffer } from '../../runtime/writeBuffer.js';
 import { findActorById, findActorIdBySpawnKey, getActorIdentity, listActors, findNeedsRescueActors, updateActorStatus, getActorCountsByStatus } from '../../registry/actorRepo.js';
-import { findDefinitionById, findLatestInFamily, findMachineIdsByName } from '../../registry/definitionRepo.js';
+import { findDefinitionById, findLatestInFamily, findMachineIdsByName, findMaxDeployedAtInFamily } from '../../registry/definitionRepo.js';
 import { findDecisionsByActor } from '../../registry/jobRepo.js';
 import { cancelAllPendingForActor } from '../../registry/scheduledEventRepo.js';
 import { getDb, isPostgres, encrypt, decrypt } from '../../registry/db.js';
@@ -43,6 +43,15 @@ export function getLatencies() {
 // Single-process guard; with several API servers the DB unique index still keeps
 // one event row, but see docs: run one writer per database.
 const idempotencyInFlight = new Map();
+
+/** Logical time for an actor pinned to a specific version: one past the newest deployment
+ *  of its family, so later deployments apply to it and earlier ones do not. */
+async function pinnedLogicalTime(definitionId) {
+  const def = await findDefinitionById(definitionId);
+  if (!def) return undefined;
+  const newest = await findMaxDeployedAtInFamily(def.machineId ?? definitionId);
+  return Math.max(newest, Number(def.deployedAt ?? 0)) + 1;
+}
 
 export async function actorRoutes(fastify) {
 
@@ -103,11 +112,11 @@ export async function actorRoutes(fastify) {
       const result = await spawnActor({
         definitionId:     resolvedDefinitionId,
         initialContext:   request.body.initialContext ?? {},
-        // "Latest version" spawns are born on the version current at that moment, so
-        // they are logically as old as that version: any later deployment applies to
-        // them. (Their own tick can be ahead of a later deployment's t* when another
-        // server or a restarted clock hands out ticks — then they would be missed.)
-        logicalStartTick: resolvedDefinitionId !== rawDefinitionId ? undefined : Number(tick),
+        // Logical time (APV model): one past the newest deployment of the family, for
+        // every spawn — deployments committed after it apply to the actor, none before
+        // it does, even for an actor pinned to an older version. Independent of this
+        // server's clock, which in a cluster can be ahead of or behind the sequence.
+        logicalStartTick: await pinnedLogicalTime(resolvedDefinitionId),
         spawnKey,
         spawnEventTick:   Number(tick),   // the SPAWN audit event is written with the actor
       });
@@ -711,7 +720,7 @@ export async function actorRoutes(fastify) {
           const a = await spawnActor({
             definitionId:     resolvedIdCache.get(req.definitionId),
             initialContext:   req.initialContext ?? {},
-            logicalStartTick: resolvedIdCache.get(req.definitionId) !== req.definitionId ? undefined : tick,
+            logicalStartTick: await pinnedLogicalTime(resolvedIdCache.get(req.definitionId)),
           });
           await claimNew(a.id);        // cluster mode: this server owns what it creates
           return a;

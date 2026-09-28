@@ -32,7 +32,7 @@ import { consumePendingNotifications } from '../registry/migrationNotificationRe
 import { getDb, encrypt, isPostgres } from '../registry/db.js';
 import { serializeRegionFingerprints } from '../registry/regionFingerprintCodec.js';
 import { emitWebhookEvent } from '../api/lib/webhookEmitter.js';
-import { getWildcardChildDef, findFamilyChangepoint, loadChangepointsAfter, loadParChangepointsAfter } from '../registry/changepointRepo.js';
+import { findFamilyChangepoint, loadChangepointsAfter, loadParChangepointsAfter } from '../registry/changepointRepo.js';
 import { cancelAllPendingForActor } from '../registry/scheduledEventRepo.js';
 
 const HOT_REGISTRY_SIZE  = parseInt(process.env.HOT_REGISTRY_SIZE    ?? '10000',  10);
@@ -113,7 +113,13 @@ async function syncChangepointsFromDb() {
     } catch {}
     _lastParCpId = Math.max(_lastParCpId, Number(row.id));
   }
-  if (rows.length + par.length > 0) migrationCheckCache.clear();   // stale "stay" answers
+  if (rows.length + par.length > 0) {
+    registryEpoch++;
+    migrationCheckCache.clear();   // stale "stay" answers
+    // Deployments made through another server: later ticks here must not fall behind them.
+    const maxT = Math.max(0, ...rows.map((r) => Number(r.t_star)), ...par.map((r) => Number(r.t_star)));
+    if (maxT > 0) eng.advanceClockTo(maxT);
+  }
 }
 
 export const _migrationPollTimer = setInterval(async () => {
@@ -157,6 +163,9 @@ export function invalidateDefinitionCache(definitionId) {
 // evaluation without waiting for the TTL to expire.
 
 const migrationCheckCache = new Map();
+// Bumped whenever the registry may have gained a change-point. A decision computed under
+// an older epoch is not cached (it may predate a deployment that is now visible).
+let registryEpoch = 0;
 const MIGRATION_CACHE_TTL_TICKS = 100n;
 
 function getCachedDecision(actorId, definitionId, fingerprint, currentTick) {
@@ -187,12 +196,12 @@ export function evictFromHotRegistry(...actorIds) {
   for (const id of actorIds) hotRegistry.delete(id);
 }
 
-export function invalidateMigrationCacheForDefinition(definitionId) {
-  // Keys are `actorId:definitionId:fingerprint` — match on the middle segment
-  const segment = `:${definitionId}:`;
-  for (const key of migrationCheckCache.keys()) {
-    if (key.includes(segment)) migrationCheckCache.delete(key);
-  }
+export function invalidateMigrationCacheForDefinition(_definitionId) {
+  // A new change-point can apply to actors on ANY version of its family (not only the
+  // parent's), so every cached "stay" answer is dropped — otherwise an actor could keep
+  // a stale answer after the deployment is visible.
+  registryEpoch++;
+  migrationCheckCache.clear();
 }
 
 // ── Decision log helper ───────────────────────────────────────────────────────
@@ -275,7 +284,9 @@ export async function spawnActor({ definitionId, initialContext, logicalStartTic
   const pool    = getWorkerPool();
   const actorId = randomUUID();
 
-  const actorLogicalTick = logicalStartTick ?? def.deployedAt ?? 0;
+  // Logical time (APV model): at least one past the version's deployment time. Spawns by
+  // family pass nothing; pinned spawns pass one past the newest deployment of the family.
+  const actorLogicalTick = Math.max(logicalStartTick ?? 0, Number(def.deployedAt ?? 0) + 1);
 
   // Single write: the actor with its full initial state, its initial entry-action jobs
   // and timers, its SPAWN audit event and the client's idempotency key — one transaction,
@@ -397,6 +408,63 @@ export async function sendEvent(actorId, event, tick, opts = {}) {
   return withActorLock(actorId, () => _sendEventLocked(actorId, event, tick, opts));
 }
 
+const MAX_ROUTING_HOPS = 32;
+
+/**
+ * The APV routing decision for one actor (docs/apv.md, Definition "accessibility"):
+ * the earliest applicable change-point of the actor's own workflow family at or after
+ * its logical time — an exact history match outranks the wildcard at the same time, and
+ * scalar change-points are consulted before parallel (regional) ones.
+ * Returns the target definition id, or null to stay.
+ */
+async function computeRoute(actorId, entry, currentTick) {
+  const eng = getEngine();
+  try {
+    const currentDef  = await cachedFindDefinition(entry.definitionId);
+    const logicalTime = logicalTimeOf(entry, currentDef);
+    const scope       = scopeOf(currentDef?.machineId);
+    const fp          = entry.historyFingerprint;
+    let targetDefId = eng.computeAccessible(fingerprintToBigInt(fp), logicalTime, currentTick, scope);
+    if (!targetDefId && entry.regionFingerprints) {
+      const regionArr = regionFingerprintsToArray(entry.regionFingerprints);
+      if (regionArr && regionArr.length > 0) {
+        targetDefId = eng.computeAccessibleParallel(regionArr, logicalTime, currentTick, scope);
+      }
+    }
+    if (targetDefId && targetDefId !== entry.definitionId) {
+      const targetDef = await cachedFindDefinition(targetDefId);
+      // An engine build without scopes can answer with another workflow's change-point:
+      // then ask the database for this family's (same rule).
+      if (targetDef && currentDef && targetDef.machineId !== currentDef.machineId) {
+        targetDefId = await findFamilyChangepoint(entry.definitionId, fingerprintToBigInt(fp).toString(), logicalTime);
+      }
+    }
+    if (targetDefId && targetDefId !== entry.definitionId) {
+      const targetDef = await cachedFindDefinition(targetDefId);
+      // Defensive: never route to a version deployed before the current one.
+      if (targetDef && currentDef && Number(targetDef.deployedAt) <= Number(currentDef.deployedAt)) {
+        logDecision({
+          actorId, trigger: 'inline_event', evaluatedAt: currentTick,
+          decision: 'stayed', reason: 'backward_migration_blocked',
+          fromDefinitionId: entry.definitionId, toDefinitionId: targetDefId,
+          actorFingerprint: fp,
+        });
+        return null;
+      }
+    }
+    return targetDefId ?? null;
+  } catch {
+    return undefined;   // lookup failed: stay for now, and do not cache it
+  }
+}
+
+/** The actor's logical time: at least one past its current version's deployment. */
+function logicalTimeOf(entry, currentDef) {
+  const dep = BigInt(currentDef?.deployedAt ?? 0) + 1n;
+  const own = BigInt(entry.logicalStartTick ?? 0);
+  return own > dep ? own : dep;
+}
+
 async function _sendEventLocked(actorId, event, tick, opts = {}) {
   const { eventData, priority = 'normal', durability = DEFAULT_DURABILITY, mergePayload = null } = opts;
   const pool = getWorkerPool();
@@ -447,123 +515,63 @@ async function _sendEventLocked(actorId, event, tick, opts = {}) {
 
   if (eng.available && typeof eng.changepointCount === 'function' && eng.changepointCount() > 0) {
     const currentTick = BigInt(tick ?? eng.clockTick());
-    const fp          = entry.historyFingerprint;
-    const cachedResult = getCachedDecision(actorId, entry.definitionId, fp, currentTick);
-
-    let targetDefId;
-    if (cachedResult !== undefined) {
-      targetDefId = cachedResult;
-    } else {
-      try {
-        // Use the same logicalTime correction as definitions.js step-5:
-        // if the actor has already migrated once, search strictly after the current
-        // definition's t_star to avoid routing backward to an older version.
-        const currentDef        = await cachedFindDefinition(entry.definitionId);
-        const currentDeployedAt = currentDef?.deployedAt ?? 0;
-        const logicalTime = currentDeployedAt >= (entry.logicalStartTick ?? 0)
-          ? BigInt(currentDeployedAt) + 1n
-          : BigInt(entry.logicalStartTick ?? 0);
-
-        // Scalar path
-        // Asked in the actor's own workflow family (engine scope): another family's
-        // change-point can no longer come first and hide this one.
-        const scope = scopeOf(currentDef?.machineId);
-        targetDefId = eng.computeAccessible(
-          fingerprintToBigInt(fp),
-          logicalTime,
-          currentTick,
-          scope
-        );
-
-        // Wildcard fallback: C engine performs exact prefix matching, so prefix_hash=0
-        // never matches an actor whose fingerprint is non-zero. If the engine found
-        // nothing, check the DB for a wildcard (prefix_hash='0') changepoint.
-        if (!targetDefId) {
-          targetDefId = await getWildcardChildDef(
-            entry.definitionId,
-            entry.logicalStartTick ?? 0
-          );
+    // Route to a fixpoint before the event is processed: after migrating through an
+    // earlier deployment, a later one may still apply to the same (unchanged) history.
+    // Each hop strictly increases the actor's logical time, so this terminates.
+    for (let hop = 0; hop < MAX_ROUTING_HOPS; hop++) {
+      const fp = entry.historyFingerprint;
+      const cachedResult = hop === 0 ? getCachedDecision(actorId, entry.definitionId, fp, currentTick) : undefined;
+      let targetDefId;
+      if (cachedResult !== undefined) {
+        targetDefId = cachedResult;
+      } else {
+        const epoch = registryEpoch;
+        targetDefId = await computeRoute(actorId, entry, currentTick);
+        // Never cache a failed lookup (undefined), nor an answer computed before the
+        // registry changed.
+        if (targetDefId !== undefined && epoch === registryEpoch) {
+          setCachedDecision(actorId, entry.definitionId, fp, currentTick, targetDefId);
         }
-
-        // Parallel path: per-region fingerprints
-        if (!targetDefId && entry.regionFingerprints) {
-          const regionArr = regionFingerprintsToArray(entry.regionFingerprints);
-          if (regionArr && regionArr.length > 0) {
-            targetDefId = eng.computeAccessibleParallel(
-              regionArr,
-              logicalTime,
-              currentTick,
-              scope
-            );
-          }
-        }
-
-        // Machine-family guard: the engine has a global changepoint registry —
-        // in multi-machine environments a wildcard (prefix_hash=0) from one machine
-        // family can match actors in another family. Only allow migration to a definition
-        // in the SAME machine family as the actor's current definition.
-        if (targetDefId && targetDefId !== entry.definitionId) {
-          const targetDef = await cachedFindDefinition(targetDefId);
-          if (targetDef && currentDef && targetDef.machineId !== currentDef.machineId) {
-            // Another workflow's change-point came first in the engine's global registry;
-            // that does not mean this actor's own family has none. (Before, the actor
-            // simply stayed — a deployment was missed whenever another workflow had
-            // deployed in between.)
-            targetDefId = await findFamilyChangepoint(entry.definitionId,
-              fingerprintToBigInt(fp).toString(), logicalTime);
-          }
-        }
-
-        // Backward-migration guard: never route an actor to a definition deployed
-        // before the actor's current definition (engine can return stale routes when
-        // logicalStartTick pre-dates multiple changepoints).
-        if (targetDefId && targetDefId !== entry.definitionId) {
-          const targetDef = await cachedFindDefinition(targetDefId);
-          if (targetDef && currentDef && Number(targetDef.deployedAt) <= Number(currentDef.deployedAt)) {
-            logDecision({
-              actorId, trigger: 'inline_event', evaluatedAt: currentTick,
-              decision: 'stayed', reason: 'backward_migration_blocked',
-              fromDefinitionId: entry.definitionId, toDefinitionId: targetDefId,
-              actorFingerprint: fp,
-            });
-            targetDefId = null;
-          }
-        }
-      } catch {
-        targetDefId = null;
+        targetDefId = targetDefId ?? null;
       }
-      setCachedDecision(actorId, entry.definitionId, fp, currentTick, targetDefId);
-    }
-
-    if (targetDefId && targetDefId !== entry.definitionId) {
-      // Version swap: migrate first, then process event on new definition
-      // fromDefId is captured in outer scope above
+      if (!targetDefId || targetDefId === entry.definitionId) {
+        if (hop === 0 && cachedResult === undefined) {
+          logDecision({
+            actorId, trigger: 'inline_event', evaluatedAt: currentTick,
+            decision: 'stayed', reason: targetDefId ? 'already_current' : 'fingerprint_mismatch',
+            fromDefinitionId: entry.definitionId, toDefinitionId: null,
+            actorFingerprint: fp,
+          });
+        }
+        break;
+      }
+      const hopFrom = entry.definitionId;
       try {
         await migrateActor(actorId, targetDefId, { priority, trigger: 'inline' });
-        // Evict ALL cached decisions for this actor/fromDef (key now includes fingerprint)
-        const _prefix = `${actorId}:${fromDefId}:`;
+        const _prefix = `${actorId}:${hopFrom}:`;
         for (const key of migrationCheckCache.keys()) {
           if (key.startsWith(_prefix)) migrationCheckCache.delete(key);
         }
-        // Reload entry — migrateActor updated hot registry
-        entry = hotRegistry.get(actorId) ?? entry;
+        entry = hotRegistry.get(actorId) ?? entry;   // migrateActor updated the hot registry
         migratedTo = targetDefId;
-
         logDecision({
           actorId, trigger: 'inline_event', evaluatedAt: currentTick,
           decision: 'migrated', reason: 'fingerprint_match',
-          fromDefinitionId: fromDefId, toDefinitionId: targetDefId,
+          fromDefinitionId: hopFrom, toDefinitionId: targetDefId,
           actorFingerprint: fp,
         });
       } catch (migrateErr) {
-        if (migrateErr.code === 'STATE_NOT_MAPPABLE') {
+        if (migrateErr.code === 'STATE_NOT_MAPPABLE' || migrateErr.code === 'CONTEXT_TRANSFORM_FAILED') {
           logDecision({
             actorId, trigger: 'inline_event', evaluatedAt: currentTick,
-            decision: 'failed', reason: 'state_not_mappable',
-            fromDefinitionId: fromDefId, toDefinitionId: targetDefId,
+            decision: 'failed', reason: migrateErr.code === 'STATE_NOT_MAPPABLE' ? 'state_not_mappable' : 'context_transform_failed',
+            fromDefinitionId: hopFrom, toDefinitionId: targetDefId,
             actorFingerprint: fp,
           });
-          // Actor is now needs_rescue — throw so the caller gets 409
+          // Stranded exactly as the background path does: recorded on the target version,
+          // status needs_rescue, MIGRATION_FAILED in its history. It takes no more events
+          // until a rescue deployment moves it.
+          await strandActor(actorId, hopFrom, targetDefId, migrateErr, null);
           throw Object.assign(
             new Error(
               `Actor ${actorId} could not be migrated to ${targetDefId}: ` +
@@ -575,14 +583,6 @@ async function _sendEventLocked(actorId, event, tick, opts = {}) {
         }
         throw migrateErr;
       }
-    } else if (cachedResult === undefined) {
-      // First evaluation, actor stays — log it once (cache prevents duplicate logs)
-      logDecision({
-        actorId, trigger: 'inline_event', evaluatedAt: currentTick,
-        decision: 'stayed', reason: targetDefId ? 'already_current' : 'fingerprint_mismatch',
-        fromDefinitionId: entry.definitionId, toDefinitionId: null,
-        actorFingerprint: fp,
-      });
     }
   }
 
@@ -1087,47 +1087,68 @@ export async function migrateActor(actorId, targetDefinitionId, { priority = 'no
  *
  * @returns {{ outcome: 'migrated'|'already'|'skipped'|'needs_rescue', reason?, stateValue? }}
  */
+/** Park an actor whose state the target version cannot hold (APV: stranded). Called
+ *  with the actor's lock held. It is recorded on the target version with its old
+ *  state, marked needs_rescue, and MIGRATION_FAILED is written to its history. */
+async function strandActor(actorId, fromDefId, targetDefId, err, deploymentId) {
+  hotRegistry.delete(actorId);
+  const payload = encrypt(Buffer.from(JSON.stringify({ fromDefinitionId: fromDefId, toDefinitionId: targetDefId,
+    reason: err.code, stateValue: err.currentStateValue ?? null, deploymentId })));
+  const now = Date.now();
+  if (isPostgres) {
+    const { transaction } = await import('../registry/db-postgres.js');
+    await transaction(async (client) => {
+      await client.query(`UPDATE actors SET definition_id=$1, status='needs_rescue', updated_at=$2 WHERE id=$3`, [targetDefId, now, actorId]);
+      await client.query(`INSERT INTO events (actor_id, event_type, event_payload, tick, processed_at) VALUES ($1,'MIGRATION_FAILED',$2,$3,$4)`, [actorId, payload, now, now]);
+    });
+  } else {
+    const db = getDb();
+    db.transaction(() => {
+      db.prepare(`UPDATE actors SET definition_id = ?, status = 'needs_rescue', updated_at = ? WHERE id = ?`).run(targetDefId, now, actorId);
+      db.prepare(`INSERT INTO events (actor_id, event_type, event_payload, tick, processed_at) VALUES (?, 'MIGRATION_FAILED', ?, ?, ?)`).run(actorId, payload, now, now);
+    })();
+  }
+}
+
 export async function migrateActorOwned(actorId, targetDefinitionId, { deploymentId = null } = {}) {
   return withActorLock(actorId, async () => {
     const actor = await findActorById(actorId);
     if (!actor) return { outcome: 'skipped', reason: 'not_found' };
     if (['terminated', 'archived'].includes(actor.status)) return { outcome: 'skipped', reason: 'finished' };
     const hot = hotRegistry.get(actorId);
-    const currentDefId = hot?.definitionId ?? actor.definitionId;
-    if (currentDefId === targetDefinitionId) return { outcome: 'already' };
-    const [currentDef, targetDef] = await Promise.all([cachedFindDefinition(currentDefId), cachedFindDefinition(targetDefinitionId)]);
-    if (!targetDef) return { outcome: 'skipped', reason: 'target_not_found' };
-    if (currentDef && currentDef.machineId !== targetDef.machineId) return { outcome: 'skipped', reason: 'different_workflow' };
-    if (currentDef && Number(currentDef.deployedAt) >= Number(targetDef.deployedAt)) return { outcome: 'skipped', reason: 'already_newer' };
-    const path = targetDef.definitionJson?._historyPath;
-    if (Array.isArray(path) && path.length > 0) {
-      const fp = hot?.historyFingerprint ?? actor.historyFingerprint;
-      if (computeHistoryFingerprint(path) !== fp) return { outcome: 'skipped', reason: 'fingerprint_changed' };
-    }
+    let currentDefId = hot?.definitionId ?? actor.definitionId;
+    // No separate checks here: the routing rule below decides (family, logical time,
+    // pattern) exactly as the inline path does.
     // make sure the database has everything the owner processed for this actor —
     // its events too, so they sit before the MIGRATED marker in its history
     await getWriteBuffer().flush();
+    // The deployment that queued this job may have been made through another server and
+    // not polled here yet. Stranded actors take no events, so this may be their only
+    // chance to be routed: load every committed change-point first (throws → retried).
+    await syncChangepointsFromDb();
+    // The job names the deployment that queued it, but the actor is routed by the same
+    // rule as inline: the earliest applicable change-point at or after its logical time.
+    // (An actor pinned after the deployment is not applicable; an earlier deployment it
+    // has not taken yet comes first.) Route to a fixpoint, like the inline path.
+    let hopTarget = null;
     try {
-      const result = await migrateActor(actorId, targetDefinitionId, { priority: 'low', trigger: 'batch' });
+      let result = null;
+      const tick = BigInt(getEngine().clockTick());
+      for (let hop = 0; hop < MAX_ROUTING_HOPS; hop++) {
+        const now = hotRegistry.get(actorId) ?? await findActorById(actorId);
+        const route = await computeRoute(actorId, now, tick);
+        if (route === undefined) throw new Error('routing lookup failed — retry');   // job is retried
+        if (!route || route === now.definitionId) break;
+        hopTarget = route;
+        currentDefId = now.definitionId;
+        result = await migrateActor(actorId, route, { priority: 'low', trigger: 'batch' });
+      }
+      if (!result) return { outcome: 'skipped', reason: 'not_applicable' };
       return { outcome: 'migrated', stateValue: result.stateValue };
     } catch (err) {
+      targetDefinitionId = hopTarget ?? targetDefinitionId;
       if (err.code !== 'STATE_NOT_MAPPABLE' && err.code !== 'CONTEXT_TRANSFORM_FAILED') throw err;
-      // Stranded: park it for a rescue deployment (as before), recorded in its history.
-      hotRegistry.delete(actorId);
-      await updateActorStatus(actorId, 'needs_rescue');
-      const payload = encrypt(Buffer.from(JSON.stringify({ fromDefinitionId: currentDefId, toDefinitionId: targetDefinitionId,
-        reason: err.code, stateValue: err.currentStateValue ?? null, deploymentId })));
-      if (isPostgres) {
-        const { query } = await import('../registry/db-postgres.js');
-        await query(`UPDATE actors SET definition_id=$1 WHERE id=$2`, [targetDefinitionId, actorId]);
-        await query(`INSERT INTO events (actor_id, event_type, event_payload, tick, processed_at) VALUES ($1,'MIGRATION_FAILED',$2,$3,$4)`, [actorId, payload, Date.now(), Date.now()]);
-      } else {
-        const db = getDb();
-        db.transaction(() => {
-          db.prepare(`UPDATE actors SET definition_id = ? WHERE id = ?`).run(targetDefinitionId, actorId);
-          db.prepare(`INSERT INTO events (actor_id, event_type, event_payload, tick, processed_at) VALUES (?, 'MIGRATION_FAILED', ?, ?, ?)`).run(actorId, payload, Date.now(), Date.now());
-        })();
-      }
+      await strandActor(actorId, currentDefId, targetDefinitionId, err, deploymentId);
       return { outcome: 'needs_rescue', reason: err.code, stateValue: err.currentStateValue ?? null };
     }
   });

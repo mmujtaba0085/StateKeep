@@ -282,12 +282,31 @@ async function review(list) {
   }
 }
 
+// A deployment whose answer the client never got (the server was killed, the request
+// timed out) may still have committed. Learn such versions from the server when an actor
+// refers to them; there was no acknowledgement, so no completeness deadline applies.
+async function ensureDefs(ids) {
+  for (const id of ids) {
+    if (!id || defs.has(id)) continue;
+    const r = await api('GET', `/v1/definitions/${id}`);
+    if (r.status !== 200) continue;
+    const b = r.body; const json = b.definitionJson ?? b.definition ?? {};
+    const root = [...defs].find(([rid, d]) => !d.parentId && rid === (b.machineId ?? b.machine_id));
+    defs.set(id, { json, deployedAt: b.deployedAt, parentId: b.parentId ?? null, workflow: root?.[1].workflow ?? '?',
+      historyPath: Array.isArray(json._historyPath) && json._historyPath.length ? json._historyPath : null,
+      stateMapping: json._stateMapping ?? null, contextTransform: json._contextTransform ?? null,
+      startAt: 0, ackAt: Infinity, kind: 'unacknowledged' });
+    counters.unacknowledgedDeploys = (counters.unacknowledgedDeploys ?? 0) + 1;
+  }
+}
+
 async function check(a) {
   const v = [];
   const live = (await api('GET', `/v1/actors/${a.id}`)).body;
   a.lastDef = live.definitionId;
   let trail;
   try { trail = await trailOf(a.id); } catch (err) { return [`history unavailable: ${err.message}`]; }
+  await ensureDefs([a.spawn.definitionId, live.definitionId, ...trail.flatMap((e) => [e.payload?.toDefinitionId, e.payload?.fromDefinitionId])]);
   const r = replayActor({ actor: live, trail, spawn: a.spawn, defs, sentEids: { acked: [...a.acked] } });
   v.push(...r.violations);
   a.notes = { ...r.notes, transitions: r.notes.transitions.length, finalDef: live.definitionId, finalState: live.stateValue, status: live.status };
