@@ -23,7 +23,7 @@ import { randomUUID } from 'crypto';
 import { engineReady, getEngine } from '../ffi/engine.js';
 import { getDb, isPostgres } from '../registry/db.js';
 import { getMaxKnownTick as getMaxTStar } from '../registry/changepointRepo.js';
-import { seedEngineRegistry, sendEvent } from '../runtime/actorManager.js';
+import { seedEngineRegistry, sendEvent, startStrandedSweep } from '../runtime/actorManager.js';
 import { getGlobalRegistry, setGlobalRegistry, loadRegistry } from '../runtime/implementationRegistry.js';
 import { startActionJobWorker } from '../runtime/actionJobWorker.js';
 import { deliverEventOnce } from '../runtime/deliverOnce.js';
@@ -297,6 +297,7 @@ if (!isPostgres && !process.env.STATEKEEP_MULTI_INSTANCE_WARNED) {
 }
 
 await seedEngineRegistry();
+startStrandedSweep();
 
 // ── Implementation registry ────────────────────────────────────────────────────
 // Load guards/actions/services from STATEKEEP_REGISTRY_PATH (if set).
@@ -362,6 +363,14 @@ try {
   const { host, apiKey, allowOpen } = securityConfig();
   await fastify.listen({ port: PORT, host });
   fastify.log.info(`StateKeep API listening on ${host}:${PORT}`);
+  // Upgrade legacy (v1) history fingerprints in the background (legacyFingerprints.js).
+  setTimeout(async () => {
+    try {
+      const { upgradeAllLegacyViaOwners } = await import('./routes/admin.js');
+      const r = await upgradeAllLegacyViaOwners(fastify);
+      if (r.upgraded || r.unverifiable) fastify.log.info(`[server] legacy fingerprints: ${r.upgraded} upgraded, ${r.unverifiable} could not be verified ${JSON.stringify(r.reasons)}`);
+    } catch (err) { fastify.log.warn(`[server] legacy fingerprint upgrade: ${err.message}`); }
+  }, 3000).unref();
   if (!apiKey) {
     fastify.log.warn(allowOpen
       ? '[server] STATEKEEP_API_KEY is not set and STATEKEEP_ALLOW_UNAUTHENTICATED=true — the API accepts unauthenticated requests from the network.'

@@ -74,3 +74,4 @@ payments-jobs.sqlite*
 bank.jsonl
 effects.jsonl
 chaos-report*.json
+formal/.toolchain/

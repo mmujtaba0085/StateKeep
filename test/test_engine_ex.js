@@ -115,3 +115,24 @@ test('late-matcher check: conflicting parallel leaves are reported (exact per co
   assert.deepEqual(unplaceableConfigurations(old, nw, mapping), { leaves: [], pairs: [['w.A.x', 'w.B.y']] });
   assert.deepEqual(unplaceableConfigurations(old, nw, { 'w.A': 'C.p', 'w.B': 'C.p' }), { leaves: [], pairs: [] });
 });
+
+test('legacy matches are refused when the pattern splits into the event types in two ways', async () => {
+  await engineReady;
+  const eng = getEngine();
+  if (!eng.hasEx) return;
+  const { registerScalar, lookup, markLegacyAmbiguity } = await import('../src/runtime/routingRegistry.js');
+  const { computeHistoryFingerprint, engineKey } = await import('../src/ffi/fingerprintChain.js');
+  const { legacyPatternAmbiguous, factorizations } = await import('../src/runtime/legacyFingerprints.js');
+  assert.equal(factorizations('AB', new Set(['A', 'B', 'AB'])), 2);
+  assert.equal(factorizations('PAYMENT_OK', new Set(['PAYMENT_OK', 'PAY'])), 1);
+  const fam = `amb-${process.pid}`;
+  registerScalar({ tStar: 5n, storedPrefix: engineKey(computeHistoryFingerprint(['AB'], 1)).toString(),
+    childDefId: 'amb-v2', machineId: fam, historyPath: ['AB'] });
+  const legacy = computeHistoryFingerprint(['A', 'B'], 1);
+  assert.equal(lookup({ machineId: fam, fp: legacy, T: 1 })?.target, 'amb-v2');            // before the check
+  markLegacyAmbiguity(fam, (p) => legacyPatternAmbiguous(p, new Set(['A', 'B', 'AB'])));
+  assert.equal(lookup({ machineId: fam, fp: legacy, T: 1 }), null, 'ambiguous legacy match refused');
+  assert.equal(lookup({ machineId: fam, fp: computeHistoryFingerprint(['AB']), T: 1 })?.target, 'amb-v2');
+  markLegacyAmbiguity(fam, (p) => legacyPatternAmbiguous(p, new Set(['AB', 'X'])));
+  assert.equal(lookup({ machineId: fam, fp: legacy, T: 1 })?.target, 'amb-v2', 'unambiguous: exact');
+});

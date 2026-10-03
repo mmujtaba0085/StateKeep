@@ -79,6 +79,37 @@ test('a deployment is visible on every server when it returns (registry barrier)
   }
 });
 
+test('a server paused past its lease does not route with a stale registry when it resumes', { skip }, async () => {
+  // B owns the actors; it is frozen (SIGSTOP) for longer than its 2 s registry lease while
+  // A deploys a history-targeted version. When B resumes, its lease has expired on the
+  // monotonic clock, so it re-syncs before routing: the next event moves every actor.
+  const m = (extra = {}) => ({ id: 'pz', initial: 'a', states: { a: { on: { T: 'b' } }, b: { on: { T: 'a' } }, ...extra } });
+  assert.equal((await call(nodes.A, 'PUT', '/v1/definitions', { id: 'pz-v1', definition: m() })).status, 201);
+  const ids = [];
+  for (let i = 0; i < 4; i++) {
+    const id = (await call(nodes.B, 'POST', '/v1/actors', { definitionId: 'pz-v1' })).body.id;
+    await call(nodes.B, 'POST', `/v1/actors/${id}/event`, { type: 'T' });
+    ids.push(id);
+  }
+  nodes.B.proc.kill('SIGSTOP');
+  try {
+    await sleep(1000);
+    const d = await call(nodes.A, 'PUT', '/v1/definitions', { id: 'pz-v2', parentId: 'pz-v1', historyPath: ['T'], definition: m({ z: {} }) });
+    assert.equal(d.status, 201, JSON.stringify(d.body));
+    await sleep(2500);                                    // B frozen ~3.5 s in total
+  } finally { nodes.B.proc.kill('SIGCONT'); }
+  const rs = await Promise.all(ids.map((id) => call(nodes.B, 'POST', `/v1/actors/${id}/event`, { type: 'T' })));
+  for (const [i, id] of ids.entries()) {
+    let r = rs[i];
+    for (let k = 0; k < 30 && r.status !== 200; k++) { await sleep(250); r = await call(nodes.B, 'POST', `/v1/actors/${id}/event`, { type: 'T' }); }
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    const a = (await call(nodes.A, 'GET', `/v1/actors/${id}`)).body;
+    assert.equal(a.definitionId, 'pz-v2', `actor ${id} routed with the deployment made while its server was paused`);
+    const ev = await call(nodes.A, 'GET', `/v1/actors/${id}/events?limit=100`);
+    assert.equal(ev.body.events.filter((e) => (e.eventType ?? e.type) === 'T').length, 2, 'each confirmed event applied once');
+  }
+});
+
 test('WebSocket subscribers on another server receive changes (LISTEN/NOTIFY)', { skip: skip || (typeof WebSocket === 'undefined' && 'no global WebSocket') }, async () => {
   const id = (await call(nodes.A, 'POST', '/v1/actors', { definitionId: 'ping-v1' })).body.id;
   const ws = new WebSocket(`ws://127.0.0.1:3062/v1/actors/${id}/stream`);

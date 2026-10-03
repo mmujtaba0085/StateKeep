@@ -52,6 +52,7 @@ export async function createStateKeep({
 
   const {
     seedEngineRegistry,
+    startStrandedSweep,
     spawnActor: _spawn,
     sendEvent: _sendEvent,
     getActorState,
@@ -59,6 +60,7 @@ export async function createStateKeep({
   } = await import('../runtime/actorManager.js');
 
   await seedEngineRegistry();
+  startStrandedSweep({ inProcess: true });
 
   // Wire guards/actions/services from setup into the global implementation registry
   // Must happen before starting the action job worker so it sees the correct registry.

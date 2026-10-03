@@ -39,6 +39,29 @@ const put = (body) => j('PUT', '/v1/definitions', body);
 const actorOf = async (id) => (await j('GET', `/v1/actors/${id}`)).body;
 const send = (id, type) => j('POST', `/v1/actors/${id}/event`, { type });
 
+/** Direct database access for simulating crashes and old data (SQLite or PostgreSQL). */
+async function rawDb() {
+  if (pg) {
+    const { default: PG } = await import('pg');
+    const c = new PG.Client({ connectionString: pg });
+    await c.connect();
+    const num = (sql) => { let i = 0; return sql.replace(/\?/g, () => `$${++i}`); };
+    const val = (v) => (v !== null && typeof v === 'object' && !(v instanceof Date) ? JSON.stringify(v) : v);
+    return {
+      all: async (sql, ps = []) => (await c.query(num(sql), ps.map(val))).rows,
+      run: async (sql, ps = []) => { await c.query(num(sql), ps.map(val)); },
+      close: () => c.end(),
+    };
+  }
+  const { default: Database } = await import('better-sqlite3');
+  const d = new Database(env.STATEKEEP_DB_PATH);
+  return {
+    all: async (sql, ps = []) => d.prepare(sql).all(...ps),
+    run: async (sql, ps = []) => { d.prepare(sql).run(...ps); },
+    close: async () => d.close(),
+  };
+}
+
 before(async () => {
   pg = await isolatedPostgres('apv_fixes');
   if (pg) env.STATEKEEP_DB_URL = pg;
@@ -202,4 +225,87 @@ test('embedded mode: a deployment registers a change-point and migrates actors i
   const out = JSON.parse(line);
   assert.equal(out.def, out.v2);
   assert.equal(out.migrated, 1);
+});
+
+test('legacy fingerprints: upgraded from the event log, and never matched ambiguously', async () => {
+  const { computeHistoryFingerprint } = await import('../src/ffi/fingerprintChain.js');
+  // Event types A, AB, B: "AB" splits as [A, B] or [AB] — the v1 encoding cannot tell them apart.
+  const m = (extra = {}) => ({ id: 'leg', initial: 's0', states: {
+    s0: { on: { A: 's1', AB: 's3' } }, s1: { on: { B: 's2' } }, s2: { on: { X: 's0' } }, s3: { on: { X: 's0' } }, ...extra } });
+  assert.equal((await put({ id: 'leg-v1', definition: m() })).status, 201);
+  const split = (await j('POST', '/v1/actors', { definitionId: 'leg-v1' })).body;
+  const whole = (await j('POST', '/v1/actors', { definitionId: 'leg-v1' })).body;
+  await send(split.id, 'A'); await send(split.id, 'B');
+  await send(whole.id, 'AB');
+  // Turn them into pre-upgrade actors: both get the v1 fingerprint of "AB".
+  const v1 = computeHistoryFingerprint(['AB'], 1);
+  assert.equal(v1, computeHistoryFingerprint(['A', 'B'], 1));
+  server.kill('SIGKILL'); await sleep(300);
+  const db = await rawDb();
+  await db.run(`UPDATE actors SET history_fingerprint = ? WHERE id IN (?, ?)`, [v1, split.id, whole.id]);
+  await db.close();
+  await startServer();
+  // The start-up upgrade reconstructs both histories from the event log.
+  let a, b;
+  for (let i = 0; i < 40; i++) {
+    a = await actorOf(split.id); b = await actorOf(whole.id);
+    if (a.historyFingerprint?.startsWith('2:') && b.historyFingerprint?.startsWith('2:')) break;
+    await sleep(250);
+  }
+  assert.equal(a.historyFingerprint, computeHistoryFingerprint(['A', 'B']));
+  assert.equal(b.historyFingerprint, computeHistoryFingerprint(['AB']));
+  const r = await put({ id: 'leg-v2', parentId: 'leg-v1', historyPath: ['AB'], definition: m({ z: {} }) });
+  assert.equal(r.status, 201, JSON.stringify(r.body));
+  await send(split.id, 'X'); await send(whole.id, 'X');
+  assert.equal((await actorOf(whole.id)).definitionId, 'leg-v2');
+  assert.equal((await actorOf(split.id)).definitionId, 'leg-v1');
+});
+
+test('stranded actors are rescued even if the server crashed before queueing them', async () => {
+  const m = (first) => ({ id: 'sw', initial: first, states: { [first]: { on: { GO: 'b' } }, b: {} } });
+  assert.equal((await put({ id: 'sw-v1', definition: m('a') })).status, 201);
+  const a = (await j('POST', '/v1/actors', { definitionId: 'sw-v1' })).body;
+  // v2 renames a -> c without a mapping: the actor is stranded.
+  const p2 = await put({ id: 'sw-v2', parentId: 'sw-v1', definition: m('c') });
+  assert.equal(p2.body.status, 'requires_confirmation');
+  assert.equal((await put({ id: 'sw-v2', parentId: 'sw-v1', definition: m('c'), confirmToken: p2.body.confirmToken })).status, 201);
+  assert.equal((await actorOf(a.id)).status, 'needs_rescue');
+  server.kill('SIGKILL'); await sleep(300);
+  let db = await rawDb();
+  const [stranded] = await db.all('SELECT * FROM actors WHERE id = ?', [a.id]);
+  await db.close();
+  await startServer();
+  // v3 maps a -> c. Then the server "crashes" after the commit but before the rescue jobs:
+  // put the actor back exactly as it was and drop its jobs.
+  assert.equal((await put({ id: 'sw-v3', parentId: 'sw-v2', definition: m('c'), stateMapping: { a: 'c' } })).status, 201);
+  server.kill('SIGKILL'); await sleep(300);
+  db = await rawDb();
+  const cols = Object.keys(stranded).filter((c) => c !== 'id');
+  await db.run(`UPDATE actors SET ${cols.map((c) => `${c} = ?`).join(', ')} WHERE id = ?`, [...cols.map((c) => stranded[c]), a.id]);
+  await db.run('DELETE FROM migration_jobs WHERE actor_id = ?', [a.id]);
+  await db.close();
+  await startServer();
+  assert.equal((await actorOf(a.id)).status, 'needs_rescue');
+  // The start-up sweep finds the stranded actor with no open job and queues it for v3;
+  // the migrate worker carries the job out.
+  let job;
+  for (let i = 0; i < 40 && !job; i++) {
+    await sleep(250);
+    db = await rawDb();
+    [job] = await db.all(`SELECT * FROM migration_jobs WHERE actor_id = ? AND target_def_id = 'sw-v3'`, [a.id]);
+    await db.close();
+  }
+  assert.ok(job, 'the sweep queued a rescue job');
+  const worker = spawn(process.execPath, ['src/workers/migrate-worker.js'], { env, stdio: 'ignore' });
+  let got;
+  try {
+    for (let i = 0; i < 60; i++) {
+      got = await actorOf(a.id);
+      if (got.status !== 'needs_rescue') break;
+      await sleep(250);
+    }
+  } finally { worker.kill('SIGKILL'); }
+  assert.equal(got.definitionId, 'sw-v3', JSON.stringify(got));
+  assert.equal(got.stateValue, 'c');
+  assert.equal(got.status, 'active');
 });

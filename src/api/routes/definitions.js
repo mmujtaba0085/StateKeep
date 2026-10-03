@@ -68,8 +68,9 @@ import { registerScalar, registerParallel, normalizeHistoryPath } from '../../ru
 import { predictRouting, lateMatcherRisk } from '../../runtime/deployAnalysis.js';
 import { fingerprintMatchesPath } from '../../ffi/fingerprintChain.js';
 import {
-  routeTargetFor, markChangepointRowRegistered, syncChangepointsFromDb,
+  routeTargetFor, markChangepointRowRegistered, syncChangepointsFromDb, refreshLegacyAmbiguity,
 } from '../../runtime/actorManager.js';
+import { familyAlphabet, legacyPatternAmbiguous } from '../../runtime/legacyFingerprints.js';
 import { publishRegistryChange, awaitRegistryBarrier } from '../../cluster/cluster.js';
 
 // A placeholder time later than every registered change-point: the candidate deployment
@@ -589,6 +590,9 @@ export async function definitionRoutes(fastify) {
       try { invalidateMigrationCacheForDefinition(parentId); } catch {}
       try { invalidateDefinitionCache(parentId); } catch {}
     }
+    // Which change-points of the family a legacy fingerprint may not match (the family's
+    // event types just changed).
+    await refreshLegacyAmbiguity(machineId).catch(() => {});
 
     // ── Visibility barrier (cluster) ────────────────────────────────────────
     // The deployment is committed once every live server has registered it, or once the
@@ -615,6 +619,36 @@ export async function definitionRoutes(fastify) {
         if (out.outcome === 'needs_rescue') strandedTagged++;
       }
       if (strandedTagged > 0) request.log.info(`[definitions] ${strandedTagged} actors stranded (needs_rescue) by deploying ${id}`);
+    }
+
+    // ── Step 4b: legacy fingerprints that this pattern cannot match exactly ─────
+    // A legacy (v1) fingerprint equal to v1(pattern) is exact only if the pattern's
+    // concatenation splits into the family's event types in one way. Otherwise those
+    // actors are upgraded (their history reconstructed and verified from the event log)
+    // before routing; the ones that cannot be verified are reported, never guessed.
+    if (parentId && hasHistoryPath) {
+      const alphabet = familyAlphabet(await findDefinitionsByMachine(machineId));
+      if (legacyPatternAmbiguous(historyPath, alphabet)) {
+        const v1 = computeHistoryHash(historyPath, 1);
+        const candidates = (await findActorsByMachine(machineId)).filter((a) => a.historyFingerprint === v1);
+        let unverified = 0;
+        for (const a of candidates) {
+          const r = await fastify.inject({
+            method: 'POST', url: `/v1/internal/actors/${encodeURIComponent(a.id)}/upgrade-fingerprint`,
+            headers: process.env.STATEKEEP_ADMIN_KEY ? { 'x-admin-key': process.env.STATEKEEP_ADMIN_KEY } : {},
+          });
+          if ((r.json?.() ?? {}).outcome !== 'upgraded') unverified++;
+        }
+        if (unverified > 0) {
+          warnings.push({
+            code: 'LEGACY_HISTORY_AMBIGUOUS',
+            message: `${unverified} actor(s) carry a legacy history fingerprint that matches this pattern's ` +
+                     `concatenation, but the pattern can be split into the workflow's event types in more than ` +
+                     `one way and their history could not be reconstructed from the event log. They are not ` +
+                     `routed by this deployment (a wildcard deployment still reaches them).`,
+          });
+        }
+      }
     }
 
     // ── Step 5: Enqueue background routing for every actor with a pending route ──

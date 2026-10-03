@@ -627,3 +627,66 @@ export async function findVersionsHostingActors(machineId) {
   }
   return getDb().prepare(sql.replace('$1', '?')).all(machineId).map((r) => r.d);
 }
+
+/** Stranded actors with no open (pending or processing) migration job. */
+export async function findStrandedWithoutOpenJob(limit = 1000) {
+  const sql = `SELECT a.* FROM actors a WHERE a.status = 'needs_rescue'
+    AND NOT EXISTS (SELECT 1 FROM migration_jobs j WHERE j.actor_id = a.id AND j.status IN ('pending','processing'))
+    ORDER BY a.updated_at ASC LIMIT $1`;
+  if (isPostgres) {
+    const { queryAll } = await import('./db-postgres.js');
+    return (await queryAll(sql, [limit])).map(rowToActor);
+  }
+  return getDb().prepare(sql.replace('$1', '?')).all(limit).map(rowToActor);
+}
+
+/** Replace an actor's history fingerprints (legacy upgrade). */
+export async function updateActorFingerprints(id, historyFingerprint, regionFingerprintsSerialized) {
+  const now = Date.now();
+  if (isPostgres) {
+    const { query } = await import('./db-postgres.js');
+    await query(`UPDATE actors SET history_fingerprint=$1, region_fingerprints=$2, updated_at=$3 WHERE id=$4`,
+      [historyFingerprint, regionFingerprintsSerialized, now, id]);
+    return;
+  }
+  getDb().prepare(`UPDATE actors SET history_fingerprint=?, region_fingerprints=?, updated_at=? WHERE id=?`)
+    .run(historyFingerprint, regionFingerprintsSerialized, now, id);
+}
+
+/** Actors (not terminated) whose main or regional fingerprint is still legacy (v1). */
+export async function findLegacyFingerprintActors(limit = 1000) {
+  const sql = `SELECT * FROM actors WHERE status <> 'terminated'
+    AND ((history_fingerprint <> '0' AND history_fingerprint NOT LIKE '2:%') OR region_fingerprints IS NOT NULL)
+    ORDER BY updated_at ASC LIMIT $1`;
+  let rows;
+  if (isPostgres) {
+    const { queryAll } = await import('./db-postgres.js');
+    rows = (await queryAll(sql, [limit])).map(rowToActor);
+  } else {
+    rows = getDb().prepare(sql.replace('$1', '?')).all(limit).map(rowToActor);
+  }
+  const legacy = (fp) => typeof fp === 'string' && fp !== '0' && /^[0-9a-f]{1,16}$/i.test(fp);
+  return rows.filter((a) => legacy(a.historyFingerprint) || Object.values(a.regionFingerprints ?? {}).some(legacy));
+}
+
+/** An actor's event log, oldest first, payloads decrypted. */
+export async function loadActorEventLog(actorId) {
+  const sql = `SELECT id, event_type, event_payload FROM events WHERE actor_id = $1 ORDER BY id ASC`;
+  let rows;
+  if (isPostgres) {
+    const { queryAll } = await import('./db-postgres.js');
+    rows = await queryAll(sql, [actorId]);
+  } else {
+    rows = getDb().prepare(sql.replace('$1', '?')).all(actorId);
+  }
+  return rows.map((r) => {
+    let payload = null;
+    if (r.event_payload) {
+      try {
+        const buf = Buffer.isBuffer(r.event_payload) ? r.event_payload : Buffer.from(r.event_payload);
+        payload = JSON.parse(decrypt(buf).toString('utf8'));
+      } catch { payload = null; }
+    }
+    return { type: r.event_type, payload };
+  });
+}

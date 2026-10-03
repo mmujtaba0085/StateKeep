@@ -50,9 +50,11 @@ export function checkClusterConfig(env = process.env) {
 async function heartbeat() {
   const now = Date.now();
   const w = registryWatermarks();
+  // last_seen is the DATABASE clock, so that liveness is compared on one clock only
+  // (ownerOf, awaitRegistryBarrier), never across servers' wall clocks.
   await pg.query(
     `INSERT INTO cluster_nodes (node_id, url, started_at, last_seen, cp_low, par_low, cp_seen, par_seen)
-     VALUES ($1,$2,$3,$3,$4,$5,$6,$7)
+     VALUES ($1,$2,$3,(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint,$4,$5,$6,$7)
      ON CONFLICT (node_id) DO UPDATE SET url = EXCLUDED.url, last_seen = EXCLUDED.last_seen,
        cp_low = EXCLUDED.cp_low, par_low = EXCLUDED.par_low, cp_seen = EXCLUDED.cp_seen, par_seen = EXCLUDED.par_seen`,
     [NODE_ID, myUrl, now, w.cp, w.par, JSON.stringify(w.cpSeen.slice(0, 500)), JSON.stringify(w.parSeen.slice(0, 500))]);
@@ -74,20 +76,27 @@ export async function publishRegistryChange() {
 
 export async function awaitRegistryBarrier({ cp = 0, par = 0 } = {}) {
   if (!clusterEnabled() || !pg) return { waitedMs: 0, pending: [] };
-  const start = Date.now();
-  const deadline = start + REGISTRY_LEASE_MS + 250;
+  // A server may route only while its lease (REGISTRY_LEASE_MS since the start of its last
+  // complete sync) is valid, and it renews the lease only after reporting (heartbeat) —
+  // so a server that can still route without this change-point has a heartbeat within
+  // the last lease period. Every such server must acknowledge, or the lease must run out.
+  // Liveness is judged on the database clock; the wait on this process's monotonic clock.
+  const MARGIN = 500;
+  const start = performance.now();
+  const deadline = start + REGISTRY_LEASE_MS + MARGIN;
   let pending = [];
   for (;;) {
     const rows = await pg.queryAll(
-      `SELECT node_id, cp_low, par_low, cp_seen, par_seen, last_seen FROM cluster_nodes WHERE node_id <> $1`, [NODE_ID]).catch(() => null);
+      `SELECT node_id, cp_low, par_low, cp_seen, par_seen, last_seen,
+              (EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint AS db_now
+         FROM cluster_nodes WHERE node_id <> $1`, [NODE_ID]).catch(() => null);
     if (rows) {
-      const now = Date.now();
       const has = (low, seen, id) => !id || Number(low) >= id || (() => { try { return JSON.parse(seen ?? '[]').includes(id); } catch { return false; } })();
-      pending = rows.filter((r) => now - Number(r.last_seen) < TTL_MS() &&
+      pending = rows.filter((r) => Number(r.db_now) - Number(r.last_seen) <= REGISTRY_LEASE_MS + MARGIN &&
         (!has(r.cp_low, r.cp_seen, cp) || !has(r.par_low, r.par_seen, par))).map((r) => r.node_id);
-      if (pending.length === 0) return { waitedMs: Date.now() - start, pending };
+      if (pending.length === 0) return { waitedMs: Math.round(performance.now() - start), pending };
     }
-    if (Date.now() >= deadline) return { waitedMs: Date.now() - start, pending, leaseExpired: true };
+    if (performance.now() >= deadline) return { waitedMs: Math.round(performance.now() - start), pending, leaseExpired: true };
     await new Promise((r) => setTimeout(r, 25));
   }
 }
@@ -95,10 +104,11 @@ export async function awaitRegistryBarrier({ cp = 0, par = 0 } = {}) {
 /** Owner of an actor: { nodeId, url, alive } or null when unowned. */
 async function ownerOf(actorId) {
   const row = await pg.queryOne(
-    `SELECT o.node_id, n.url, n.last_seen FROM actor_owners o LEFT JOIN cluster_nodes n ON n.node_id = o.node_id WHERE o.actor_id = $1`,
+    `SELECT o.node_id, n.url, n.last_seen, (EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint AS db_now
+       FROM actor_owners o LEFT JOIN cluster_nodes n ON n.node_id = o.node_id WHERE o.actor_id = $1`,
     [actorId]);
   if (!row) return null;
-  return { nodeId: row.node_id, url: row.url, alive: row.last_seen != null && Date.now() - Number(row.last_seen) < TTL_MS() };
+  return { nodeId: row.node_id, url: row.url, alive: row.last_seen != null && Number(row.db_now) - Number(row.last_seen) < TTL_MS() };
 }
 
 /** Claim an unowned actor, or take it over from `fromNode` (only if that is still the owner). */

@@ -11,7 +11,7 @@ import { evictFromHotRegistry, sendEvent } from '../../runtime/actorManager.js';
 import { notifyStateChange } from '../websocket.js';
 import { getEngine } from '../../ffi/engine.js';
 import { deliverEventOnce } from '../../runtime/deliverOnce.js';
-import { migrateActorOwned } from '../../runtime/actorManager.js';
+import { migrateActorOwned, upgradeLegacyFingerprint } from '../../runtime/actorManager.js';
 
 export async function internalRoutes(fastify) {
 
@@ -79,5 +79,13 @@ export async function internalRoutes(fastify) {
     } catch (err) {
       return reply.code(500).send({ error: err.message });
     }
+  });
+
+  // POST /v1/internal/actors/:id/upgrade-fingerprint — replace a legacy (v1) history
+  // fingerprint by its exact v2 one, if the event log reconstructs it verifiably
+  // (legacyFingerprints.js). Runs on the owning server under the actor's lock.
+  fastify.post('/v1/internal/actors/:id/upgrade-fingerprint', { schema: { hide: true } }, async (request, reply) => {
+    try { return reply.send(await upgradeLegacyFingerprint(request.params.id)); }
+    catch (err) { return reply.code(500).send({ error: err.message }); }
   });
 }

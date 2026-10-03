@@ -11,9 +11,32 @@ import { resolve }       from 'path';
 import { getWorkerPool } from '../../runtime/workerPool.js';
 import { setGlobalRegistry, loadRegistry } from '../../runtime/implementationRegistry.js';
 import { metaCount } from '../../runtime/routingRegistry.js';
+import { findLegacyFingerprintActors } from '../../registry/actorRepo.js';
+
+/** Upgrade legacy fingerprints actor by actor through the internal route (forwarded to
+ *  the owner in cluster mode). */
+export async function upgradeAllLegacyViaOwners(fastify, { limit = 1000 } = {}) {
+  const out = { upgraded: 0, unverifiable: 0, reasons: {} };
+  for (const a of await findLegacyFingerprintActors(limit)) {
+    const r = await fastify.inject({
+      method: 'POST', url: `/v1/internal/actors/${encodeURIComponent(a.id)}/upgrade-fingerprint`,
+      headers: process.env.STATEKEEP_ADMIN_KEY ? { 'x-admin-key': process.env.STATEKEEP_ADMIN_KEY } : {},
+    });
+    const b = r.json?.() ?? {};
+    if (b.outcome === 'upgraded') out.upgraded++;
+    else if (b.outcome === 'unverifiable') { out.unverifiable++; out.reasons[b.reason] = (out.reasons[b.reason] ?? 0) + 1; }
+  }
+  return out;
+}
 import { getDb, isPostgres } from '../../registry/db.js';
 
 export async function adminRoutes(fastify) {
+
+  // POST /v1/admin/fingerprints/upgrade — try to upgrade every legacy-fingerprint actor
+  // (each on its owning server). Reports how many were upgraded and why others were not.
+  fastify.post('/v1/admin/fingerprints/upgrade', { schema: { hide: true } }, async (request, reply) => {
+    return reply.send(await upgradeAllLegacyViaOwners(fastify));
+  });
 
   // GET /v1/admin/registry?family=<machineId> — routing registry of one workflow family:
   // change-points stored, how many were collected (below the collection frontier), and how

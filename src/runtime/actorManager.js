@@ -12,7 +12,8 @@ import { LRUCache } from './lruCache.js';
 import { fingerprintToBigInt, regionFingerprintsToArray } from '../ffi/hashUtils.js';
 import { computeHistoryFingerprint, isLegacy } from '../ffi/fingerprintChain.js';
 import { getEngine, scopeOf } from '../ffi/engine.js';
-import { registerScalar, registerParallel, lookup as routingLookup, collect as collectFamily } from './routingRegistry.js';
+import { registerScalar, registerParallel, lookup as routingLookup, collect as collectFamily, markLegacyAmbiguity } from './routingRegistry.js';
+import { familyAlphabet, legacyPatternAmbiguous, reconstructHistory } from './legacyFingerprints.js';
 import { getWorkerPool } from './workerPool.js';
 import { getWriteBuffer, makeActionJobRow } from './writeBuffer.js';
 import { processEvent, computeInitialSnapshot } from './interpreter.js';
@@ -28,7 +29,7 @@ import {
   updateActorState,
   updateActorStatus,
 } from '../registry/actorRepo.js';
-import { findDefinitionById, findMaxDeployedAtInFamily, findLatestInFamily } from '../registry/definitionRepo.js';
+import { findDefinitionById, findMaxDeployedAtInFamily, findLatestInFamily, findDefinitionsByMachine } from '../registry/definitionRepo.js';
 import { readFamilyMaxDeployed } from '../registry/deployClock.js';
 import { consumePendingNotifications } from '../registry/migrationNotificationRepo.js';
 import { getDb, encrypt, isPostgres } from '../registry/db.js';
@@ -183,13 +184,22 @@ let _onSynced = null;
 /** cluster.js reports this server's watermarks to the other servers after each sync. */
 export function onRegistrySynced(fn) { _onSynced = fn; }
 /** cluster.js: this server's heartbeat is now visible to deployments' barriers. */
-export function markClusterJoined() { if (!_joinedAt) _joinedAt = Date.now(); }
+export function markClusterJoined() { if (!_joinedAt) _joinedAt = mono(); }
+// Lease times are measured on this process's monotonic clock (wall-clock jumps cannot
+// extend a lease); only durations are compared with other servers.
+function mono() { return performance.now(); }
 
 async function _runSync() {
-  const started = Date.now();
+  const started = mono();
   const complete = await _syncOnce();
-  if (complete) _lastSyncStartOk = Math.max(_lastSyncStartOk, started);
-  try { await _onSynced?.(registryWatermarks()); } catch {}
+  // In a cluster the lease is renewed only once the new watermarks have been reported
+  // (heartbeat): a server whose lease is valid is then always visible to deployment
+  // barriers as recently alive, so a barrier never skips it.
+  let reported = true;
+  try { await _onSynced?.(registryWatermarks()); } catch { reported = false; }
+  if (complete && (reported || process.env.STATEKEEP_CLUSTER !== 'true')) {
+    _lastSyncStartOk = Math.max(_lastSyncStartOk, started);
+  }
   if (!complete) throw Object.assign(new Error('some change-points could not be registered yet'), { code: 'SYNC_INCOMPLETE' });
 }
 
@@ -246,6 +256,7 @@ async function _syncOnce() {
   abandonStaleFailures(_cpCursor, 'scalar'); abandonStaleFailures(_parCursor, 'parallel');
   cursorMark(_cpCursor, _cpCursor.low); cursorMark(_parCursor, _parCursor.low);
   if (added.length > 0) {
+    for (const fam of new Set(added.map((r) => r.machine_id))) await refreshLegacyAmbiguity(fam).catch(() => {});
     registryEpoch++;
     migrationCheckCache.clear();   // stale "stay" answers
     // Deployments made through another server: later ticks here must not fall behind them.
@@ -255,8 +266,56 @@ async function _syncOnce() {
   return complete;
 }
 
+// ── Legacy fingerprints (legacyFingerprints.js) ─────────────────────────────────
+/** Recompute, for a family, which change-points a legacy fingerprint may not match. */
+export async function refreshLegacyAmbiguity(machineId) {
+  if (!machineId) return;
+  const alphabet = familyAlphabet(await findDefinitionsByMachine(machineId));
+  markLegacyAmbiguity(machineId, (pattern) => legacyPatternAmbiguous(pattern, alphabet));
+}
+
+/**
+ * Replace an actor's legacy fingerprint by its exact (v2) one, if its transition history
+ * can be reconstructed from its event log and verified. Runs under the actor's lock on
+ * its owning server. Returns { outcome: 'upgraded' | 'not_legacy' | 'unverifiable', reason? }.
+ */
+export async function upgradeLegacyFingerprint(actorId) {
+  return withActorLock(actorId, async () => {
+    await getWriteBuffer().flush();
+    const actor = await findActorById(actorId);
+    if (!actor) return { outcome: 'not_found' };
+    const legacyRegions = Object.values(actor.regionFingerprints ?? {}).some((v) => isLegacy(v));
+    if (!isLegacy(actor.historyFingerprint) && !legacyRegions) return { outcome: 'not_legacy' };
+    const { loadActorEventLog, updateActorFingerprints } = await import('../registry/actorRepo.js');
+    const def = await cachedFindDefinition(actor.definitionId);
+    const alphabet = familyAlphabet(await findDefinitionsByMachine(def?.machineId ?? actor.definitionId));
+    const events = await loadActorEventLog(actorId);
+    const r = await reconstructHistory(actor, events, (id) => findDefinitionById(id), alphabet);
+    if (!r.ok) return { outcome: 'unverifiable', reason: r.reason };
+    const regionFps = actor.regionFingerprints ? r.regionFps : null;
+    await updateActorFingerprints(actorId, r.fp, serializeRegionFingerprints(regionFps));
+    const hot = hotRegistry.get(actorId);
+    if (hot) { hot.historyFingerprint = r.fp; hot.regionFingerprints = regionFps; }
+    const prefix = `${actorId}:`;
+    for (const key of migrationCheckCache.keys()) if (key.startsWith(prefix)) migrationCheckCache.delete(key);
+    return { outcome: 'upgraded', transitions: r.transitions };
+  });
+}
+
+/** Try to upgrade every legacy actor (this server's view; in a cluster use the admin route). */
+export async function upgradeLegacyActors({ limit = 1000 } = {}) {
+  const { findLegacyFingerprintActors } = await import('../registry/actorRepo.js');
+  const out = { upgraded: 0, unverifiable: 0, reasons: {} };
+  for (const a of await findLegacyFingerprintActors(limit)) {
+    const r = await upgradeLegacyFingerprint(a.id).catch((e) => ({ outcome: 'unverifiable', reason: e.message }));
+    if (r.outcome === 'upgraded') out.upgraded++;
+    else if (r.outcome === 'unverifiable') { out.unverifiable++; out.reasons[r.reason] = (out.reasons[r.reason] ?? 0) + 1; }
+  }
+  return out;
+}
+
 function leaseValid() {
-  return _joinedAt > 0 && _lastSyncStartOk >= _joinedAt && Date.now() - _lastSyncStartOk <= REGISTRY_LEASE_MS;
+  return _joinedAt > 0 && _lastSyncStartOk >= _joinedAt && mono() - _lastSyncStartOk <= REGISTRY_LEASE_MS;
 }
 
 /**
@@ -267,11 +326,11 @@ function leaseValid() {
 async function ensureRegistryLease() {
   if (process.env.STATEKEEP_CLUSTER !== 'true') return;
   if (leaseValid()) return;
-  const deadline = Date.now() + LEASE_WAIT_MS;
+  const deadline = mono() + LEASE_WAIT_MS;
   for (;;) {
     try { await syncChangepointsFromDb(); } catch {}
     if (leaseValid()) return;
-    if (Date.now() >= deadline) break;
+    if (mono() >= deadline) break;
     await new Promise((r) => setTimeout(r, 200));
   }
   throw Object.assign(new Error('Routing registry is stale (database unreachable); retry shortly'),
@@ -314,6 +373,49 @@ const COLLECT_INTERVAL_MS = parseInt(process.env.STATEKEEP_COLLECT_INTERVAL_MS ?
 if (COLLECT_INTERVAL_MS > 0) {
   setInterval(() => { collectRegistry().catch((e) => console.error('[actorManager] collection error:', e.message)); },
     COLLECT_INTERVAL_MS).unref();
+}
+
+// ── Liveness sweep for stranded actors ──────────────────────────────────────────
+// A deployment queues background routing for its family's actors after it commits. If
+// the deploying server dies between the commit and the queueing, active actors are still
+// routed at their next event, but stranded actors take no events. This sweep (at start-up
+// and periodically) queues routing for every stranded actor that has a pending route and
+// no open job. Embedded mode (no migrate worker) routes them in-process instead.
+let _sweepInProcess = false;
+export function setSweepInProcess(v) { _sweepInProcess = !!v; }
+export async function sweepStranded() {
+  const { findStrandedWithoutOpenJob } = await import('../registry/actorRepo.js');
+  const actors = await findStrandedWithoutOpenJob(1000);
+  const byTarget = new Map();
+  for (const a of actors) {
+    let target = null;
+    try { target = await routeTargetFor(a); } catch { continue; }
+    if (!target || target === a.definitionId) continue;
+    if (!byTarget.has(target)) byTarget.set(target, []);
+    byTarget.get(target).push(a.id);
+  }
+  let queued = 0;
+  for (const [target, ids] of byTarget) {
+    if (_sweepInProcess) {
+      for (const id of ids) { await migrateActorOwned(id, target).catch(() => null); queued++; }
+      continue;
+    }
+    const { createDeployment, updateDeploymentStatus } = await import('../registry/deploymentRepo.js');
+    const { enqueueJobs } = await import('../registry/jobRepo.js');
+    const deploymentId = await createDeployment({ definitionId: target, affectedActors: ids.length });
+    await enqueueJobs(ids.map((actor_id) => ({ actor_id, target_def_id: target, deployment_id: deploymentId })));
+    await updateDeploymentStatus(deploymentId, 'migrating');
+    queued += ids.length;
+  }
+  return queued;
+}
+const SWEEP_INTERVAL_MS = parseInt(process.env.STATEKEEP_STRANDED_SWEEP_MS ?? '60000', 10);
+/** Called by API servers and the embedded library (not by worker processes). */
+export function startStrandedSweep({ inProcess = false } = {}) {
+  setSweepInProcess(inProcess);
+  const run = () => sweepStranded().catch((e) => console.error('[actorManager] stranded sweep error:', e.message));
+  setTimeout(run, 2000).unref();                       // soon after start-up (crash recovery)
+  if (SWEEP_INTERVAL_MS > 0) setInterval(run, SWEEP_INTERVAL_MS).unref();
 }
 
 // ── Definition JSON cache (60s TTL) ───────────────────────────────────────────
@@ -1427,6 +1529,9 @@ export async function seedEngineRegistry() {
 
     if (scalars.length + parallels.length > 0) {
       console.log(`[actorManager] Engine registry seeded: ${scalars.length} scalar + ${parallels.length} parallel changepoints`);
+    }
+    for (const fam of new Set([...scalars, ...parallels].map((r) => r.machine_id).filter(Boolean))) {
+      await refreshLegacyAmbiguity(fam).catch(() => {});
     }
   }
 

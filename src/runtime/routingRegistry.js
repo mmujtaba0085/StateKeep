@@ -103,7 +103,9 @@ export function registerParallel({ tStar, storedRegions = null, refinement = 1, 
       : regionFingerprintsToArray(storedRegions, 1);
     if (arr?.length) rc = eng.registerChangepointParallel(t, arr, r, childDefId, scope);
   }
-  metaFor(scope).set(`p:${t}`, { kind: 'p', t, target: childDefId, regionsV2, regionsV1 });
+  const regionPatterns = historyRegions
+    ? Object.fromEntries(Object.entries(historyRegions).map(([k, v]) => [k, normalizeHistoryPath(v)])) : null;
+  metaFor(scope).set(`p:${t}`, { kind: 'p', t, target: childDefId, regionsV2, regionsV1, regionPatterns });
   return rc;
 }
 
@@ -111,13 +113,15 @@ export function registerParallel({ tStar, storedRegions = null, refinement = 1, 
 
 function scalarMatches(m, fp) {
   if (m.wild) return true;
+  if (schemeOf(fp) === 1 && m.legacyAmbiguous) return false;     // legacyFingerprints.js
   if (m.pattern && m.pattern.length > 0) return sameFingerprint(schemeOf(fp) === 1 ? m.v1 : m.v2, fp);
   return schemeOf(fp) === 1 && engineKey(fp) === m.v1key;       // pattern unknown: legacy key only
 }
 
 function verifyScalar(scope, hit, fp) {
-  if (hit.key === 0n || hit.tStar == null || schemeOf(fp) !== 2) return true;
+  if (hit.key === 0n || hit.tStar == null) return true;
   const m = meta.get(scopeKey(scope))?.get(`s:${hit.tStar}`);
+  if (schemeOf(fp) === 1) return !m?.legacyAmbiguous;   // a legacy match is exact only if unambiguous
   if (!m || !m.v2) return true;                 // registered elsewhere: nothing to check
   return sameFingerprint(m.v2, fp);
 }
@@ -144,8 +148,8 @@ function regionsMatch(selectorV2, actorRegions) {
 
 function verifyParallel(scope, hit, regionFps) {
   if (hit.tStar == null) return true;
-  if (Object.values(regionFps).some((v) => !isEmpty(v) && schemeOf(v) === 1)) return true;   // legacy
   const m = meta.get(scopeKey(scope))?.get(`p:${hit.tStar}`);
+  if (Object.values(regionFps).some((v) => !isEmpty(v) && schemeOf(v) === 1)) return !m?.legacyAmbiguous;   // legacy
   if (!m || !m.regionsV2) return true;
   return regionsMatch(m.regionsV2, regionFps);
 }
@@ -228,6 +232,7 @@ export function simulateLookup({ machineId, fp, regionFps, T, extra = [] }) {
       if (!s || m.t < s.tStar || (m.t === s.tStar && !s.exact && exact)) s = { target: m.target, tStar: m.t, exact };
     } else if (m.kind === 'p' && regionFps && (regionLegacy ? m.regionsV1 : m.regionsV2)) {
       const sel = regionLegacy ? m.regionsV1 : m.regionsV2;
+      if (regionLegacy && m.legacyAmbiguous) continue;
       if (!regionsMatch(sel, regionFps)) continue;
       const n = Object.keys(sel).length;
       if (!p || m.t < p.tStar || (m.t === p.tStar && n > p.n)) p = { target: m.target, tStar: m.t, n };
@@ -256,4 +261,15 @@ function prepareExtra(e) {
 /** Change-point entries of a family with t* >= from (for the late-matcher check). */
 export function familyEntries(machineId) {
   return [...(meta.get(scopeKey(scopeOf(machineId)))?.values() ?? [])];
+}
+
+/**
+ * Mark every change-point of a family whose legacy (v1) match would be ambiguous over
+ * the family's event types (see legacyFingerprints.js). `isAmbiguous(pattern)` decides.
+ */
+export function markLegacyAmbiguity(machineId, isAmbiguous) {
+  for (const m of familyEntries(machineId)) {
+    if (m.kind === 's') m.legacyAmbiguous = !!(m.pattern && isAmbiguous(m.pattern));
+    else m.legacyAmbiguous = Object.values(m.regionPatterns ?? {}).some((p) => isAmbiguous(p));
+  }
 }

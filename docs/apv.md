@@ -162,6 +162,8 @@ In StateKeep terms: when actors have `needs_rescue` status, a subsequent deploym
 
 ## 7. The FNV-1a Fingerprint Chain
 
+> **Current encoding (v2).** New fingerprints are a length-prefixed SHA-256 chain, written `2:<hex>`; the FNV-1a chain below hashes the plain concatenation of event types, so `[PAY, MENT_OK]` and `[PAYMENT_OK]` collide. It remains only for *legacy* actors. Those are upgraded from their event log when the replay provably determines their history (at start-up, `POST /v1/admin/fingerprints/upgrade`, or before an ambiguous history-targeted deployment; see `src/runtime/legacyFingerprints.js`). A legacy actor that cannot be upgraded is matched by a history pattern only when the pattern splits into the family's event types in exactly one way; otherwise the match is refused and the deployment warns `LEGACY_HISTORY_AMBIGUOUS`. The routing rule itself is formalized in `formal/APV.lean` and the code is tested against it by `test/test_model_oracle.js`.
+
 The prefix class `[v]_t` is represented concretely as a 64-bit FNV-1a hash. This is the heart of APV's O(1) per-event memory guarantee.
 
 ### Algorithm
