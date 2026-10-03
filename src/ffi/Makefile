@@ -13,6 +13,8 @@
 #     -Wl,--export=apv_register_changepoint_parallel -Wl,--export=apv_compute_accessible_parallel \
 #     -Wl,--export=apv_register_changepoint_parallel_scoped \
 #     -Wl,--export=apv_compute_accessible_parallel_scoped \
+#     -Wl,--export=apv_compute_accessible_scoped_ex -Wl,--export=apv_compute_accessible_parallel_scoped_ex \
+#     -Wl,--export=apv_collect_before_scoped \
 #     -Wl,--export=apv_actor_started -Wl,--export=apv_actor_stopped -Wl,--export=apv_vacate_prefix \
 #     -Wl,--export=apv_fnv1a_init -Wl,--export=apv_fnv1a_update -Wl,--export=apv_fnv1a_final \
 #     -Wl,--export=malloc -Wl,--export=free \

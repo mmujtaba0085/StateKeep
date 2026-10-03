@@ -119,6 +119,53 @@ async function loadEngine() {
       } finally { wasm._free(out); }
     },
 
+    /** Extended build: lookups that also report the hit's t* (and matched key). */
+    hasEx: typeof wasm._apv_compute_accessible_scoped_ex === 'function',
+
+    /** Scalar lookup → { target, tStar, key } or null. key is 0n when the wildcard matched. */
+    computeAccessibleEx(pH, logT, curT, scope = 0n) {
+      if (typeof wasm._apv_compute_accessible_scoped_ex !== 'function') {
+        const target = this.computeAccessible(pH, logT, curT, scope);
+        return target ? { target, tStar: null, key: null } : null;
+      }
+      const out = wasm._malloc(OUTPUT_BUFFER_SIZE + 16);
+      const tp = out + OUTPUT_BUFFER_SIZE, kp = tp + 8;
+      try {
+        const rc = wasm._apv_compute_accessible_scoped_ex(reg, BigInt(scope), BigInt(pH), BigInt(logT), BigInt(curT), out, OUTPUT_BUFFER_SIZE, tp, kp);
+        if (rc !== 1) return null;
+        const dv = new DataView(wasm.HEAPU8.buffer);
+        const target = wasm.UTF8ToString(out, OUTPUT_BUFFER_SIZE);
+        if (!target) return null;
+        return { target, tStar: dv.getBigUint64(tp, true), key: dv.getBigUint64(kp, true) };
+      } finally { wasm._free(out); }
+    },
+
+    /** Parallel lookup → { target, tStar } or null. */
+    computeAccessibleParallelEx(rHashes, logT, curT, scope = 0n) {
+      if (typeof wasm._apv_compute_accessible_parallel_scoped_ex !== 'function') {
+        const target = this.computeAccessibleParallel(rHashes, logT, curT, scope);
+        return target ? { target, tStar: null } : null;
+      }
+      const rp  = toPtr(regionHashesToBuffer(rHashes));
+      const out = wasm._malloc(OUTPUT_BUFFER_SIZE + 8);
+      const tp = out + OUTPUT_BUFFER_SIZE;
+      try {
+        const rc = wasm._apv_compute_accessible_parallel_scoped_ex(reg, BigInt(scope), rp, rHashes.length, BigInt(logT), BigInt(curT), out, OUTPUT_BUFFER_SIZE, tp);
+        if (rc !== 1) return null;
+        const target = wasm.UTF8ToString(out, OUTPUT_BUFFER_SIZE);
+        if (!target) return null;
+        return { target, tStar: new DataView(wasm.HEAPU8.buffer).getBigUint64(tp, true) };
+      } finally { wasm._free(rp); wasm._free(out); }
+    },
+
+    /** Remove every change-point of `scope` with t* < frontier. Returns the count, or -1. */
+    collectBefore(scope, frontier) {
+      if (typeof wasm._apv_collect_before_scoped !== 'function') return -1;
+      const n = Number(wasm._apv_collect_before_scoped(reg, BigInt(scope), BigInt(frontier)));
+      if (n > 0) changepoints = Math.max(0, changepoints - n);
+      return n;
+    },
+
     actorStarted(tStar, pH)  { wasm._apv_actor_started(reg, BigInt(tStar), BigInt(pH)); },
     actorStopped(tStar, pH)  { wasm._apv_actor_stopped(reg, BigInt(tStar), BigInt(pH)); },
     vacatePrefix(tStar, pH)  { wasm._apv_vacate_prefix(reg, BigInt(tStar), BigInt(pH)); },
