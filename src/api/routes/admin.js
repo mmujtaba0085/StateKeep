@@ -10,8 +10,30 @@ import { pathToFileURL } from 'url';
 import { resolve }       from 'path';
 import { getWorkerPool } from '../../runtime/workerPool.js';
 import { setGlobalRegistry, loadRegistry } from '../../runtime/implementationRegistry.js';
+import { metaCount } from '../../runtime/routingRegistry.js';
+import { getDb, isPostgres } from '../../registry/db.js';
 
 export async function adminRoutes(fastify) {
+
+  // GET /v1/admin/registry?family=<machineId> — routing registry of one workflow family:
+  // change-points stored, how many were collected (below the collection frontier), and how
+  // many this server's registry currently holds.
+  fastify.get('/v1/admin/registry', {
+    schema: { querystring: { type: 'object', required: ['family'], properties: { family: { type: 'string' } } } },
+  }, async (request, reply) => {
+    const fam = request.query.family;
+    const sql = `SELECT COUNT(*) AS n, SUM(CASE WHEN cp.collected_at IS NULL THEN 0 ELSE 1 END) AS c
+      FROM (SELECT child_def_id, collected_at FROM changepoints UNION ALL SELECT child_def_id, collected_at FROM par_changepoints) cp
+      JOIN definitions d ON d.id = cp.child_def_id WHERE d.machine_id = $1`;
+    let row;
+    if (isPostgres) {
+      const { queryOne } = await import('../../registry/db-postgres.js');
+      row = await queryOne(sql, [fam]);
+    } else {
+      row = getDb().prepare(sql.replace('$1', '?')).get(fam);
+    }
+    return reply.send({ family: fam, changepoints: Number(row?.n ?? 0), collected: Number(row?.c ?? 0), live: metaCount(fam) });
+  });
 
   fastify.post('/v1/admin/workers/:type/restart', {
     schema: {

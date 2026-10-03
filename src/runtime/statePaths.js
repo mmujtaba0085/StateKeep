@@ -1,4 +1,4 @@
-import { updateFingerprint } from '../ffi/fingerprintChain.js';
+import { updateFingerprint, regionSchemeHint } from '../ffi/fingerprintChain.js';
 
 function isPlainObject(value) {
   return value && typeof value === 'object' && !Array.isArray(value);
@@ -93,12 +93,14 @@ export function updateRegionFingerprintsForTransition(
   preStateValue,
   postStateValue,
   eventType,
-  current = null
+  current = null,
+  mainFingerprint = null
 ) {
   const regionPaths = extractParallelRegionPaths(definition);
   if (regionPaths.length === 0) return null;
 
   const result = {};
+  const hint = regionSchemeHint(mainFingerprint, current);
   for (const regionPath of regionPaths) {
     const postRegion = getStateValueAtPath(postStateValue, regionPath);
     if (postRegion === undefined) continue;
@@ -106,7 +108,7 @@ export function updateRegionFingerprintsForTransition(
     const preRegion = getStateValueAtPath(preStateValue, regionPath);
     let fp = current?.[regionPath] ?? '0';
     if (preRegion !== undefined && !stateValuesEqual(preRegion, postRegion)) {
-      fp = updateFingerprint(fp, eventType);
+      fp = updateFingerprint(fp, eventType, hint);
     }
     result[regionPath] = fp;
   }

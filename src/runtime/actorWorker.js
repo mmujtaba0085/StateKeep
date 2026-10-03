@@ -71,9 +71,22 @@ export function applyContextTransform(context, transform) {
     throw new Error('applyContextTransform: context must be a non-null object');
   }
   const result = JSON.parse(JSON.stringify(context));
-  for (const [newPath, oldPath] of Object.entries(transform)) {
-    if (typeof newPath !== 'string' || typeof oldPath !== 'string') continue;
-    const value = getNestedValue(context, oldPath);
+  // Entries: "new.path": "old.path"                      copy (skipped if absent)
+  //          "new.path": { "value": <json> }             set a constant
+  //          "new.path": { "from": "old.path", "default": <json> }  copy, or the default
+  for (const [newPath, spec] of Object.entries(transform)) {
+    if (typeof newPath !== 'string') continue;
+    let value;
+    if (typeof spec === 'string') {
+      value = getNestedValue(context, spec);
+    } else if (spec && typeof spec === 'object' && !Array.isArray(spec)) {
+      if (Object.prototype.hasOwnProperty.call(spec, 'value')) value = spec.value;
+      else {
+        value = typeof spec.from === 'string' ? getNestedValue(context, spec.from) : undefined;
+        if (value === undefined && Object.prototype.hasOwnProperty.call(spec, 'default')) value = spec.default;
+      }
+      if (value !== undefined) value = JSON.parse(JSON.stringify(value));
+    } else continue;
     if (value !== undefined) setNestedValue(result, newPath, value);
   }
   return result;
@@ -236,6 +249,7 @@ function handleEvent({ actorId, event, historyFingerprint, regionFingerprints })
     result.stateValue,
     event.type,
     regionFingerprints ?? entry.regionFingerprints ?? null,
+    historyFingerprint ?? entry.historyFingerprint ?? null,
   );
 
   setActorEntry(actorId, {
@@ -259,39 +273,10 @@ function handleEvent({ actorId, event, historyFingerprint, regionFingerprints })
   };
 }
 
-/**
- * Resolve where an actor should land in the new machine.
- *
- * For flat machines: returns the landing state name (string).
- * For compound/parallel machines: returns the full compound state value object
- *   when the top-level key exists in newMachineStates.
- *
- * stateMapping keys are always top-level state names (strings).
- * Returns null if no mapping is possible (actor needs_rescue).
- *
- * Exported so it can be unit-tested without a running server.
- */
-export function resolveLandingState(currentStateValue, newMachineStates, stateMapping = {}) {
-  if (typeof currentStateValue === 'string') {
-    if (newMachineStates[currentStateValue]) return currentStateValue;
-    const mapped = stateMapping[currentStateValue];
-    if (mapped && newMachineStates[mapped]) return mapped;
-    return null;
-  }
-
-  if (currentStateValue && typeof currentStateValue === 'object') {
-    const topLevel = Object.keys(currentStateValue)[0];
-    if (!topLevel) return null;
-    const mappedKey = stateMapping[topLevel];
-    if (mappedKey) {
-      return newMachineStates[mappedKey] ? mappedKey : null;
-    }
-    if (newMachineStates[topLevel]) return currentStateValue;
-    return null;
-  }
-
-  return null;
-}
+// The state mapping μ lives in stateMapping.js (checks every active leaf, nested and
+// parallel ones included, and supports dotted mapping keys). Re-exported for callers.
+export { resolveLandingState } from './stateMapping.js';
+import { resolveLandingState as _resolveLandingState } from './stateMapping.js';
 
 function handleHydrate({
   actorId,
@@ -318,7 +303,7 @@ function handleHydrate({
 
   let landingStateValue;
   if (currentStateValue != null) {
-    const landingState = resolveLandingState(currentStateValue, newStates, stateMapping ?? {});
+    const landingState = _resolveLandingState(currentStateValue, newStates, stateMapping ?? {});
     if (!landingState) return { error: 'STATE_NOT_MAPPABLE', currentStateValue };
     landingStateValue = landingState;
   } else {

@@ -57,8 +57,8 @@ describe('SC11-P1: par_changepoints serialization round-trip', () => {
     assert.equal(typeof map, 'object', 'deserialized value is an object');
     assert.equal(Object.keys(map).length, 2);
     for (const h of Object.values(map)) {
-      assert.equal(typeof h, 'string', 'each element is a hex string');
-      assert.equal(h.length, 16, 'each element is 16 chars');
+      assert.equal(typeof h, 'string', 'each element is a fingerprint string');
+      assert.match(h, /^2:[0-9a-f]{64}$/, 'each element is a v2 fingerprint');
     }
   });
 
@@ -83,10 +83,10 @@ describe('SC11-P1: par_changepoints serialization round-trip', () => {
     assert.ok(bis.some(b => b === fingerprintToBigInt(shipHash)), 'shipping hash present');
   });
 
-  test('P1-4: empty events produce FNV_OFFSET base hash in each region', () => {
+  test('P1-4: empty events produce the empty fingerprint "0" in each region', () => {
     const rfp = computeRegionHashes({ payment: [], shipping: [] });
-    assert.equal(rfp.payment,  bigIntToHex(FNV_OFFSET));
-    assert.equal(rfp.shipping, bigIntToHex(FNV_OFFSET));
+    assert.equal(rfp.payment,  '0');
+    assert.equal(rfp.shipping, '0');
   });
 });
 

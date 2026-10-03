@@ -153,7 +153,8 @@ describe('hashUtils', () => {
     const initial = '0';
     const after   = hashUtils.updateFingerprint(initial, 'START');
     assert.notEqual(initial, after);
-    assert.match(after, /^[0-9a-f]{16}$/);
+    // v2 fingerprint: length-prefixed SHA-256 chain (injective)
+    assert.match(after, /^2:[0-9a-f]{64}$/);
   });
 
   test('updateFingerprint chained equals multi-item computeHash', async () => {

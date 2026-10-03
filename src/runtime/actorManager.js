@@ -10,8 +10,9 @@ import { randomUUID } from 'crypto';
 import { randomInt } from 'crypto';
 import { LRUCache } from './lruCache.js';
 import { fingerprintToBigInt, regionFingerprintsToArray } from '../ffi/hashUtils.js';
-import { computeHistoryFingerprint } from '../ffi/fingerprintChain.js';
+import { computeHistoryFingerprint, isLegacy } from '../ffi/fingerprintChain.js';
 import { getEngine, scopeOf } from '../ffi/engine.js';
+import { registerScalar, registerParallel, lookup as routingLookup, collect as collectFamily } from './routingRegistry.js';
 import { getWorkerPool } from './workerPool.js';
 import { getWriteBuffer, makeActionJobRow } from './writeBuffer.js';
 import { processEvent, computeInitialSnapshot } from './interpreter.js';
@@ -27,12 +28,13 @@ import {
   updateActorState,
   updateActorStatus,
 } from '../registry/actorRepo.js';
-import { findDefinitionById } from '../registry/definitionRepo.js';
+import { findDefinitionById, findMaxDeployedAtInFamily, findLatestInFamily } from '../registry/definitionRepo.js';
+import { readFamilyMaxDeployed } from '../registry/deployClock.js';
 import { consumePendingNotifications } from '../registry/migrationNotificationRepo.js';
 import { getDb, encrypt, isPostgres } from '../registry/db.js';
 import { serializeRegionFingerprints } from '../registry/regionFingerprintCodec.js';
 import { emitWebhookEvent } from '../api/lib/webhookEmitter.js';
-import { findFamilyChangepoint, loadChangepointsAfter, loadParChangepointsAfter } from '../registry/changepointRepo.js';
+import { findFamilyChangepoint, loadChangepointsAfter, loadParChangepointsAfter, familyFrontiers, markCollected } from '../registry/changepointRepo.js';
 import { cancelAllPendingForActor } from '../registry/scheduledEventRepo.js';
 
 const HOT_REGISTRY_SIZE  = parseInt(process.env.HOT_REGISTRY_SIZE    ?? '10000',  10);
@@ -91,35 +93,189 @@ setInterval(() => {
 // Change-points deployed through another API server (or another process) are
 // registered here too — otherwise this server's inline check never routed its actors
 // to them. Incremental by row id.
-let _lastCpId = 0, _lastParCpId = 0;
-async function syncChangepointsFromDb() {
-  const eng = getEngine();
-  if (!eng.available) return;
-  // (A row whose definition is not visible yet is retried on the next poll: it cannot
-  //  be registered in its family's scope without knowing the family.)
-  const rows = await loadChangepointsAfter(_lastCpId);
+// Rows are read incrementally by id. Ids are allocated before commit, so on PostgreSQL a
+// row can become visible after a higher id already was (two deployments of different
+// workflows committing out of order). A plain "id > last seen" cursor skipped such rows
+// for good on every other server. Instead each table keeps a low watermark (every id at
+// or below it has been handled) plus the ids handled above it. A gap that stays open for
+// GAP_GIVEUP_MS is an insert that never committed and is stepped over — but never past a
+// row that was read and failed to register: such a row is retried until it succeeds.
+const GAP_GIVEUP_MS = 30_000;
+function makeCursor() { return { low: 0, seen: new Set(), failed: new Map(), gapSince: 0 }; }
+const _cpCursor = makeCursor(), _parCursor = makeCursor();
+function cursorMark(c, id) {
+  id = Number(id);
+  if (id > c.low) { c.seen.add(id); c.failed.delete(id); }
+  while (c.seen.has(c.low + 1)) { c.seen.delete(c.low + 1); c.low++; c.gapSince = 0; }
+  if (c.seen.size > 0) {
+    const now = Date.now();
+    if (!c.gapSince) c.gapSince = now;
+    else if (now - c.gapSince > GAP_GIVEUP_MS) {
+      // step over ids that were never returned by a query, stopping before a failed row
+      let target = Math.min(...c.seen) - 1;
+      const pendingFailed = [...c.failed.keys()].filter((f) => f > c.low);
+      if (pendingFailed.length) target = Math.min(target, Math.min(...pendingFailed) - 1);
+      c.gapSince = 0;
+      if (target > c.low) { c.low = target; cursorMark(c, c.low); }
+    }
+  }
+}
+function cursorFail(c, id) { id = Number(id); if (id > c.low && !c.seen.has(id) && !c.failed.has(id)) c.failed.set(id, Date.now()); }
+// A row that keeps failing (its definition row is missing, say) would otherwise fence this
+// server for good; after FAILED_GIVEUP_MS it is abandoned with an error in the log.
+const FAILED_GIVEUP_MS = parseInt(process.env.STATEKEEP_CP_FAILED_GIVEUP_MS ?? '300000', 10);
+function abandonStaleFailures(c, kind) {
+  const now = Date.now();
+  for (const [id, since] of c.failed) {
+    if (now - since > FAILED_GIVEUP_MS) {
+      console.error(`[actorManager] ${kind} change-point row ${id} could not be registered for ${Math.round((now - since) / 1000)}s — abandoned`);
+      cursorMark(c, id);
+    }
+  }
+}
+function cursorSeen(c, id) { id = Number(id); return id <= c.low || c.seen.has(id); }
+/** Watermarks plus the ids registered above them (the barrier's acknowledgement). */
+export function registryWatermarks() {
+  return { cp: _cpCursor.low, par: _parCursor.low, cpSeen: [..._cpCursor.seen], parSeen: [..._parCursor.seen] };
+}
+/** Called by the deploy route for rows it registered itself. */
+export function markChangepointRowRegistered(kind, id) {
+  if (id != null) cursorMark(kind === 'par' ? _parCursor : _cpCursor, id);
+}
+
+/** Register a persisted scalar change-point (both fingerprint schemes; see routingRegistry). */
+async function registerChangepointRow(row) {
+  const def = String(row.prefix_hash) === '0' ? null : await cachedFindDefinition(row.child_def_id);
+  if (String(row.prefix_hash) !== '0' && !def) throw new Error(`definition ${row.child_def_id} not visible`);
+  return registerScalar({
+    tStar: row.t_star, storedPrefix: String(row.prefix_hash), refinement: row.refinement,
+    childDefId: row.child_def_id, machineId: row.machine_id,
+    historyPath: def?.definitionJson?._historyPath ?? null,
+  });
+}
+
+/** Register a persisted parallel change-point. */
+async function registerParChangepointRow(row) {
+  const def = await cachedFindDefinition(row.child_def_id);
+  if (!def) throw new Error(`definition ${row.child_def_id} not visible`);
+  let stored = null;
+  try { stored = JSON.parse(row.region_hashes); } catch {}
+  return registerParallel({
+    tStar: row.t_star, storedRegions: stored, refinement: row.refinement,
+    childDefId: row.child_def_id, machineId: row.machine_id,
+    historyRegions: def?.definitionJson?._historyRegions ?? null,
+  });
+}
+
+// Registry lease (cluster mode): this server may process events only while its registry
+// was synced from the database within the last REGISTRY_LEASE_MS, measured from the start
+// of the last sync that registered every row it read, and that started after this server
+// became visible to other servers (its first heartbeat). A deployment waits until every
+// live server has acknowledged its change-point, or until the lease has run out, before it
+// is committed (cluster.js awaitRegistryBarrier), so no server keeps routing on a registry
+// that lacks a committed deployment.
+export const REGISTRY_LEASE_MS = parseInt(process.env.STATEKEEP_REGISTRY_LEASE_MS ?? '2000', 10);
+const LEASE_WAIT_MS = parseInt(process.env.STATEKEEP_REGISTRY_LEASE_WAIT_MS ?? '10000', 10);
+let _lastSyncStartOk = 0;
+let _joinedAt = 0;
+let _syncInFlight = null, _syncNext = null;
+let _onSynced = null;
+/** cluster.js reports this server's watermarks to the other servers after each sync. */
+export function onRegistrySynced(fn) { _onSynced = fn; }
+/** cluster.js: this server's heartbeat is now visible to deployments' barriers. */
+export function markClusterJoined() { if (!_joinedAt) _joinedAt = Date.now(); }
+
+async function _runSync() {
+  const started = Date.now();
+  const complete = await _syncOnce();
+  if (complete) _lastSyncStartOk = Math.max(_lastSyncStartOk, started);
+  try { await _onSynced?.(registryWatermarks()); } catch {}
+  if (!complete) throw Object.assign(new Error('some change-points could not be registered yet'), { code: 'SYNC_INCOMPLETE' });
+}
+
+/**
+ * Sync the routing registry from the database. At most one sync runs at a time, and all
+ * callers that arrive while one runs share the single next one (a slow database cannot
+ * pile up syncs).
+ */
+export function syncChangepointsFromDb() {
+  if (!_syncInFlight) {
+    _syncInFlight = _runSync().finally(() => { _syncInFlight = null; });
+    return _syncInFlight;
+  }
+  if (!_syncNext) {
+    _syncNext = _syncInFlight.catch(() => {}).then(() => {
+      _syncNext = null;
+      _syncInFlight = _runSync().finally(() => { _syncInFlight = null; });
+      return _syncInFlight;
+    });
+  }
+  return _syncNext;
+}
+
+/** Returns true when every row read was registered (or skipped as collected). */
+async function _syncOnce() {
+  let eng;
+  try { eng = getEngine(); } catch { return false; }     // engine not loaded yet
+  if (!eng.available) return true;
+  let complete = true;
+  const rows = await loadChangepointsAfter(_cpCursor.low);
+  const added = [];
   for (const row of rows) {
-    if (!row.machine_id) break;
-    try { eng.registerChangepoint(BigInt(row.t_star), BigInt(row.prefix_hash), BigInt(row.refinement), row.child_def_id, scopeOf(row.machine_id)); } catch {}
-    _lastCpId = Math.max(_lastCpId, Number(row.id));
-  }
-  const par = await loadParChangepointsAfter(_lastParCpId);
-  for (const row of par) {
-    if (!row.machine_id) break;
+    if (cursorSeen(_cpCursor, row.id)) continue;
+    if (row.collected_at != null) { cursorMark(_cpCursor, row.id); continue; }
     try {
-      const stored = JSON.parse(row.region_hashes);
-      const arr = Array.isArray(stored) ? stored.map((h) => BigInt(`0x${String(h).padStart(16, '0')}`)) : regionFingerprintsToArray(stored);
-      if (arr?.length) eng.registerChangepointParallel(BigInt(row.t_star), arr, BigInt(row.refinement), row.child_def_id, scopeOf(row.machine_id));
-    } catch {}
-    _lastParCpId = Math.max(_lastParCpId, Number(row.id));
+      if (!row.machine_id) throw new Error('definition not visible');
+      await registerChangepointRow(row);
+    } catch { cursorFail(_cpCursor, row.id); complete = false; continue; }
+    cursorMark(_cpCursor, row.id);
+    added.push(row);
   }
-  if (rows.length + par.length > 0) {
+  const par = await loadParChangepointsAfter(_parCursor.low);
+  for (const row of par) {
+    if (cursorSeen(_parCursor, row.id)) continue;
+    if (row.collected_at != null) { cursorMark(_parCursor, row.id); continue; }
+    try {
+      if (!row.machine_id) throw new Error('definition not visible');
+      await registerParChangepointRow(row);
+    } catch { cursorFail(_parCursor, row.id); complete = false; continue; }
+    cursorMark(_parCursor, row.id);
+    added.push(row);
+  }
+  // Re-evaluate gaps even when nothing new arrived.
+  abandonStaleFailures(_cpCursor, 'scalar'); abandonStaleFailures(_parCursor, 'parallel');
+  cursorMark(_cpCursor, _cpCursor.low); cursorMark(_parCursor, _parCursor.low);
+  if (added.length > 0) {
     registryEpoch++;
     migrationCheckCache.clear();   // stale "stay" answers
     // Deployments made through another server: later ticks here must not fall behind them.
-    const maxT = Math.max(0, ...rows.map((r) => Number(r.t_star)), ...par.map((r) => Number(r.t_star)));
+    const maxT = Math.max(0, ...added.map((r) => Number(r.t_star)));
     if (maxT > 0) eng.advanceClockTo(maxT);
   }
+  return complete;
+}
+
+function leaseValid() {
+  return _joinedAt > 0 && _lastSyncStartOk >= _joinedAt && Date.now() - _lastSyncStartOk <= REGISTRY_LEASE_MS;
+}
+
+/**
+ * (cluster) Before a unit routes: renew the registry lease if it has run out, retrying
+ * for up to LEASE_WAIT_MS (a short database blip delays the unit instead of failing it);
+ * then throw REGISTRY_STALE (503).
+ */
+async function ensureRegistryLease() {
+  if (process.env.STATEKEEP_CLUSTER !== 'true') return;
+  if (leaseValid()) return;
+  const deadline = Date.now() + LEASE_WAIT_MS;
+  for (;;) {
+    try { await syncChangepointsFromDb(); } catch {}
+    if (leaseValid()) return;
+    if (Date.now() >= deadline) break;
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  throw Object.assign(new Error('Routing registry is stale (database unreachable); retry shortly'),
+    { code: 'REGISTRY_STALE', statusCode: 503 });
 }
 
 export const _migrationPollTimer = setInterval(async () => {
@@ -137,6 +293,28 @@ export const _migrationPollTimer = setInterval(async () => {
     console.error('[actorManager] migration poll error:', err.message);
   }
 }, 500).unref();
+
+// ── Registry collection (collection frontier) ───────────────────────────────────
+// Change-points below a family's frontier can never apply again (see familyFrontiers):
+// they are marked collected in the database and removed from this server's engine, so
+// the live registry stays bounded by what running actors can still reach.
+export async function collectRegistry() {
+  const eng = getEngine();
+  if (!eng.available) return 0;
+  let n = 0;
+  for (const { machineId, frontier } of await familyFrontiers()) {
+    if (!Number.isFinite(frontier) || frontier <= 0) continue;
+    await markCollected(machineId, frontier);
+    n += Math.max(0, collectFamily(machineId, frontier));
+  }
+  if (n > 0) { registryEpoch++; migrationCheckCache.clear(); }
+  return n;
+}
+const COLLECT_INTERVAL_MS = parseInt(process.env.STATEKEEP_COLLECT_INTERVAL_MS ?? '60000', 10);
+if (COLLECT_INTERVAL_MS > 0) {
+  setInterval(() => { collectRegistry().catch((e) => console.error('[actorManager] collection error:', e.message)); },
+    COLLECT_INTERVAL_MS).unref();
+}
 
 // ── Definition JSON cache (60s TTL) ───────────────────────────────────────────
 // Reduces DB reads for hot definitions hit on every spawnActor / ensureInWorker.
@@ -263,66 +441,92 @@ async function ensureInWorker(actorId, actor, priority = 'normal') {
  */
 const _emptyRegistry = withConditions({ guards: {}, actions: {}, services: {} });
 
-export async function spawnActor({ definitionId, initialContext, logicalStartTick, spawnKey = null, spawnEventTick = null }) {
-  const def = await cachedFindDefinition(definitionId);
+export async function spawnActor({ definitionId, initialContext, logicalStartTick, spawnKey = null, spawnEventTick = null, newest = false }) {
+  let def = await cachedFindDefinition(definitionId);
   if (!def) throw new Error(`Definition not found: ${definitionId}`);
 
-  // Compute initial snapshot on the main thread so we can do a single DB write
-  // with the full state — eliminating the two-write window (null stateValue → real state).
-  const compiledJson = def.compiledJson ?? compileMachine(def.definitionJson);
-  // Same implementations as events use: the initial state's entry actions run and its
-  // timers are scheduled (before, spawn used an empty registry and dropped both).
-  const spawnRegistry = withRemote(getGlobalRegistry() ?? { guards: {}, actions: {}, services: {} });
-  const snapResult   = computeInitialSnapshot(compiledJson, def.definitionJson, initialContext ?? {}, spawnRegistry);
-  if (snapResult.error) throw new Error(`Failed to compute initial snapshot: ${snapResult.error}`);
+  // Logical time (APV model): one past the newest committed deployment of the family,
+  // for every spawn (pinned or not, through any entry point): deployments committed
+  // before the spawn do not apply to the actor, later ones do. It is read under the
+  // family lock (no deployment of the family in progress). A spawn "by family"
+  // (newest: true) also chooses its version inside the same critical section: choosing
+  // it before and dating the actor after a deployment committed in between left the
+  // actor on the old version, past the new deployment, for good.
+  // The whole spawn, from reading the family's newest deployment to writing the actor
+  // row, runs under the family lock (shared with other spawns on PostgreSQL): no
+  // deployment of the family commits in between, so the actor's logical time is exact,
+  // and the collection frontier (which reads deployment times before actors) can never
+  // pass it.
+  const family = def.machineId ?? definitionId;
+  const spawned = await readFamilyMaxDeployed(family, async () => {
+    const familyMax = await findMaxDeployedAtInFamily(family);
+    const latestId  = newest ? (await findLatestInFamily(family))?.id ?? null : null;
+    if (latestId && latestId !== def.id) {
+      def = await findDefinitionById(latestId);
+      if (!def) throw new Error(`Definition not found: ${latestId}`);
+      definitionId = latestId;
+    }
 
-  const stateValue         = snapResult.stateValue;
-  const effectiveContext   = snapResult.context ?? initialContext ?? {};
-  const historyFingerprint = snapResult.historyFingerprint ?? '0';
-  const regionFingerprints = initializeRegionFingerprints(def.definitionJson, stateValue, null);
+    // Compute initial snapshot on the main thread so we can do a single DB write
+    // with the full state — eliminating the two-write window (null stateValue → real state).
+    const compiledJson = def.compiledJson ?? compileMachine(def.definitionJson);
+    // Same implementations as events use: the initial state's entry actions run and its
+    // timers are scheduled (before, spawn used an empty registry and dropped both).
+    const spawnRegistry = withRemote(getGlobalRegistry() ?? { guards: {}, actions: {}, services: {} });
+    const snapResult   = computeInitialSnapshot(compiledJson, def.definitionJson, initialContext ?? {}, spawnRegistry);
+    if (snapResult.error) throw new Error(`Failed to compute initial snapshot: ${snapResult.error}`);
 
-  const pool    = getWorkerPool();
-  const actorId = randomUUID();
+    const stateValue         = snapResult.stateValue;
+    const effectiveContext   = snapResult.context ?? initialContext ?? {};
+    const historyFingerprint = snapResult.historyFingerprint ?? '0';
+    const regionFingerprints = initializeRegionFingerprints(def.definitionJson, stateValue, null);
 
-  // Logical time (APV model): at least one past the version's deployment time. Spawns by
-  // family pass nothing; pinned spawns pass one past the newest deployment of the family.
-  const actorLogicalTick = Math.max(logicalStartTick ?? 0, Number(def.deployedAt ?? 0) + 1);
+    const pool    = getWorkerPool();
+    const actorId = randomUUID();
 
-  // Single write: the actor with its full initial state, its initial entry-action jobs
-  // and timers, its SPAWN audit event and the client's idempotency key — one transaction,
-  // committed before the spawn is acknowledged. (Before, the jobs and timers followed in
-  // a later write: a crash in between left an actor whose first actions never ran.)
-  const actionJobs = (snapResult.durableActions ?? []).map((d) => makeActionJobRow({
-    actorId, actionName: d.name, context: d.context, event: d.event,
-    maxRetries: d.opts?.maxRetries ?? 3, fireAt: Date.now() }));
-  const timers = [];
-  if (!snapResult.done) {
-    for (const op of snapResult.scheduledEventOps ?? []) {
-      if (op.op !== 'create') continue;
-      for (const { eventType, delayMs } of op.entries) {
-        timers.push({ eventType, fireAt: Date.now() + delayMs,
-          payloadEnc: encrypt(JSON.stringify({ stateEntryId: op.newEntryId })) });
+    const actorLogicalTick = Math.max(logicalStartTick ?? 0, Number(def.deployedAt ?? 0) + 1, familyMax + 1);
+
+    // Single write: the actor with its full initial state, its initial entry-action jobs
+    // and timers, its SPAWN audit event and the client's idempotency key — one transaction,
+    // committed before the spawn is acknowledged. (Before, the jobs and timers followed in
+    // a later write: a crash in between left an actor whose first actions never ran.)
+    const actionJobs = (snapResult.durableActions ?? []).map((d) => makeActionJobRow({
+      actorId, actionName: d.name, context: d.context, event: d.event,
+      maxRetries: d.opts?.maxRetries ?? 3, fireAt: Date.now() }));
+    const timers = [];
+    if (!snapResult.done) {
+      for (const op of snapResult.scheduledEventOps ?? []) {
+        if (op.op !== 'create') continue;
+        for (const { eventType, delayMs } of op.entries) {
+          timers.push({ eventType, fireAt: Date.now() + delayMs,
+            payloadEnc: encrypt(JSON.stringify({ stateEntryId: op.newEntryId })) });
+        }
       }
     }
-  }
-  await dbCreateActor({
-    id:                 actorId,
-    definitionId,
-    stateValue,
-    context:            effectiveContext,
-    logicalStartTick:   actorLogicalTick,
-    historyFingerprint,
-    regionFingerprints,
-    // A machine can finish during spawn (eventless transitions into a final state):
-    // it is created finished, like one that finishes on an event.
-    status:             snapResult.done ? 'terminated' : 'active',
-    stateEntryId:       snapResult.stateEntryId ?? 0,   // the initial state's timers carry it
-    spawnKey, actionJobs, timers,
-    spawnEvent:         spawnEventTick != null ? { tick: Number(spawnEventTick), processedAt: Date.now() } : null,
+    await dbCreateActor({
+      id:                 actorId,
+      definitionId,
+      stateValue,
+      context:            effectiveContext,
+      logicalStartTick:   actorLogicalTick,
+      historyFingerprint,
+      regionFingerprints,
+      // A machine can finish during spawn (eventless transitions into a final state):
+      // it is created finished, like one that finishes on an event.
+      status:             snapResult.done ? 'terminated' : 'active',
+      stateEntryId:       snapResult.stateEntryId ?? 0,   // the initial state's timers carry it
+      spawnKey, actionJobs, timers,
+      spawnEvent:         spawnEventTick != null ? { tick: Number(spawnEventTick), processedAt: Date.now() } : null,
+    });
+    return { def, definitionId, snapResult, stateValue, effectiveContext, historyFingerprint,
+      regionFingerprints, pool, actorId, actorLogicalTick };
   });
+  ({ def, definitionId } = spawned);
+  const { snapResult, stateValue, effectiveContext, historyFingerprint, regionFingerprints, pool, actorId,
+    actorLogicalTick } = spawned;
   if (snapResult.done) {
     return { id: actorId, logicalStartTick: actorLogicalTick, actorId, stateValue, context: effectiveContext,
-      historyFingerprint, regionFingerprints, status: 'done', done: true };
+      historyFingerprint, regionFingerprints, status: 'done', done: true, definitionId: def.id };
   }
 
   // Pre-load worker with snapshot (skips re-computation in worker for idempotent reload).
@@ -357,6 +561,7 @@ export async function spawnActor({ definitionId, initialContext, logicalStartTic
 
   return {
     id: actorId,
+    definitionId: def.id,
     logicalStartTick: actorLogicalTick,
     actorId,
     stateValue,
@@ -408,13 +613,25 @@ export async function sendEvent(actorId, event, tick, opts = {}) {
   return withActorLock(actorId, () => _sendEventLocked(actorId, event, tick, opts));
 }
 
-const MAX_ROUTING_HOPS = 32;
+// Routing to a fixpoint terminates without a fixed bound: every hop moves the actor to a
+// change-point at or after its logical time and then past it (monotone progress), so a
+// unit takes at most as many hops as there are change-points. The bound below is only a
+// guard against a broken registry; a fixed small bound (32) used to cut chains short.
+function maxRoutingHops() {
+  try { return getEngine().changepointCount() + 1; } catch { return 1; }
+}
+
+/** The routing decision for an actor record (DB or hot entry): target id, or null. */
+export async function routeTargetFor(actor) {
+  const r = await computeRoute(actor.id, actor, BigInt(getEngine().clockTick()));
+  return r ?? null;
+}
 
 /**
  * The APV routing decision for one actor (docs/apv.md, Definition "accessibility"):
  * the earliest applicable change-point of the actor's own workflow family at or after
  * its logical time — an exact history match outranks the wildcard at the same time, and
- * scalar change-points are consulted before parallel (regional) ones.
+ * the earlier of the scalar and parallel (regional) answers is taken.
  * Returns the target definition id, or null to stay.
  */
 async function computeRoute(actorId, entry, currentTick) {
@@ -422,21 +639,23 @@ async function computeRoute(actorId, entry, currentTick) {
   try {
     const currentDef  = await cachedFindDefinition(entry.definitionId);
     const logicalTime = logicalTimeOf(entry, currentDef);
-    const scope       = scopeOf(currentDef?.machineId);
     const fp          = entry.historyFingerprint;
-    let targetDefId = eng.computeAccessible(fingerprintToBigInt(fp), logicalTime, currentTick, scope);
-    if (!targetDefId && entry.regionFingerprints) {
-      const regionArr = regionFingerprintsToArray(entry.regionFingerprints);
-      if (regionArr && regionArr.length > 0) {
-        targetDefId = eng.computeAccessibleParallel(regionArr, logicalTime, currentTick, scope);
-      }
-    }
+    // Acc⁺: the earlier of the scalar and parallel answers, confirmed against the full
+    // fingerprint (routingRegistry.js).
+    const hit = routingLookup({
+      machineId: currentDef?.machineId, fp, regionFps: entry.regionFingerprints ?? null,
+      T: logicalTime, tick: currentTick,
+    });
+    let targetDefId = hit?.target ?? null;
     if (targetDefId && targetDefId !== entry.definitionId) {
       const targetDef = await cachedFindDefinition(targetDefId);
       // An engine build without scopes can answer with another workflow's change-point:
       // then ask the database for this family's (same rule).
       if (targetDef && currentDef && targetDef.machineId !== currentDef.machineId) {
-        targetDefId = await findFamilyChangepoint(entry.definitionId, fingerprintToBigInt(fp).toString(), logicalTime);
+        // (the database stores legacy keys: only legacy fingerprints can be matched there)
+        targetDefId = isLegacy(fp)
+          ? await findFamilyChangepoint(entry.definitionId, fingerprintToBigInt(fp).toString(), logicalTime)
+          : null;
       }
     }
     if (targetDefId && targetDefId !== entry.definitionId) {
@@ -508,6 +727,8 @@ async function _sendEventLocked(actorId, event, tick, opts = {}) {
   }
 
   // ── Inline migration check ─────────────────────────────────────────────────
+  // (cluster) never route on a registry older than the lease: see REGISTRY_LEASE_MS
+  await ensureRegistryLease();
   const eng = getEngine();
   let migratedTo = null;
   const fromDefId = entry.definitionId;  // capture before any migration reassigns entry
@@ -518,7 +739,7 @@ async function _sendEventLocked(actorId, event, tick, opts = {}) {
     // Route to a fixpoint before the event is processed: after migrating through an
     // earlier deployment, a later one may still apply to the same (unchanged) history.
     // Each hop strictly increases the actor's logical time, so this terminates.
-    for (let hop = 0; hop < MAX_ROUTING_HOPS; hop++) {
+    for (let hop = 0; hop < maxRoutingHops(); hop++) {
       const fp = entry.historyFingerprint;
       const cachedResult = hop === 0 ? getCachedDecision(actorId, entry.definitionId, fp, currentTick) : undefined;
       let targetDefId;
@@ -527,6 +748,12 @@ async function _sendEventLocked(actorId, event, tick, opts = {}) {
       } else {
         const epoch = registryEpoch;
         targetDefId = await computeRoute(actorId, entry, currentTick);
+        if (targetDefId === undefined) {
+          // The lookup failed: processing the event now could move the history past a
+          // pattern before the actor is routed. Refuse the unit instead (the client retries).
+          throw Object.assign(new Error('Routing lookup failed; retry shortly'),
+            { code: 'ROUTING_UNAVAILABLE', statusCode: 503 });
+        }
         // Never cache a failed lookup (undefined), nor an answer computed before the
         // registry changed.
         if (targetDefId !== undefined && epoch === registryEpoch) {
@@ -702,7 +929,9 @@ async function _sendEventLocked(actorId, event, tick, opts = {}) {
     stateValue:         interpResult.stateValue,
     context:            interpResult.context,
     historyFingerprint: interpResult.historyFingerprint,
-    regionFingerprints: entry.regionFingerprints ?? null,
+    // (The interpreter's regional fingerprints were dropped here, so in server mode they
+    //  never advanced and a historyRegions deployment could never match anyone.)
+    regionFingerprints: interpResult.regionFingerprints ?? entry.regionFingerprints ?? null,
     stateEntryId:       interpResult.stateEntryId,
     done:               interpResult.done,
   };
@@ -1124,8 +1353,10 @@ export async function migrateActorOwned(actorId, targetDefinitionId, { deploymen
     await getWriteBuffer().flush();
     // The deployment that queued this job may have been made through another server and
     // not polled here yet. Stranded actors take no events, so this may be their only
-    // chance to be routed: load every committed change-point first (throws → retried).
-    await syncChangepointsFromDb();
+    // chance to be routed: load every committed change-point first. (A sync that could
+    // not register some unrelated row still registered the others.)
+    try { await syncChangepointsFromDb(); }
+    catch (e) { if (e.code !== 'SYNC_INCOMPLETE') throw e; }
     // The job names the deployment that queued it, but the actor is routed by the same
     // rule as inline: the earliest applicable change-point at or after its logical time.
     // (An actor pinned after the deployment is not applicable; an earlier deployment it
@@ -1134,7 +1365,7 @@ export async function migrateActorOwned(actorId, targetDefinitionId, { deploymen
     try {
       let result = null;
       const tick = BigInt(getEngine().clockTick());
-      for (let hop = 0; hop < MAX_ROUTING_HOPS; hop++) {
+      for (let hop = 0; hop < maxRoutingHops(); hop++) {
         const now = hotRegistry.get(actorId) ?? await findActorById(actorId);
         const route = await computeRoute(actorId, now, tick);
         if (route === undefined) throw new Error('routing lookup failed — retry');   // job is retried
@@ -1167,38 +1398,29 @@ export async function seedEngineRegistry() {
   const eng = getEngine();
   if (eng.available) {
     const scalars = await loadChangepointsAfter(0);
-    for (const row of scalars) _lastCpId = Math.max(_lastCpId, Number(row.id));
     for (const row of scalars) {
       try {
-        eng.registerChangepoint(
-          BigInt(row.t_star),
-          BigInt(row.prefix_hash),
-          BigInt(row.refinement),
-          row.child_def_id,
-          scopeOf(row.machine_id)
-        );
+        if (row.collected_at == null) {
+          if (!row.machine_id) throw new Error('definition not visible');
+          await registerChangepointRow(row);
+        }
+        cursorMark(_cpCursor, row.id);
       } catch (e) {
+        cursorFail(_cpCursor, row.id);
         console.warn(`[actorManager] seedEngineRegistry skip ${row.child_def_id}: ${e.message}`);
       }
     }
 
     const parallels = await loadParChangepointsAfter(0);
-    for (const row of parallels) _lastParCpId = Math.max(_lastParCpId, Number(row.id));
     for (const row of parallels) {
       try {
-        const storedRegions = JSON.parse(row.region_hashes);
-        const regionArr = Array.isArray(storedRegions)
-          ? storedRegions.map(h => BigInt(`0x${String(h).padStart(16, '0')}`))
-          : regionFingerprintsToArray(storedRegions);
-        if (!regionArr || regionArr.length === 0) continue;
-        eng.registerChangepointParallel(
-          BigInt(row.t_star),
-          regionArr,
-          BigInt(row.refinement),
-          row.child_def_id,
-          scopeOf(row.machine_id)
-        );
+        if (row.collected_at == null) {
+          if (!row.machine_id) throw new Error('definition not visible');
+          await registerParChangepointRow(row);
+        }
+        cursorMark(_parCursor, row.id);
       } catch (e) {
+        cursorFail(_parCursor, row.id);
         console.warn(`[actorManager] seedEngineRegistry skip parallel ${row.child_def_id}: ${e.message}`);
       }
     }

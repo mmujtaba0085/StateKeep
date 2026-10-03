@@ -14,6 +14,7 @@ import {
   FNV64_OFFSET,
   computeHistoryFingerprint,
   updateFingerprint as updateFingerprintPure,
+  engineKey, isLegacy, isEmpty, regionKeyV2,
 } from './fingerprintChain.js';
 
 export { FNV64_OFFSET };
@@ -44,15 +45,15 @@ export function computeHash(items) {
  * `eventTypes` in sequence, starting from the '0' initial sentinel.
  * Returns a 16-char lowercase hex string (FNV-1a 64-bit).
  */
-export function computeHistoryHash(eventTypes) {
-  return computeHistoryFingerprint(eventTypes);
+export function computeHistoryHash(eventTypes, scheme = 2) {
+  return computeHistoryFingerprint(eventTypes, scheme);
 }
 
 // ── updateFingerprint — incremental, for non-worker callers ──────────────────
 
 /** Update an existing fingerprint hex string with one new event type. */
-export function updateFingerprint(currentHex, eventType) {
-  return updateFingerprintPure(currentHex, eventType);
+export function updateFingerprint(currentHex, eventType, hint = 2) {
+  return updateFingerprintPure(currentHex, eventType, hint);
 }
 
 // ── Conversion helpers ────────────────────────────────────────────────────────
@@ -83,10 +84,9 @@ export function hexToBigInt(hex) {
   return BigInt(`0x${hex.padStart(16, '0')}`);
 }
 
-/** Convert actor historyFingerprint hex to BigInt for engine calls. */
-export function fingerprintToBigInt(hex) {
-  if (!hex || hex === '0') return FNV64_OFFSET;
-  return BigInt(`0x${hex.padStart(16, '0')}`);
+/** An actor's fingerprint (either scheme, or '0') as its 64-bit engine key (never 0). */
+export function fingerprintToBigInt(fp) {
+  return engineKey(fp);
 }
 
 // ── Parallel (per-region) hash helpers ───────────────────────────────────────
@@ -95,10 +95,10 @@ export function fingerprintToBigInt(hex) {
  * Compute per-region history hashes from a map of { regionName: [eventType, ...] }.
  * Returns { regionName: hexFingerprint } using the same chain as computeHistoryHash.
  */
-export function computeRegionHashes(eventsByRegion) {
+export function computeRegionHashes(eventsByRegion, scheme = 2) {
   const result = {};
   for (const [region, events] of Object.entries(eventsByRegion).sort(([a], [b]) => a.localeCompare(b))) {
-    result[region] = computeHistoryHash(events);
+    result[region] = computeHistoryHash(events, scheme);
   }
   return result;
 }
@@ -128,9 +128,27 @@ export function encodeRegionFingerprint(regionPath, regionFingerprintHex) {
  * suitable for passing to eng.registerChangepointParallel / eng.computeAccessibleParallel.
  * Returns null if the map is empty or null.
  */
-export function regionFingerprintsToArray(regionFingerprintsHex) {
+export function regionFingerprintsToArray(regionFingerprintsHex, scheme = null) {
   if (!regionFingerprintsHex) return null;
   const entries = Object.entries(regionFingerprintsHex).sort(([a], [b]) => a.localeCompare(b));
   if (entries.length === 0) return null;
-  return entries.map(([regionPath, hex]) => hexToBigInt(encodeRegionFingerprint(regionPath, hex)));
+  // One scheme per actor: legacy if any region carries a legacy fingerprint.
+  const s = scheme ?? (entries.some(([, v]) => isLegacy(v)) ? 1 : 2);
+  return entries.map(([regionPath, fp]) => regionKeyCached(s, regionPath, fp));
+}
+
+// Region keys are pure functions of (scheme, path, fingerprint) and are recomputed at every
+// routing decision of a parallel actor: memoize them (bounded).
+const _regionKeyMemo = new Map();
+function regionKeyCached(s, regionPath, fp) {
+  const k = `${s}|${regionPath}|${fp}`;
+  let v = _regionKeyMemo.get(k);
+  if (v === undefined) {
+    v = s === 1
+      ? hexToBigInt(encodeRegionFingerprint(regionPath, isEmpty(fp) ? '0' : fp))
+      : regionKeyV2(regionPath, fp);
+    if (_regionKeyMemo.size >= 50_000) _regionKeyMemo.clear();
+    _regionKeyMemo.set(k, v);
+  }
+  return v;
 }

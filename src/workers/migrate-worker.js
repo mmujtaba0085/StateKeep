@@ -8,12 +8,10 @@ import { getDb, isPostgres } from '../registry/db.js';
 import { startHeartbeat } from './heartbeat.js';
 import { claimBatch, markDone, markFailed, resetProcessingJobs, releaseJob } from '../registry/jobRepo.js';
 import { findActorById } from '../registry/actorRepo.js';
-import { regionFingerprintsToArray } from '../ffi/hashUtils.js';
 import { incrementMigrated, incrementFailed, updateDeploymentStatus, findDeploymentById } from '../registry/deploymentRepo.js';
 import { seedEngineRegistry } from '../runtime/actorManager.js';
 import { insertMigrationNotification } from '../registry/migrationNotificationRepo.js';
 import { getEngine, engineReady, scopeOf } from '../ffi/engine.js';
-import { loadChangepointsAfter, loadParChangepointsAfter } from '../registry/changepointRepo.js';
 
 const BATCH_SIZE    = 500;
 const POLL_INTERVAL = 500;
@@ -38,47 +36,9 @@ await seedEngineRegistry();
 // Reset orphaned processing jobs from crashed runs
 await resetProcessingJobs();
 
-// Cursors for incremental changepoint sync
-let _lastChangepointId    = 0;
-let _lastParChangepointId = 0;
+// (This process does not route actors: every job is sent to the actor's owning API
+//  server, which syncs its own registry first. It therefore keeps no registry copy.)
 
-async function syncRegistry() {
-  const eng = getEngine();
-  if (!eng.available) return;
-
-  const rows = await loadChangepointsAfter(_lastChangepointId);
-  for (const row of rows) {
-    try {
-      eng.registerChangepoint(BigInt(row.t_star), BigInt(row.prefix_hash), BigInt(row.refinement), row.child_def_id, scopeOf(row.machine_id));
-      _lastChangepointId = row.id;
-    } catch (e) {
-      console.warn(`[migrate-worker] syncRegistry skip ${row.child_def_id}: ${e.message}`);
-    }
-  }
-  if (rows.length > 0) {
-    console.log(`[migrate-worker] Registry synced: +${rows.length} scalar changepoints (cursor=${_lastChangepointId})`);
-  }
-
-  const parRows = await loadParChangepointsAfter(_lastParChangepointId);
-  for (const row of parRows) {
-    try {
-      const storedRegions = JSON.parse(row.region_hashes);
-      const regionArr = Array.isArray(storedRegions)
-        ? storedRegions.map(h => BigInt(`0x${String(h).padStart(16, '0')}`))
-        : regionFingerprintsToArray(storedRegions);
-      if (!regionArr || regionArr.length === 0) { _lastParChangepointId = row.id; continue; }
-      eng.registerChangepointParallel(BigInt(row.t_star), regionArr, BigInt(row.refinement), row.child_def_id, scopeOf(row.machine_id));
-      _lastParChangepointId = row.id;
-    } catch (e) {
-      console.warn(`[migrate-worker] syncRegistry skip parallel ${row.child_def_id}: ${e.message}`);
-    }
-  }
-  if (parRows.length > 0) {
-    console.log(`[migrate-worker] Registry synced: +${parRows.length} parallel changepoints (cursor=${_lastParChangepointId})`);
-  }
-}
-
-await syncRegistry();
 
 
 async function insertDecision(actorId, deploymentId, tick, decision, reason, fromDefId, toDefId, fingerprint) {
@@ -161,7 +121,6 @@ async function processLoop() {
   while (true) {
     let hadWork = false;
     try {
-      await syncRegistry();
       const jobs = await claimBatch(BATCH_SIZE);
 
       if (jobs.length > 0) {

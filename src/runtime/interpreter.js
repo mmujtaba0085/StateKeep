@@ -6,7 +6,7 @@
 // returned as data — callers execute them after state is committed.
 
 import { randomInt }         from 'crypto';
-import { updateFingerprint } from '../ffi/fingerprintChain.js';
+import { updateFingerprint, regionSchemeHint } from '../ffi/fingerprintChain.js';
 
 // Guards against infinite always-guard cycles in user-defined machines (e.g. A→B guard, B→A guard, repeat)
 const MAX_TRANSIENT_DEPTH = 100;
@@ -363,7 +363,8 @@ function _processParallelEvent(
     );
   }
 
-  const newFingerprint = updateFingerprint(entry.historyFingerprint, event.type);
+  const fpHint = regionSchemeHint(entry.historyFingerprint, entry.regionFingerprints);
+  const newFingerprint = updateFingerprint(entry.historyFingerprint, event.type, fpHint);
   let returnRegionFingerprints = entry.regionFingerprints ? { ...entry.regionFingerprints } : undefined;
   // Update per-region fingerprints separately: APV routes each parallel region independently for migration decisions
   if (returnRegionFingerprints) {
@@ -374,7 +375,7 @@ function _processParallelEvent(
       const newKey         = regionFullKeys[fullRegionPath];
       if (newKey && newKey !== oldKey) {
         returnRegionFingerprints[fullRegionPath] = updateFingerprint(
-          returnRegionFingerprints[fullRegionPath] ?? '0', event.type
+          returnRegionFingerprints[fullRegionPath] ?? '0', event.type, fpHint
         );
       }
     }
@@ -629,7 +630,8 @@ export function processEvent(entry, compiledJson, event, registry, pendingSends 
   }
 
   // Update fingerprint
-  const newFingerprint = updateFingerprint(entry.historyFingerprint, event.type);
+  const newFingerprint = updateFingerprint(entry.historyFingerprint, event.type,
+    regionSchemeHint(entry.historyFingerprint, entry.regionFingerprints));
   // For non-parallel actors this is the final answer; parallel block below may override (Bug 3 fix).
   let isDone = compiledJson.finalStates?.includes(newStateKey) ?? false;
 

@@ -91,21 +91,23 @@ export async function getWildcardChildDef(definitionId, logicalStartTick) {
   return cp?.child_def_id ?? null;
 }
 
+/** Returns the new row's id. */
 export async function insertChangepoint({ tStar, prefixHash, refinement, childDefId }) {
   if (isPostgres) {
-    const { query } = await import('./db-postgres.js');
-    await query(
+    const { queryOne } = await import('./db-postgres.js');
+    const r = await queryOne(
       `INSERT INTO changepoints (t_star, prefix_hash, refinement, child_def_id, created_at)
-       VALUES ($1,$2,$3,$4,$5)`,
+       VALUES ($1,$2,$3,$4,$5) RETURNING id`,
       [tStar, String(prefixHash), refinement ?? 0, childDefId, NOW()]
     );
-    return;
+    return Number(r.id);
   }
   const db = getDb();
-  db.prepare(`
+  const r = db.prepare(`
     INSERT INTO changepoints (t_star, prefix_hash, refinement, child_def_id, created_at)
     VALUES (?, ?, ?, ?, ?)
   `).run(tStar, String(prefixHash), refinement ?? 0, childDefId, NOW());
+  return Number(r.lastInsertRowid);
 }
 
 export async function loadChangepoints() {
@@ -121,14 +123,14 @@ export async function loadChangepointsAfter(afterId) {
   if (isPostgres) {
     const { queryAll } = await import('./db-postgres.js');
     return queryAll(
-      `SELECT cp.id, cp.t_star, cp.prefix_hash, cp.refinement, cp.child_def_id, d.machine_id
+      `SELECT cp.id, cp.t_star, cp.prefix_hash, cp.refinement, cp.child_def_id, cp.collected_at, d.machine_id
          FROM changepoints cp LEFT JOIN definitions d ON d.id = cp.child_def_id
         WHERE cp.id>$1 ORDER BY cp.id ASC`,
       [afterId]
     );
   }
   const db = getDb();
-  return db.prepare(`SELECT cp.id, cp.t_star, cp.prefix_hash, cp.refinement, cp.child_def_id, d.machine_id
+  return db.prepare(`SELECT cp.id, cp.t_star, cp.prefix_hash, cp.refinement, cp.child_def_id, cp.collected_at, d.machine_id
     FROM changepoints cp LEFT JOIN definitions d ON d.id = cp.child_def_id
     WHERE cp.id > ? ORDER BY cp.id ASC`).all(afterId);
 }
@@ -140,26 +142,27 @@ export async function insertParChangepoint({ tStar, regionHashesHexMap, regionHa
   const payload = regionHashesHexMap ?? regionHashesHexArr;
   if (!payload) throw new Error('insertParChangepoint requires region hashes');
   if (isPostgres) {
-    const { query } = await import('./db-postgres.js');
-    await query(
+    const { queryOne } = await import('./db-postgres.js');
+    const r = await queryOne(
       `INSERT INTO par_changepoints (t_star, region_hashes, refinement, child_def_id, created_at)
-       VALUES ($1,$2,$3,$4,$5)`,
+       VALUES ($1,$2,$3,$4,$5) RETURNING id`,
       [tStar, JSON.stringify(payload), refinement ?? 0, childDefId, NOW()]
     );
-    return;
+    return Number(r.id);
   }
   const db = getDb();
-  db.prepare(`
+  const r = db.prepare(`
     INSERT INTO par_changepoints (t_star, region_hashes, refinement, child_def_id, created_at)
     VALUES (?, ?, ?, ?, ?)
   `).run(tStar, JSON.stringify(payload), refinement ?? 0, childDefId, NOW());
+  return Number(r.lastInsertRowid);
 }
 
 export async function loadParChangepointsAfter(afterId) {
   if (isPostgres) {
     const { queryAll } = await import('./db-postgres.js');
     return queryAll(
-      `SELECT cp.id, cp.t_star, cp.region_hashes, cp.refinement, cp.child_def_id, d.machine_id
+      `SELECT cp.id, cp.t_star, cp.region_hashes, cp.refinement, cp.child_def_id, cp.collected_at, d.machine_id
          FROM par_changepoints cp LEFT JOIN definitions d ON d.id = cp.child_def_id
         WHERE cp.id>$1 ORDER BY cp.id ASC`,
       [afterId]
@@ -167,8 +170,61 @@ export async function loadParChangepointsAfter(afterId) {
   }
   const db = getDb();
   return db.prepare(
-    `SELECT cp.id, cp.t_star, cp.region_hashes, cp.refinement, cp.child_def_id, d.machine_id
+    `SELECT cp.id, cp.t_star, cp.region_hashes, cp.refinement, cp.child_def_id, cp.collected_at, d.machine_id
        FROM par_changepoints cp LEFT JOIN definitions d ON d.id = cp.child_def_id
       WHERE cp.id > ? ORDER BY cp.id ASC`
   ).all(afterId);
+}
+
+// ── Collection frontier ──────────────────────────────────────────────────────
+
+/**
+ * Per workflow family, the collection frontier Φ: the smallest logical time any actor
+ * of the family that can still be routed may have — every actor that is not terminated
+ * (active, stranded, archived: an archived actor can be restored) — and never more than
+ * one past the family's newest deployment (new actors start there). A change-point at
+ * t* < Φ can never apply again. Returns [{ machineId, frontier }].
+ */
+export async function familyFrontiers() {
+  const actorsSql = `SELECT d.machine_id AS m,
+      MIN(CASE WHEN a.logical_start_tick > d.deployed_at THEN a.logical_start_tick ELSE d.deployed_at + 1 END) AS phi
+    FROM actors a JOIN definitions d ON d.id = a.definition_id
+    WHERE a.status <> 'terminated' AND d.machine_id IS NOT NULL GROUP BY d.machine_id`;
+  const defsSql = `SELECT machine_id AS m, MAX(deployed_at) + 1 AS phi FROM definitions
+    WHERE machine_id IS NOT NULL GROUP BY machine_id`;
+  // Deployment times FIRST, then actors: an actor spawned in between was dated (under the
+  // family lock) no earlier than the deployments already read, so the frontier cannot
+  // pass it; a deployment committed in between is later than the frontier.
+  let a, d;
+  if (isPostgres) {
+    const { queryAll } = await import('./db-postgres.js');
+    d = await queryAll(defsSql);
+    a = await queryAll(actorsSql);
+  } else {
+    const db = getDb();
+    d = db.prepare(defsSql).all(); a = db.prepare(actorsSql).all();
+  }
+  const byActors = new Map(a.map((r) => [r.m, Number(r.phi)]));
+  return d.map((r) => ({
+    machineId: r.m,
+    frontier: Math.min(Number(r.phi), byActors.get(r.m) ?? Infinity),
+  }));
+}
+
+/** Mark the family's change-points below the frontier collected. Returns the count. */
+export async function markCollected(machineId, frontier) {
+  const now = NOW();
+  let n = 0;
+  for (const t of ['changepoints', 'par_changepoints']) {
+    const sql = `UPDATE ${t} SET collected_at = $1 WHERE collected_at IS NULL AND t_star < $2
+      AND child_def_id IN (SELECT id FROM definitions WHERE machine_id = $3)`;
+    if (isPostgres) {
+      const { query } = await import('./db-postgres.js');
+      const r = await query(sql, [now, frontier, machineId]);
+      n += r.rowCount ?? 0;
+    } else {
+      n += getDb().prepare(sql.replace(/\$\d+/g, '?')).run(now, frontier, machineId).changes;
+    }
+  }
+  return n;
 }

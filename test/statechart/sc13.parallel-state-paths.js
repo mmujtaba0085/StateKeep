@@ -237,7 +237,10 @@ describe('SC13-P5: keyed region hashing', () => {
     const shipping = regionFingerprintsToArray({ 'active.shipping': raw })[0];
 
     assert.notEqual(payment, shipping);
-    assert.equal(payment, BigInt(`0x${encodeRegionFingerprint('active.payment', raw)}`));
+    // legacy (v1) fingerprints keep the v1 region key
+    const raw1 = computeHistoryHash(['PAY'], 1);
+    assert.equal(regionFingerprintsToArray({ 'active.payment': raw1 })[0],
+      BigInt(`0x${encodeRegionFingerprint('active.payment', raw1)}`));
   });
 });
 

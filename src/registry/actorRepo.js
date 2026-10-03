@@ -616,3 +616,14 @@ export async function countActiveActors() {
     SELECT COUNT(*) as cnt FROM actors WHERE status = 'active'
   `).get()?.cnt ?? 0;
 }
+
+/** Versions of a family that host an actor that is not terminated (archived included). */
+export async function findVersionsHostingActors(machineId) {
+  const sql = `SELECT DISTINCT a.definition_id AS d FROM actors a JOIN definitions d ON a.definition_id = d.id
+    WHERE d.machine_id = $1 AND a.status <> 'terminated'`;
+  if (isPostgres) {
+    const { queryAll } = await import('./db-postgres.js');
+    return (await queryAll(sql, [machineId])).map((r) => r.d);
+  }
+  return getDb().prepare(sql.replace('$1', '?')).all(machineId).map((r) => r.d);
+}

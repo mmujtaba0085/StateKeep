@@ -64,6 +64,32 @@ import { insertChangepoint, insertParChangepoint } from '../../registry/changepo
 import { normalizeHistoryRegions } from '../../runtime/statePaths.js';
 import { getWriteBuffer } from '../../runtime/writeBuffer.js';
 import { isSafeContextPath } from '../../runtime/actorWorker.js';
+import { registerScalar, registerParallel, normalizeHistoryPath } from '../../runtime/routingRegistry.js';
+import { predictRouting, lateMatcherRisk } from '../../runtime/deployAnalysis.js';
+import { fingerprintMatchesPath } from '../../ffi/fingerprintChain.js';
+import {
+  routeTargetFor, markChangepointRowRegistered, syncChangepointsFromDb,
+} from '../../runtime/actorManager.js';
+import { publishRegistryChange, awaitRegistryBarrier } from '../../cluster/cluster.js';
+
+// A placeholder time later than every registered change-point: the candidate deployment
+// is always the family's newest.
+const CANDIDATE_T = 9_007_199_254_740_000n;
+
+/** Group predicted strandings for the confirmation preview. */
+function strandedGroupsOf(analysis, scopeCount) {
+  const groups = new Map();
+  for (const s of analysis.stranded) {
+    const key = `${s.atVersion}|${typeof s.state === 'string' ? s.state : JSON.stringify(s.state)}`;
+    const g = groups.get(key) ?? { state: typeof s.state === 'string' ? s.state : JSON.stringify(s.state),
+      atVersion: s.atVersion, reason: s.reason, count: 0, actorIds: [] };
+    g.count++; g.actorIds.push(s.actorId);
+    groups.set(key, g);
+  }
+  const out = [...groups.values()];
+  out.scope = scopeCount;
+  return out;
+}
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -103,7 +129,7 @@ async function evaluateMigrationCandidates(machineId, eng, currentTick, { prefix
     } else if (prefixHash === null) {
       migrates = true;
     } else {
-      try { migrates = fingerprintToBigInt(actor.historyFingerprint) === prefixHash; }
+      try { migrates = fingerprintMatchesPath(actor.historyFingerprint, prefixHash); }
       catch { migrates = false; }
     }
     const entry = { actorId: actor.id, currentState: actor.stateValue, definitionId: actor.definitionId };
@@ -139,14 +165,22 @@ export async function definitionRoutes(fastify) {
           confirmToken: { type: 'string' },
           historyPath:  {
             type:        'array',
-            items:       { type: 'string', minLength: 1 },
+            items:       {
+              anyOf: [
+                { type: 'string', minLength: 1 },
+                { type: 'object', required: ['after', 'ms'],
+                  properties: { after: { type: 'string', minLength: 1 }, ms: { type: 'integer', minimum: 0 } },
+                  additionalProperties: false },
+              ],
+            },
             description: 'Ordered list of event types that an actor must have processed ' +
-                         'to be eligible for this deployment. Absent or empty = wildcard (all actors).',
+                         'to be eligible for this deployment. Absent or empty = wildcard (all actors). ' +
+                         'A delayed (after:) transition is written { "after": "<state path>", "ms": <delay> }.',
           },
           stateMapping: {
             type:        'object',
-            description: 'Maps old state names to new state names for actors that migrate. ' +
-                         'Keys are old state names, values are new state names.',
+            description: 'Maps old states to new states for actors that migrate. Keys and values are ' +
+                         'state paths ("review" or "shipping.packing"); the longest matching key wins.',
             additionalProperties: { type: 'string' },
           },
           historyRegions: {
@@ -154,14 +188,26 @@ export async function definitionRoutes(fastify) {
             description: 'Parallel region fingerprint selectors. Keys are region names, values are ' +
                          'ordered event-type arrays. All regions must match (AND composition). ' +
                          'Targets actors on parallel XState machines. Mutually exclusive with historyPath.',
-            additionalProperties: { type: 'array', items: { type: 'string' } },
+            additionalProperties: { type: 'array', items: {
+              anyOf: [
+                { type: 'string' },
+                { type: 'object', required: ['after', 'ms'],
+                  properties: { after: { type: 'string' }, ms: { type: 'integer', minimum: 0 } },
+                  additionalProperties: false },
+              ],
+            } },
           },
           contextTransform: {
             type:        'object',
-            description: 'Maps new context field paths to old field paths using dot-notation. ' +
-                         'New fields are added; old fields are preserved (additive). ' +
-                         'Example: { "payment.verified": "feePaid" }',
-            additionalProperties: { type: 'string' },
+            description: 'New context field paths (dot-notation) and where their value comes from: ' +
+                         'an old path ("feePaid"), a constant ({ "value": 0 }) or an old path with a ' +
+                         'default ({ "from": "fee", "default": 0 }). Old fields are preserved (additive).',
+            additionalProperties: {
+              anyOf: [
+                { type: 'string' },
+                { type: 'object', properties: { value: {}, from: { type: 'string' }, default: {} }, additionalProperties: false },
+              ],
+            },
           },
         },
       },
@@ -176,7 +222,12 @@ export async function definitionRoutes(fastify) {
   });
 
   async function deployDefinitionHandler(request, reply) {
-    const { id, parentId, definition, refinement = 1, confirmToken, historyPath, stateMapping, historyRegions, contextTransform } = request.body;
+    const { id, parentId, definition, refinement = 1, confirmToken, stateMapping, contextTransform } = request.body;
+    // A delayed transition may be written { after: 'state.path', ms } in a history pattern.
+    const historyPath    = normalizeHistoryPath(request.body.historyPath);
+    const historyRegions = request.body.historyRegions && typeof request.body.historyRegions === 'object'
+      ? Object.fromEntries(Object.entries(request.body.historyRegions).map(([k, v]) => [k, normalizeHistoryPath(v)]))
+      : request.body.historyRegions;
     const isDryRun          = request.query?.dryRun === 'true';
     const eng               = getEngine();
     const hasHistoryPath    = Array.isArray(historyPath) && historyPath.length > 0;
@@ -240,7 +291,17 @@ export async function definitionRoutes(fastify) {
 
       // Strip internal _ fields from stored JSON before comparing definition content
       const storedDefClean  = Object.fromEntries(Object.entries(existing.definitionJson).filter(([k]) => !k.startsWith('_')));
-      const definitionChanged = JSON.stringify(definition) !== JSON.stringify(storedDefClean);
+      // (_sourceHash: the stored JSON can be rewritten by compilation, e.g. after: timers)
+      // Rows written before _sourceHash existed may hold the compiled form (after: timers
+      // rewritten); compare against that too before calling the definition changed.
+      const stripInternal = (o) => Object.fromEntries(Object.entries(o ?? {}).filter(([k]) => !k.startsWith('_')));
+      const sameAsCompiled = () => {
+        try { return JSON.stringify(stripInternal(compileMachine(definition).runtimeDef)) === JSON.stringify(storedDefClean); }
+        catch { return false; }
+      };
+      const definitionChanged = existing.definitionJson._sourceHash
+        ? existing.definitionJson._sourceHash !== hashDefinition(definition)
+        : JSON.stringify(definition) !== JSON.stringify(storedDefClean) && !sameAsCompiled();
 
       if (historyChanged) {
         return reply.code(409).send({
@@ -252,8 +313,19 @@ export async function definitionRoutes(fastify) {
         });
       }
 
-      // stateMapping or definition content changed → treat as a new refinement (fall through to deploy)
-      if (!mappingChanged && !definitionChanged) {
+      // Versions are immutable. Editing one in place changed the behaviour of actors
+      // already on it without a migration (and outside every guarantee of the routing
+      // model). A changed definition, state mapping or context transform is a new version.
+      const transformChanged = JSON.stringify(contextTransform && Object.keys(contextTransform).length ? contextTransform : null) !==
+                               JSON.stringify(existing.definitionJson._contextTransform ?? null);
+      if (mappingChanged || definitionChanged || transformChanged) {
+        return reply.code(409).send({
+          error: `Definition ${id} already exists and versions are immutable. Deploy the change under a new version ID ` +
+                 `(with parentId '${id}' to move its actors).`,
+          code:  'VERSION_IMMUTABLE',
+        });
+      }
+      {
         return reply.code(200).send({
           id,
           parentId:        existing.parentId,
@@ -281,11 +353,15 @@ export async function definitionRoutes(fastify) {
     // that could reach Object.prototype ('__proto__', 'constructor', 'prototype').
     if (contextTransform !== undefined && contextTransform !== null) {
       if (typeof contextTransform !== 'object' || Array.isArray(contextTransform)) {
-        return reply.code(400).send({ error: 'contextTransform must be an object of { "new.path": "old.path" }' });
+        return reply.code(400).send({ error: 'contextTransform must be an object of { "new.path": "old.path" | { value } | { from, default } }' });
       }
-      for (const [to, from] of Object.entries(contextTransform)) {
-        if (!isSafeContextPath(to) || !isSafeContextPath(from)) {
-          return reply.code(400).send({ error: `contextTransform path not allowed: '${to}' ← '${from}'`, code: 'UNSAFE_CONTEXT_PATH' });
+      for (const [to, spec] of Object.entries(contextTransform)) {
+        const from = typeof spec === 'string' ? spec
+          : (spec && typeof spec === 'object' && !Array.isArray(spec) && typeof spec.from === 'string') ? spec.from : null;
+        const constant = spec && typeof spec === 'object' && !Array.isArray(spec) &&
+          (Object.prototype.hasOwnProperty.call(spec, 'value') || Object.prototype.hasOwnProperty.call(spec, 'default'));
+        if (!isSafeContextPath(to) || (from !== null && !isSafeContextPath(from)) || (from === null && !constant)) {
+          return reply.code(400).send({ error: `contextTransform entry not allowed: '${to}'`, code: 'UNSAFE_CONTEXT_PATH' });
         }
       }
     }
@@ -305,13 +381,6 @@ export async function definitionRoutes(fastify) {
       }
     }
 
-    // Actors in states that are KEYS of stateMapping have a forward migration path
-    // and must not be considered stranded. Compute this once for all stranded checks.
-    const newStateNames = Object.keys(definition.states ?? {});
-    const effectiveValidStates = stateMapping && Object.keys(stateMapping).length > 0
-      ? [...new Set([...newStateNames, ...Object.keys(stateMapping)])]
-      : newStateNames;
-
     // Resolve machineId for the full family scope (used in both dryRun and live paths)
     let machineId = id;
     if (parentId) {
@@ -319,155 +388,109 @@ export async function definitionRoutes(fastify) {
       machineId = parentDef?.machineId ?? parentId;
     }
 
-    // Stranded check must cover exactly the actors this deploy will move (whole family
-    // for wildcard, fingerprint matches for historyPath). historyRegions keeps the old
-    // parent-only check (per-region matching is not reproducible here).
-    const strandedFor = (validStates) => hasHistoryRegions
-      ? findStrandedActors(parentId, validStates)
-      : findStrandedActorsForDeploy(machineId, validStates, hasHistoryPath ? computeHistoryHash(historyPath) : null);
+    // The stored version: the definition plus its routing and migration metadata.
+    const hasContextTransform = contextTransform && typeof contextTransform === 'object' &&
+                               Object.keys(contextTransform).length > 0;
+    const definitionToStore = {
+      ...definition,
+      _sourceHash: hashDefinition(definition),
+      ...(stateMapping && Object.keys(stateMapping).length > 0 ? { _stateMapping: stateMapping } : {}),
+      _historyPath: hasHistoryPath ? historyPath : null,
+      _historyRegions: normalizedHistoryRegions,
+      ...(hasContextTransform ? { _contextTransform: contextTransform } : {}),
+    };
+
+    // ── What this deployment will do (deployAnalysis.js) ─────────────────────
+    // Every routable actor of the family is routed, by the real rule and the real
+    // mappings, through the family's pending deployments plus this one. Stranded
+    // predictions ask for confirmation; late-matcher risks are reported as warnings.
+    let analysis = null, lateRisk = [], familyActors = [];
+    const analyse = async () => {
+      if (!parentId) return;
+      await getWriteBuffer().flush();                  // the latest actor states
+      try { await syncChangepointsFromDb(); } catch {}  // deployments made through other servers
+      familyActors = await findActorsByMachine(machineId);
+      const candidate = {
+        id, kind: hasHistoryRegions ? 'p' : 's', t: CANDIDATE_T,
+        pattern: hasHistoryPath ? historyPath : null,
+        historyRegions: normalizedHistoryRegions, definitionJson: definitionToStore,
+      };
+      const getDef = (defId) => findDefinitionById(defId);
+      analysis = await predictRouting({ machineId, actors: familyActors, getDef, candidate });
+      lateRisk = await lateMatcherRisk({ machineId, actors: familyActors, getDef, candidate });
+    };
+    const strandedNow = () => strandedGroupsOf(analysis ?? { stranded: [] }, familyActors.length);
+    const lateWarnings = () => lateRisk.length === 0 ? [] : [{
+      code: 'LATE_MATCHER_RISK',
+      message: 'Actors that reach this history later could be in states this version cannot place ' +
+               '(they would be stranded then): ' +
+               lateRisk.map((r) => `${r.version}: ${[...r.states, ...(r.conflictingPairs ?? []).map((p) => p.join(' + '))].join(', ')}`).join('; ') +
+               '. Add stateMapping entries for these states to rule it out.',
+      versions: lateRisk,
+    }];
 
     // ── dryRun: evaluate without writing anything ──────────────────────────────
     if (isDryRun) {
-      const dryRunTick = eng.clockTick();
-      let migration = { eligible: 0, wouldMigrate: [], wouldStay: [], engineAvailable: eng.available };
-
-      if (parentId && eng.available) {
-        const candidates = await evaluateMigrationCandidates(machineId, eng, dryRunTick, {
-          prefixHash:        hasHistoryPath ? fingerprintToBigInt(computeHistoryHash(historyPath)) : null,
-          hasHistoryRegions: !!hasHistoryRegions,
-        });
-        migration = { ...candidates, engineAvailable: true };
-      } else if (parentId) {
-        const dryActors = await findActorsByMachine(machineId);
-        migration = {
-          eligible:        dryActors.length,
-          wouldMigrate:    [],
-          wouldStay:       dryActors.map(a => ({ actorId: a.id, currentState: a.stateValue, definitionId: a.definitionId, reason: 'engine_unavailable' })),
-          engineAvailable: false,
-          note:            'APV engine unavailable — build WASM with `make wasm -C src/ffi` or set STATEKEEP_ENGINE_PATH.',
-        };
-      }
-
-      // Compute stranded actors for the dryRun preview
-      let dryStrandedActors = [];
-      if (parentId) {
-        const strandedGroups = await strandedFor(effectiveValidStates);
-        dryStrandedActors    = strandedGroups.map(g => ({ currentState: g.state, count: g.count }));
-      }
-
-      const wouldDeploy = dryStrandedActors.length === 0;
+      await analyse();
+      const dryStrandedActors = strandedNow().map(g => ({ currentState: g.state, atVersion: g.atVersion, count: g.count }));
+      const migration = {
+        eligible:     familyActors.length,
+        wouldMigrate: (analysis?.moves ?? []).map((m) => ({ actorId: m.actorId, hops: m.hops })),
+        wouldStay:    (analysis?.stays ?? []).map((m) => ({ actorId: m.actorId, hops: m.hops, reason: 'not_routed_through_this_version' })),
+        engineAvailable: eng.available,
+      };
       return reply.code(200).send({
         dryRun:         true,
         valid:          true,
-        warnings,
-        wouldDeploy,
+        warnings:       [...warnings, ...lateWarnings()],
+        wouldDeploy:    dryStrandedActors.length === 0,
         strandedActors: dryStrandedActors,
         migration,
       });
     }
 
     // ── Step 2: Stranded-actor check (only when parentId is supplied) ────────
-    // Flush deferred writes so the DB reflects the latest actor states before
-    // we query for stranded actors (avoids false-negative when a recent event
-    // hasn't been written yet by the 50ms write-buffer timer).
-    if (parentId) await getWriteBuffer().flush();
-
+    await analyse();
+    warnings.push(...lateWarnings());
+    let predictedStranded = [];
     if (parentId) {
-      const strandedGroups = await strandedFor(effectiveValidStates);
+      const strandedGroups = strandedNow();
       const totalStranded  = strandedGroups.reduce((s, g) => s + g.count, 0);
+      predictedStranded = strandedGroups.flatMap((g) => g.actorIds);
 
       if (totalStranded > 0) {
-        // ── Confirm path ────────────────────────────────────────────────────
+        const preview = (extra = {}) => ({
+          status:         'requires_confirmation',
+          strandedActors: strandedGroups.map(g => ({ currentState: g.state, atVersion: g.atVersion, reason: g.reason, count: g.count })),
+          safeActors:     familyActors.length - totalStranded,
+          warnings,
+          message:
+            `${totalStranded} actor(s) could not be placed in a version they would be routed to ` +
+            `(${strandedGroups.map(g => `"${g.state}" at ${g.atVersion} ×${g.count}`).join(', ')}). ` +
+            `They will be stranded (needs_rescue) and stop accepting events until a rescue ` +
+            `deployment provides a forward path. Re-submit this request with the confirmToken ` +
+            `field to proceed, or add stateMapping entries for these states.`,
+          ...extra,
+        });
         if (confirmToken) {
           const result = consumeToken(confirmToken, { definitionId: id, currentStrandedCount: totalStranded });
           if (!result.ok) {
-            // Re-issue a fresh preview if the token expired or state drifted
             if (result.newPreviewNeeded) {
-              const fresh = issueToken({
-                definitionId:  id,
-                parentId,
-                definitionHash: hashDefinition(definition),
-                strandedGroups,
-                totalStranded,
-              });
-              return reply.code(200).send({
-                status:        'requires_confirmation',
-                reason:        result.reason,
-                strandedActors: strandedGroups.map(g => ({ currentState: g.state, count: g.count })),
-                safeActors:    (strandedGroups.scope ?? (await findActorsByDefinition(parentId)).length) - totalStranded,
-                confirmToken:  fresh.token,
-                expiresIn:     fresh.expiresIn,
-                message:       `${totalStranded} actor(s) will be tagged needs_rescue. Include confirmToken to proceed.`,
-              });
+              const fresh = issueToken({ definitionId: id, parentId, definitionHash: hashDefinition(definition), strandedGroups, totalStranded });
+              return reply.code(200).send(preview({ reason: result.reason, confirmToken: fresh.token, expiresIn: fresh.expiresIn }));
             }
             return reply.code(400).send({ error: result.reason });
           }
-          // Token valid — fall through to storage, will tag stranded actors after write
+          // Token valid — fall through to storage
         } else {
-          // ── First PUT — no token yet: return preview ─────────────────────
-          const safeActors = (strandedGroups.scope ?? (await findActorsByDefinition(parentId)).length) - totalStranded;
-          const issued = issueToken({
-            definitionId:  id,
-            parentId,
-            definitionHash: hashDefinition(definition),
-            strandedGroups,
-            totalStranded,
-          });
-          return reply.code(200).send({
-            status:        'requires_confirmation',
-            strandedActors: strandedGroups.map(g => ({
-              currentState: g.state,
-              count:        g.count,
-            })),
-            safeActors,
-            confirmToken:  issued.token,
-            expiresIn:     issued.expiresIn,
-            warnings,       // include any machine warnings in the preview too
-            message:
-              `${totalStranded} actor(s) are in states that do not exist in the new definition ` +
-              `(${strandedGroups.map(g => `"${g.state}" ×${g.count}`).join(', ')}). ` +
-              `These actors will be tagged needs_rescue and will stop accepting events until a rescue ` +
-              `deployment provides a forward path. ` +
-              `Re-submit this request with the confirmToken field to proceed, ` +
-              `or fix the definition to include the missing states.`,
-          });
+          const issued = issueToken({ definitionId: id, parentId, definitionHash: hashDefinition(definition), strandedGroups, totalStranded });
+          return reply.code(200).send(preview({ confirmToken: issued.token, expiresIn: issued.expiresIn }));
         }
       }
     }
 
     // ── Step 3: Store definition ─────────────────────────────────────────────
     let tStar = await nextDeployTick(eng);   // unique across API servers (Postgres)
-
-    // prefix_hash answers: "which actors are eligible for this deployment?"
-    //
-    //   No historyPath (absent or empty array):
-    //     0n = wildcard — all actors on the parent definition are eligible.
-    //     The engine routes every actor to this child regardless of history.
-    //
-    //   historyPath provided (e.g. ['START', 'SUBMIT_INFO', 'PAY_FEE']):
-    //     prefix_hash = the fingerprint an actor would have after processing
-    //     exactly those events in that order.  Only actors whose history
-    //     contains this prefix are eligible; others stay on the parent.
-    //
-    // The hash must be computed with computeHistoryHash (not computeHash) so
-    // it mirrors exactly what actorWorker.updateFingerprint produces —
-    // starting from FNV_OFFSET, chaining fnv1aUpdate per event, no per-step
-    // fnv1aFinal.
-    const prefixHash = hasHistoryPath
-      ? fingerprintToBigInt(computeHistoryHash(historyPath))
-      : 0n;
-
-    // Embed _stateMapping and _historyPath in the stored JSON so they survive
-    // across restarts and can be compared in the idempotency check on re-deploy.
-    const hasContextTransform = contextTransform && typeof contextTransform === 'object' &&
-                               Object.keys(contextTransform).length > 0;
-    const definitionToStore = {
-      ...definition,
-      ...(stateMapping && Object.keys(stateMapping).length > 0 ? { _stateMapping: stateMapping } : {}),
-      _historyPath: hasHistoryPath ? historyPath : null,
-      _historyRegions: normalizedHistoryRegions,
-      ...(hasContextTransform ? { _contextTransform: contextTransform } : {}),
-    };
 
     // ── Pre-deploy registry validation ────────────────────────────────────────
     // Compile the definition before storing it. If any guard or action name
@@ -510,27 +533,18 @@ export async function definitionRoutes(fastify) {
       }
     }
 
-    // Refinement path: definition already exists but stateMapping changed.
-    // Re-use the original t_star (deployedAt) so the changepoint location stays the same;
-    // the engine updates r_max on the existing entry when we re-register below.
-    const isRefinement = existing != null;
-    if (isRefinement) {
-      tStar = BigInt(existing.deployedAt);
-      await updateDefinitionJson(id, definitionToStore);
-    } else {
-      try {
-        await createDefinition({
-          id,
-          parentId:       parentId ?? null,
-          definitionJson: definitionToStore,
-          deployedAt:     Number(tStar),
-        });
-      } catch (err) {
-        if (err.message?.includes('UNIQUE')) {
-          return reply.code(200).send({ id, idempotent: true });
-        }
-        throw err;
+    try {
+      await createDefinition({
+        id,
+        parentId:       parentId ?? null,
+        definitionJson: definitionToStore,
+        deployedAt:     Number(tStar),
+      });
+    } catch (err) {
+      if (err.message?.includes('UNIQUE') || err.code === '23505') {
+        return reply.code(200).send({ id, idempotent: true });
       }
+      throw err;
     }
 
     // Save compiled form — reuse the pre-compiled result from registry validation
@@ -539,37 +553,35 @@ export async function definitionRoutes(fastify) {
     const { runtimeDef, ...compiledForm } = _precompiledResult ?? compileMachine(definitionToStore);
     await updateCompiledJson(id, compiledForm);
     if (Object.keys(compiledForm.afterTransitions).length > 0) {
-      await updateDefinitionJson(id, runtimeDef);
+      await updateDefinitionJson(id, { ...runtimeDef, _sourceHash: definitionToStore._sourceHash });
     }
+    try { invalidateDefinitionCache(id); } catch {}
 
+    // ── Register the change-point (routingRegistry.js: both fingerprint schemes) ──
+    let cpRow = { cp: 0, par: 0 };
     if (hasHistoryRegions) {
-      // Parallel changepoint: register per-region hashes with the engine.
-      // We do NOT insert into the scalar changepoints table — prefixHash would
-      // be 0n (wildcard), routing every actor to this definition on restart.
-      const regionHexMap   = computeRegionHashes(normalizedHistoryRegions);
-      const regionArr      = regionFingerprintsToArray(regionHexMap);
-      if (regionArr && regionArr.length > 0) {
-        // Engine call first: need its return code to reject ambiguous selectors (-2).
-        // If insertParChangepoint then fails, the in-memory engine entry is already
-        // registered, but on next restart the DB re-seeds the engine from the DB
-        // changepointpar table — so divergence is limited to the current process lifetime.
-        const rc = eng.registerChangepointParallel(tStar, regionArr, BigInt(refinement), id, scopeOf(machineId));
-        if (rc === -2) {
-          // Engine rejected this selector as ambiguous (the registration rule for parallel selectors, docs/apv.md).
-          // The definition row was already written to DB; without a matching changepoint
-          // it is inert — no actors will be migrated to it. Deploy under a different
-          // version ID or adjust the selector to resolve the conflict.
-          return reply.code(409).send({
-            error: 'Ambiguous deployment: this historyRegions selector conflicts with an existing changepoint at the same deployment tick. Ensure selectors are pairwise incompatible or add a larger selector covering their union.',
-          });
-        }
-        await insertParChangepoint({ tStar: Number(tStar), regionHashesHexMap: regionHexMap, refinement, childDefId: id });
+      // Engine first: its return code rejects ambiguous selectors (-2). The definition row
+      // then exists without a change-point, which makes it inert (nobody is routed to it).
+      const rc = registerParallel({
+        tStar, refinement, childDefId: id, machineId, historyRegions: normalizedHistoryRegions,
+      });
+      if (rc === -2) {
+        return reply.code(409).send({
+          error: 'Ambiguous deployment: this historyRegions selector conflicts with an existing changepoint at the same deployment tick. Ensure selectors are pairwise incompatible or add a larger selector covering their union.',
+        });
       }
+      const regionHexMap = computeRegionHashes(normalizedHistoryRegions, 1);   // legacy column format
+      const rowId = await insertParChangepoint({ tStar: Number(tStar), regionHashesHexMap: regionHexMap, refinement, childDefId: id });
+      markChangepointRowRegistered('par', rowId);
+      cpRow.par = rowId;
     } else {
-      // DB first so that if the engine call below throws, the changepoint is already
-      // persisted and will be re-loaded into the engine on next server restart.
-      await insertChangepoint({ tStar: Number(tStar), prefixHash: prefixHash.toString(), refinement, childDefId: id });
-      eng.registerChangepoint(tStar, prefixHash, BigInt(refinement), id, scopeOf(machineId));
+      // The persisted key is the legacy (v1) one, or '0' for the wildcard; the v2 key is
+      // derived from the stored historyPath whenever the row is registered.
+      const storedPrefix = hasHistoryPath ? fingerprintToBigInt(computeHistoryHash(historyPath, 1)).toString() : '0';
+      const rowId = await insertChangepoint({ tStar: Number(tStar), prefixHash: storedPrefix, refinement, childDefId: id });
+      registerScalar({ tStar, storedPrefix, refinement, childDefId: id, machineId, historyPath: hasHistoryPath ? historyPath : null });
+      markChangepointRowRegistered('cp', rowId);
+      cpRow.cp = rowId;
     }
 
     // Invalidate inline migration + definition cache for the parent definition
@@ -577,19 +589,23 @@ export async function definitionRoutes(fastify) {
       try { invalidateMigrationCacheForDefinition(parentId); } catch {}
       try { invalidateDefinitionCache(parentId); } catch {}
     }
-    // Invalidate cache for the newly deployed definition (fresh writes must be readable immediately)
-    try { invalidateDefinitionCache(id); } catch {}
 
-    // ── Step 4: Tag stranded actors needs_rescue (only reached after confirm) ─
+    // ── Visibility barrier (cluster) ────────────────────────────────────────
+    // The deployment is committed once every live server has registered it, or once the
+    // registry lease has run out (a server that has not synced by then stops routing).
+    await publishRegistryChange();
+    const barrier = await awaitRegistryBarrier(cpRow);
+    if (barrier.leaseExpired && barrier.pending.length) {
+      request.log.warn(`[definitions] ${id}: servers ${barrier.pending.join(', ')} did not acknowledge within the registry lease; they are fenced until they sync`);
+    }
+
+    // ── Step 4: Strand the actors predicted to be stranded (only after confirm) ──
+    // Through the routing itself, on the owning server under the actor's lock (the
+    // internal route is forwarded to the owner in cluster mode): it routes to a fixpoint
+    // and strands exactly where a mapping is missing.
     let strandedTagged = 0;
     if (parentId && confirmToken) {
-      const strandedGroups   = await strandedFor(effectiveValidStates);
-      const strandedActorIds = strandedGroups.flatMap(g => g.actorIds);
-      // Strand them through the routing itself, on the owning server under the actor's
-      // lock (the internal route is forwarded to the owner in cluster mode). A tag written
-      // from here raced with the owner's in-flight events, and the name-based check can
-      // report actors that a chain of pending deployments would in fact map.
-      for (const actorId of strandedActorIds) {
+      for (const actorId of predictedStranded) {
         const r = await fastify.inject({
           method: 'POST', url: `/v1/internal/actors/${encodeURIComponent(actorId)}/migrate`,
           payload: { targetDefinitionId: id },
@@ -601,68 +617,33 @@ export async function definitionRoutes(fastify) {
       if (strandedTagged > 0) request.log.info(`[definitions] ${strandedTagged} actors stranded (needs_rescue) by deploying ${id}`);
     }
 
-    // ── Step 5: Enqueue migration jobs for safe actors ───────────────────────
+    // ── Step 5: Enqueue background routing for every actor with a pending route ──
+    // (Liveness: stranded actors take no events, so this is how a rescue reaches them.)
     let deploymentId  = null;
     let affectedCount = 0;
 
     if (parentId) {
-      const currentTick = eng.clockTick();
-      // Migrate all active actors across the full machine family (all versions)
       const actors = await findActorsByMachine(machineId);
-
       if (actors.length > 0) {
-        // Build the job list: only actors whose fingerprint matches the scalar
-        // historyPath or parallel historyRegions selector. Wildcard deployments
-        // enqueue every active actor in the machine family.
-        // Limiting the count prevents checkDeploymentComplete from getting stuck when
-        // actors don't match and are never migrated.
         const pendingJobs = [];
-
-        if (!hasHistoryTarget) {
-          // Wildcard deploy: C engine treats prefix_hash=0 as exact match against empty
-          // fingerprint, not as "match all".  Bypass the engine and enqueue every active
-          // actor on the machine directly.
-          for (const actor of actors) {
-            pendingJobs.push({ actor_id: actor.id, target_def_id: id });
+        for (const actor of actors) {
+          let targetDefId = null;
+          try { targetDefId = await routeTargetFor(actor); }
+          catch (e) { request.log.warn(`[definitions] routing lookup failed for ${actor.id}: ${e.message}`); }
+          // A failed lookup still queues the job: its owner routes it by the rule, and the
+          // job is skipped if nothing applies (liveness must not depend on this lookup).
+          if (targetDefId === null && actor.status === 'needs_rescue') targetDefId = id;
+          if (targetDefId && targetDefId !== actor.definitionId) {
+            pendingJobs.push({ actor_id: actor.id, target_def_id: targetDefId });
           }
-          const wildcardThreshold = parseInt(process.env.STATEKEEP_WILDCARD_WARN_THRESHOLD ?? '10000', 10);
-          if (pendingJobs.length > wildcardThreshold) {
-            warnings.push({
-              code:    'LARGE_WILDCARD_DEPLOY',
-              message: `Wildcard deployment will migrate ${pendingJobs.length} actors (threshold: ${wildcardThreshold}). ` +
-                       `This may take several minutes. Use historyPath or historyRegions to target a subset of actors.`,
-            });
-          }
-        } else {
-          for (const actor of actors) {
-            let targetDefId = null;
-            try {
-              const actorPrefixHash   = fingerprintToBigInt(actor.historyFingerprint);
-              const actorCurrentDef   = await findDefinitionById(actor.definitionId);
-              const currentDeployedAt = actorCurrentDef?.deployedAt ?? 0;
-              const logicalStartTick  = actor.logicalStartTick ?? 0;
-
-              const logicalTime = BigInt(Math.max(Number(logicalStartTick), Number(currentDeployedAt) + 1));
-
-              targetDefId = eng.computeAccessible(actorPrefixHash, logicalTime, currentTick, scopeOf(machineId));
-
-              // Parallel path: check per-region fingerprints when scalar found nothing
-              if (!targetDefId && actor.regionFingerprints) {
-                const regionArr = regionFingerprintsToArray(actor.regionFingerprints);
-                if (regionArr && regionArr.length > 0) {
-                  targetDefId = eng.computeAccessibleParallel(regionArr, logicalTime, currentTick, scopeOf(machineId));
-                }
-              }
-            } catch (e) {
-              request.log.warn(`[definitions] computeAccessible failed for ${actor.id}: ${e.message}`);
-            }
-            // Any pending route (lookups are scoped to this workflow). An actor whose earliest
-            // pending deployment is an older one is queued too: its owner routes it to a
-            // fixpoint, through that deployment and then through this one.
-            if (targetDefId && targetDefId !== actor.definitionId) {
-              pendingJobs.push({ actor_id: actor.id, target_def_id: targetDefId });
-            }
-          }
+        }
+        const wildcardThreshold = parseInt(process.env.STATEKEEP_WILDCARD_WARN_THRESHOLD ?? '10000', 10);
+        if (!hasHistoryTarget && pendingJobs.length > wildcardThreshold) {
+          warnings.push({
+            code:    'LARGE_WILDCARD_DEPLOY',
+            message: `Wildcard deployment will migrate ${pendingJobs.length} actors (threshold: ${wildcardThreshold}). ` +
+                     `This may take several minutes. Use historyPath or historyRegions to target a subset of actors.`,
+          });
         }
 
         deploymentId = await createDeployment({ definitionId: id, affectedActors: pendingJobs.length });
@@ -688,6 +669,7 @@ export async function definitionRoutes(fastify) {
       strandedTagged,
       engineAvailable: eng.available,
       idempotent:      false,
+      visibility:      { waitedMs: barrier.waitedMs, unacknowledged: barrier.pending ?? [] },
       warnings,        // soft warnings included even on success
     });
   }
@@ -797,70 +779,76 @@ export async function definitionRoutes(fastify) {
   });
 
   // ── POST /v1/definitions/preview ─────────────────────────────────────────
+  // What deploying `definition` under `parentId` would do, predicted by the same routing
+  // rule and mappings as a real deployment (deployAnalysis.js). Writes nothing.
   fastify.post('/v1/definitions/preview', {
     schema: {
       body: {
         type: 'object',
         required: ['parentId', 'definition'],
         properties: {
-          parentId:     { type: 'string' },
-          definition:   { type: 'object' },
-          historyPath:  { type: 'array', items: { type: 'string' } },
-          stateMapping: { type: 'object', additionalProperties: { type: 'string' } },
+          parentId:         { type: 'string' },
+          definition:       { type: 'object' },
+          historyPath:      { type: 'array' },
+          historyRegions:   { type: 'object' },
+          stateMapping:     { type: 'object', additionalProperties: { type: 'string' } },
+          contextTransform: { type: 'object' },
         },
       },
     },
   }, async (request, reply) => {
-    const { parentId, definition, historyPath, stateMapping } = request.body;
+    const { parentId, definition, stateMapping, contextTransform } = request.body;
+    const historyPath = normalizeHistoryPath(request.body.historyPath);
     const eng = getEngine();
-    const hasPreviewHistoryPath = Array.isArray(historyPath) && historyPath.length > 0;
+    const hasPath = Array.isArray(historyPath) && historyPath.length > 0;
 
     const { errors, warnings } = analyseDefinition(definition);
     if (errors.length > 0) {
       return reply.code(400).send({ valid: false, wouldDeploy: false, errors, warnings });
     }
+    const parentDef = await findDefinitionById(parentId);
+    if (!parentDef) return reply.code(404).send({ error: `Definition ${parentId} not found` });
+    const machineId = parentDef.machineId ?? parentId;
 
-    const parentDef = parentId ? await findDefinitionById(parentId) : null;
-    const previewMachineId = parentDef?.machineId ?? parentId;
-
-    const dryRunTick = eng.clockTick();
-    let migration = { eligible: 0, wouldMigrate: [], wouldStay: [], engineAvailable: eng.available };
-
-    if (previewMachineId && eng.available) {
-      const candidates = await evaluateMigrationCandidates(previewMachineId, eng, dryRunTick, {
-        prefixHash: hasPreviewHistoryPath ? fingerprintToBigInt(computeHistoryHash(historyPath)) : null,
-      });
-      migration = { ...candidates, engineAvailable: true };
-    } else if (previewMachineId) {
-      const actors = await findActorsByMachine(previewMachineId);
-      migration = {
-        eligible:        actors.length,
-        wouldMigrate:    [],
-        wouldStay:       actors.map(a => ({ actorId: a.id, currentState: a.stateValue, definitionId: a.definitionId, reason: 'engine_unavailable' })),
-        engineAvailable: false,
-        note:            'APV engine unavailable — build WASM with `make wasm -C src/ffi` or set STATEKEEP_ENGINE_PATH.',
-      };
+    let historyRegions = null;
+    if (request.body.historyRegions && Object.keys(request.body.historyRegions).length > 0) {
+      try {
+        historyRegions = normalizeHistoryRegions(
+          Object.fromEntries(Object.entries(request.body.historyRegions).map(([k, v]) => [k, normalizeHistoryPath(v)])),
+          parentDef.definitionJson);
+      } catch (err) { return reply.code(400).send({ error: err.message }); }
     }
 
-    // (Previews used to write 'migrated'/'stayed' rows into every actor's real decision
-    // history. A dry run must not touch the audit trail, so nothing is logged here.)
-
-    // Same rule as the real deploy: states that are keys of stateMapping are not stranded.
-    const newStateNames  = Object.keys(definition.states ?? {});
-    const validStates    = stateMapping && Object.keys(stateMapping).length > 0
-      ? [...new Set([...newStateNames, ...Object.keys(stateMapping)])]
-      : newStateNames;
-    const strandedGroups = await findStrandedActorsForDeploy(
-      previewMachineId, validStates, hasPreviewHistoryPath ? computeHistoryHash(historyPath) : null);
-    const strandedActors = strandedGroups.map(g => ({ currentState: g.state, count: g.count }));
+    await getWriteBuffer().flush();
+    try { await syncChangepointsFromDb(); } catch {}
+    const actors = await findActorsByMachine(machineId);
+    const candidate = {
+      id: '(preview)', kind: historyRegions ? 'p' : 's', t: CANDIDATE_T,
+      pattern: hasPath ? historyPath : null, historyRegions,
+      definitionJson: {
+        ...definition,
+        ...(stateMapping && Object.keys(stateMapping).length ? { _stateMapping: stateMapping } : {}),
+        ...(contextTransform && Object.keys(contextTransform).length ? { _contextTransform: contextTransform } : {}),
+      },
+    };
+    const getDef = (defId) => findDefinitionById(defId);
+    const analysis = await predictRouting({ machineId, actors, getDef, candidate });
+    const late = await lateMatcherRisk({ machineId, actors, getDef, candidate });
+    const strandedActors = strandedGroupsOf(analysis, actors.length)
+      .map((g) => ({ currentState: g.state, atVersion: g.atVersion, reason: g.reason, count: g.count }));
 
     return reply.code(200).send({
       dryRun:         true,
       valid:          true,
-      warnings,
+      warnings:       [...warnings, ...(late.length ? [{ code: 'LATE_MATCHER_RISK', versions: late }] : [])],
       wouldDeploy:    strandedActors.length === 0,
       strandedActors,
-      migration,
+      migration: {
+        eligible:     actors.length,
+        wouldMigrate: analysis.moves.map((m) => ({ actorId: m.actorId, hops: m.hops })),
+        wouldStay:    analysis.stays.map((m) => ({ actorId: m.actorId, hops: m.hops, reason: 'not_routed_through_this_version' })),
+        engineAvailable: eng.available,
+      },
     });
   });
 

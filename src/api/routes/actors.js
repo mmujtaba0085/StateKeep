@@ -44,15 +44,6 @@ export function getLatencies() {
 // one event row, but see docs: run one writer per database.
 const idempotencyInFlight = new Map();
 
-/** Logical time for an actor pinned to a specific version: one past the newest deployment
- *  of its family, so later deployments apply to it and earlier ones do not. */
-async function pinnedLogicalTime(definitionId) {
-  const def = await findDefinitionById(definitionId);
-  if (!def) return undefined;
-  const newest = await findMaxDeployedAtInFamily(def.machineId ?? definitionId);
-  return Math.max(newest, Number(def.deployedAt ?? 0)) + 1;
-}
-
 export async function actorRoutes(fastify) {
 
   // ── POST /v1/actors ────────────────────────────────────────────────────────
@@ -90,10 +81,11 @@ export async function actorRoutes(fastify) {
     // ID (id === machineId), meaning "always give me the newest version".
     const rawDefinitionId = request.body.definitionId;
     let resolvedDefinitionId = rawDefinitionId;
+    let byFamily = false;
     const exactDef = await findDefinitionById(rawDefinitionId);
     if (!exactDef || exactDef.machineId === rawDefinitionId) {
       const latest = await findLatestInFamily(rawDefinitionId);
-      if (latest) resolvedDefinitionId = latest.id;
+      if (latest) { resolvedDefinitionId = latest.id; byFamily = true; }
     }
     // Also accept the machine's own name (the `id` inside the definition JSON, e.g.
     // "loan"), as the API docs show. Refuse if two families share that name.
@@ -104,7 +96,7 @@ export async function actorRoutes(fastify) {
       }
       if (families.length === 1) {
         const latest = await findLatestInFamily(families[0]);
-        if (latest) resolvedDefinitionId = latest.id;
+        if (latest) { resolvedDefinitionId = latest.id; byFamily = true; }
       }
     }
 
@@ -112,11 +104,11 @@ export async function actorRoutes(fastify) {
       const result = await spawnActor({
         definitionId:     resolvedDefinitionId,
         initialContext:   request.body.initialContext ?? {},
-        // Logical time (APV model): one past the newest deployment of the family, for
-        // every spawn — deployments committed after it apply to the actor, none before
-        // it does, even for an actor pinned to an older version. Independent of this
-        // server's clock, which in a cluster can be ahead of or behind the sequence.
-        logicalStartTick: await pinnedLogicalTime(resolvedDefinitionId),
+        // Logical time (APV model): spawnActor dates every actor one past the family's
+        // newest committed deployment (read under the family lock), whatever the entry
+        // point, and independent of this server's clock. A spawn by family re-chooses
+        // the newest version inside that same critical section.
+        newest:           byFamily,
         spawnKey,
         spawnEventTick:   Number(tick),   // the SPAWN audit event is written with the actor
       });
@@ -126,8 +118,8 @@ export async function actorRoutes(fastify) {
       recordLatency(Date.now() - t0);
       return reply.code(201).send({
         id:              result.id,
-        definitionId:    resolvedDefinitionId,
-        requestedAs:     rawDefinitionId !== resolvedDefinitionId ? rawDefinitionId : undefined,
+        definitionId:    result.definitionId ?? resolvedDefinitionId,
+        requestedAs:     rawDefinitionId !== (result.definitionId ?? resolvedDefinitionId) ? rawDefinitionId : undefined,
         stateValue:      result.stateValue,
         context:         result.context,
         done:            result.done ?? false,
@@ -688,6 +680,7 @@ export async function actorRoutes(fastify) {
     // Supports machine alias: if the ID is a family root (id===machineId) or
     // doesn't match an exact definition, resolve to the latest active version.
     const resolvedIdCache = new Map();
+    const byFamilyIds = new Set();
     for (const req of requests) {
       const raw = req.definitionId;
       if (!resolvedIdCache.has(raw)) {
@@ -696,6 +689,7 @@ export async function actorRoutes(fastify) {
           // Explicit version ID (e.g. 'sim-loan-v2') — use as-is
           resolvedIdCache.set(raw, raw);
         } else {
+          byFamilyIds.add(raw);
           // Family root ID or not found → resolve to latest active in family
           let latest = await findLatestInFamily(raw);
           if (!latest && !exactDef) {
@@ -720,7 +714,7 @@ export async function actorRoutes(fastify) {
           const a = await spawnActor({
             definitionId:     resolvedIdCache.get(req.definitionId),
             initialContext:   req.initialContext ?? {},
-            logicalStartTick: await pinnedLogicalTime(resolvedIdCache.get(req.definitionId)),
+            newest:           byFamilyIds.has(req.definitionId),
           });
           await claimNew(a.id);        // cluster mode: this server owns what it creates
           return a;
@@ -748,7 +742,7 @@ export async function actorRoutes(fastify) {
           } catch {}
           created.push({
             id:          v.id,
-            definitionId: resolved,
+            definitionId: v.definitionId ?? resolved,
             requestedAs:  raw !== resolved ? raw : undefined,
             stateValue:   v.stateValue,
           });

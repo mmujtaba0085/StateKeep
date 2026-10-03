@@ -737,6 +737,19 @@ export function getDb() {
     console.log('[db] Migration v27 applied: spawn idempotency keys');
   }
 
+  // v28 — registry collection: change-points below a family's collection frontier are
+  // marked collected (kept for audit, never registered again).
+  if (!appliedVersions.has(28)) {
+    _db.transaction(() => {
+      for (const t of ['changepoints', 'par_changepoints']) {
+        const cols = new Set(_db.prepare(`SELECT name FROM pragma_table_info('${t}')`).all().map((c) => c.name));
+        if (!cols.has('collected_at')) _db.exec(`ALTER TABLE ${t} ADD COLUMN collected_at INTEGER`);
+      }
+      _db.exec(`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (28, unixepoch())`);
+    })();
+    console.log('[db] Migration v28 applied: change-point collection');
+  }
+
   // Graceful shutdown
   process.on('exit',    () => { try { _db.close(); } catch {} });
   process.on('SIGINT',  () => { process.exit(0); });

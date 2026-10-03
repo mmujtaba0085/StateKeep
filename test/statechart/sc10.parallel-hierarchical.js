@@ -46,11 +46,23 @@ describe('SC10-T1: resolveLandingState — hierarchical and parallel state value
   });
 
   // Compound state values (hierarchical machines)
-  test('T1-4: compound object — top-level key exists → returns full object', () => {
+  test('T1-4: compound object — the whole nested path exists → returns full object', () => {
     const sv = { payment: { processing: 'pending' } };
-    const states = { payment: { type: 'compound', states: { processing: {}, done: {} } }, idle: {} };
+    const states = { payment: { initial: 'processing', states: { processing: { initial: 'pending', states: { pending: {}, sent: {} } }, done: {} } }, idle: {} };
     const result = resolveLandingState(sv, states);
     assert.deepEqual(result, sv);
+  });
+
+  test('T1-4b: compound object — a nested state removed in the new machine → null (stranded, not misplaced)', () => {
+    const sv = { shipping: 'packing' };
+    const states = { shipping: { initial: 'fulfilment', states: { fulfilment: {} } } };
+    assert.equal(resolveLandingState(sv, states), null);
+  });
+
+  test('T1-4c: dotted stateMapping maps a nested state', () => {
+    const sv = { shipping: 'packing' };
+    const states = { shipping: { initial: 'fulfilment', states: { fulfilment: {} } } };
+    assert.deepEqual(resolveLandingState(sv, states, { 'shipping.packing': 'shipping.fulfilment' }), { shipping: 'fulfilment' });
   });
 
   test('T1-5: compound object — top-level key missing → null', () => {
@@ -73,10 +85,22 @@ describe('SC10-T1: resolveLandingState — hierarchical and parallel state value
   });
 
   // Parallel state values (orthogonal regions)
-  test('T1-8: parallel state — active region exists in new machine → returns full object', () => {
+  test('T1-8: parallel state — active regions exist in new machine → returns full object', () => {
     const sv = { active: { payment: 'paid', shipping: 'unselected' } };
-    const states = { active: { type: 'parallel', states: { payment: {}, shipping: {} } }, done: {} };
+    const states = { active: { type: 'parallel', states: {
+      payment:  { initial: 'unpaid', states: { unpaid: {}, paid: {} } },
+      shipping: { initial: 'unselected', states: { unselected: {}, selected: {} } },
+    } }, done: {} };
     assert.deepEqual(resolveLandingState(sv, states), sv);
+  });
+
+  test('T1-8b: parallel state — a region added in the new machine starts at its initial state', () => {
+    const sv = { active: { payment: 'paid' } };
+    const states = { active: { type: 'parallel', states: {
+      payment:  { initial: 'unpaid', states: { unpaid: {}, paid: {} } },
+      gift:     { initial: 'none', states: { none: {}, wrapped: {} } },
+    } } };
+    assert.deepEqual(resolveLandingState(sv, states), { active: { payment: 'paid', gift: 'none' } });
   });
 
   test('T1-9: parallel state — active region removed in new machine → null', () => {
@@ -102,8 +126,8 @@ describe('SC10-T3: computeRegionHashes and regionFingerprintsToArray', () => {
     });
     assert.equal(typeof result.payment,  'string');
     assert.equal(typeof result.shipping, 'string');
-    assert.equal(result.payment.length,  16);
-    assert.equal(result.shipping.length, 16);
+    assert.match(result.payment,  /^2:[0-9a-f]{64}$/);
+    assert.match(result.shipping, /^2:[0-9a-f]{64}$/);
   });
 
   test('T3-2: each region hash equals computeHistoryHash for that region', () => {
@@ -133,10 +157,11 @@ describe('SC10-T3: computeRegionHashes and regionFingerprintsToArray', () => {
     assert.equal(regionFingerprintsToArray({}),    null);
   });
 
-  test('T3-6: empty-history region uses FNV_OFFSET as base (same as FNV chain start)', () => {
+  test('T3-6: empty-history region is the empty fingerprint "0" (a fresh region)', () => {
     const rfp = computeRegionHashes({ shipping: [] });
-    const expected = bigIntToHex(FNV_OFFSET);
-    assert.equal(rfp.shipping, expected);
+    assert.equal(rfp.shipping, '0');
+    // and it keys like a fresh region in both schemes
+    assert.deepEqual(regionFingerprintsToArray({ shipping: '0' }), regionFingerprintsToArray(rfp));
   });
 
   test('T3-7: region hash order does not matter for regionFingerprintsToArray length', () => {
@@ -179,13 +204,13 @@ describe('SC10-T3b: per-region fingerprint update logic (worker simulation)', ()
   });
 
   test('T3b-2: payment fingerprint after PAY matches computeHistoryHash([PAY])', () => {
-    const fp = simulateUpdateFingerprint('0', 'PAY');
-    assert.equal(fp, computeHistoryHash(['PAY']));
+    const fp = simulateUpdateFingerprint('0', 'PAY');          // legacy v1 chain
+    assert.equal(fp, computeHistoryHash(['PAY'], 1));
   });
 
   test('T3b-3: chained region events accumulate correctly', () => {
     let fp = simulateUpdateFingerprint('0', 'VERIFY_IDENTITY');
     fp      = simulateUpdateFingerprint(fp,  'PAY');
-    assert.equal(fp, computeHistoryHash(['VERIFY_IDENTITY', 'PAY']));
+    assert.equal(fp, computeHistoryHash(['VERIFY_IDENTITY', 'PAY'], 1));
   });
 });

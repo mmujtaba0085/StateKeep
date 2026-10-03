@@ -212,7 +212,8 @@ CREATE TABLE IF NOT EXISTS changepoints (
     prefix_hash  TEXT NOT NULL,
     refinement   INTEGER NOT NULL DEFAULT 0,
     child_def_id TEXT NOT NULL,
-    created_at   INTEGER NOT NULL
+    created_at   INTEGER NOT NULL,
+    collected_at INTEGER
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_changepoints_unique
@@ -225,7 +226,8 @@ CREATE TABLE IF NOT EXISTS par_changepoints (
     region_hashes TEXT NOT NULL,
     refinement   INTEGER NOT NULL DEFAULT 0,
     child_def_id TEXT NOT NULL UNIQUE,
-    created_at   INTEGER NOT NULL DEFAULT (unixepoch())
+    created_at   INTEGER NOT NULL DEFAULT (unixepoch()),
+    collected_at INTEGER
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_par_changepoints_unique

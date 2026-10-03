@@ -55,13 +55,46 @@ export async function withFamilyDeployLock(family, fn) {
     const { getPool } = await import('./db-postgres.js');
     const client = await getPool().connect();
     let broken = false;
-    client.on('error', () => { broken = true; });
+    const onError = () => { broken = true; };
+    client.on('error', onError);
     try {
       await client.query('SELECT pg_advisory_lock($1::bigint)', [lockKey(family)]);
       try { return await fn(); }
       finally { await client.query('SELECT pg_advisory_unlock($1::bigint)', [lockKey(family)]).catch(() => { broken = true; }); }
     } finally {
+      client.off('error', onError);           // pooled clients are reused: do not leak listeners
       client.release(broken);
     }
   });
+}
+
+/**
+ * The newest committed deployment time of a family, read so that no deployment of the
+ * family is in progress: a deployment holds the family lock until it is committed (after
+ * its visibility barrier), and this read takes the same lock in shared mode (Postgres:
+ * a transaction-scoped shared advisory lock; SQLite: the in-process family queue). A spawn
+ * dated by it therefore never counts a deployment that has not committed yet, and never
+ * misses one that has.
+ */
+export async function readFamilyMaxDeployed(family, readFn) {
+  return localLock(family, async () => {
+    if (!isPostgres) return readFn();
+    const { transaction } = await import('./db-postgres.js');
+    // Each holder keeps one pooled connection for the lock while readFn uses others:
+    // bound how many do so at once, so concurrent spawns cannot exhaust the pool.
+    return withSpawnSlot(() => transaction(async (client) => {
+      await client.query('SELECT pg_advisory_xact_lock_shared($1::bigint)', [lockKey(family)]);
+      return readFn();
+    }));
+  });
+}
+
+const SPAWN_SLOTS = Math.max(1, Math.floor(parseInt(process.env.STATEKEEP_PG_POOL_SIZE ?? '20', 10) / 4));
+let _slotsInUse = 0;
+const _slotWaiters = [];
+async function withSpawnSlot(fn) {
+  if (_slotsInUse >= SPAWN_SLOTS) await new Promise((r) => _slotWaiters.push(r));
+  _slotsInUse++;
+  try { return await fn(); }
+  finally { _slotsInUse--; _slotWaiters.shift()?.(); }
 }

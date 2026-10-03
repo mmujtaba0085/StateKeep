@@ -56,6 +56,29 @@ test('idempotency holds across servers', { skip }, async () => {
   assert.equal((await call(nodes.A, 'GET', `/v1/actors/${id}`)).body.stateValue, 'b');
 });
 
+test('a deployment is visible on every server when it returns (registry barrier)', { skip }, async () => {
+  // Actors owned by B, history [T]; a history-targeted deployment made through A must
+  // route them on their very next event (before: B saw it only at its next 500 ms poll,
+  // so an event arriving first moved the history past the pattern and the actor was missed).
+  const ids = [];
+  for (let i = 0; i < 5; i++) {
+    const id = (await call(nodes.B, 'POST', '/v1/actors', { definitionId: 'ping-v1' })).body.id;
+    await call(nodes.B, 'POST', `/v1/actors/${id}/event`, { type: 'T' });
+    ids.push(id);
+  }
+  for (let round = 2; round <= 4; round++) {
+    const parent = round === 2 ? 'ping-v1' : `ping-bar-v${round - 1}`;
+    const d = await call(nodes.A, 'PUT', '/v1/definitions', { id: `ping-bar-v${round}`, parentId: parent,
+      historyPath: Array(round - 1).fill('T'),
+      definition: { id: 'ping', initial: 'a', states: { a: { on: { T: 'b' } }, b: { on: { T: 'a' } }, [`z${round}`]: {} } } });
+    assert.equal(d.status, 201, JSON.stringify(d.body));
+    assert.deepEqual(d.body.visibility.unacknowledged, []);
+    const rs = await Promise.all(ids.map((id) => call(nodes.A, 'POST', `/v1/actors/${id}/event`, { type: 'T' })));
+    assert.ok(rs.every((r) => r.status === 200 && r.servedBy === 'B'));
+    for (const id of ids) assert.equal((await call(nodes.A, 'GET', `/v1/actors/${id}`)).body.definitionId, `ping-bar-v${round}`);
+  }
+});
+
 test('WebSocket subscribers on another server receive changes (LISTEN/NOTIFY)', { skip: skip || (typeof WebSocket === 'undefined' && 'no global WebSocket') }, async () => {
   const id = (await call(nodes.A, 'POST', '/v1/actors', { definitionId: 'ping-v1' })).body.id;
   const ws = new WebSocket(`ws://127.0.0.1:3062/v1/actors/${id}/stream`);

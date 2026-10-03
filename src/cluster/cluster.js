@@ -23,7 +23,10 @@
  * http://<this-server>:<port> (reachable by the other servers), STATEKEEP_ADMIN_KEY set.
  */
 import { randomUUID } from 'crypto';
-import { evictFromHotRegistry } from '../runtime/actorManager.js';
+import {
+  evictFromHotRegistry, registryWatermarks, onRegistrySynced, syncChangepointsFromDb, REGISTRY_LEASE_MS,
+  markClusterJoined,
+} from '../runtime/actorManager.js';
 
 export const clusterEnabled = () => process.env.STATEKEEP_CLUSTER === 'true';
 const TTL_MS       = () => parseInt(process.env.STATEKEEP_NODE_TTL_MS ?? '5000', 10);
@@ -46,10 +49,47 @@ export function checkClusterConfig(env = process.env) {
 
 async function heartbeat() {
   const now = Date.now();
+  const w = registryWatermarks();
   await pg.query(
-    `INSERT INTO cluster_nodes (node_id, url, started_at, last_seen) VALUES ($1,$2,$3,$3)
-     ON CONFLICT (node_id) DO UPDATE SET url = EXCLUDED.url, last_seen = EXCLUDED.last_seen`,
-    [NODE_ID, myUrl, now]);
+    `INSERT INTO cluster_nodes (node_id, url, started_at, last_seen, cp_low, par_low, cp_seen, par_seen)
+     VALUES ($1,$2,$3,$3,$4,$5,$6,$7)
+     ON CONFLICT (node_id) DO UPDATE SET url = EXCLUDED.url, last_seen = EXCLUDED.last_seen,
+       cp_low = EXCLUDED.cp_low, par_low = EXCLUDED.par_low, cp_seen = EXCLUDED.cp_seen, par_seen = EXCLUDED.par_seen`,
+    [NODE_ID, myUrl, now, w.cp, w.par, JSON.stringify(w.cpSeen.slice(0, 500)), JSON.stringify(w.parSeen.slice(0, 500))]);
+  // Visible to deployment barriers from now on: only syncs that start after this renew
+  // the registry lease.
+  markClusterJoined();
+}
+
+// ── Registry visibility across servers ──────────────────────────────────────
+// A deployment NOTIFYs statekeep_registry; every server syncs at once and reports its
+// registry watermarks. The deploying server waits (awaitRegistryBarrier) until every live
+// server has registered the new change-point, or until the registry lease has run out —
+// a server that has not synced within the lease stops processing events by itself
+// (actorManager.ensureRegistryLease). After the barrier no server routes without it.
+export async function publishRegistryChange() {
+  if (!clusterEnabled() || !pg) return;
+  await pg.query(`SELECT pg_notify('statekeep_registry', $1)`, [NODE_ID]).catch(() => {});
+}
+
+export async function awaitRegistryBarrier({ cp = 0, par = 0 } = {}) {
+  if (!clusterEnabled() || !pg) return { waitedMs: 0, pending: [] };
+  const start = Date.now();
+  const deadline = start + REGISTRY_LEASE_MS + 250;
+  let pending = [];
+  for (;;) {
+    const rows = await pg.queryAll(
+      `SELECT node_id, cp_low, par_low, cp_seen, par_seen, last_seen FROM cluster_nodes WHERE node_id <> $1`, [NODE_ID]).catch(() => null);
+    if (rows) {
+      const now = Date.now();
+      const has = (low, seen, id) => !id || Number(low) >= id || (() => { try { return JSON.parse(seen ?? '[]').includes(id); } catch { return false; } })();
+      pending = rows.filter((r) => now - Number(r.last_seen) < TTL_MS() &&
+        (!has(r.cp_low, r.cp_seen, cp) || !has(r.par_low, r.par_seen, par))).map((r) => r.node_id);
+      if (pending.length === 0) return { waitedMs: Date.now() - start, pending };
+    }
+    if (Date.now() >= deadline) return { waitedMs: Date.now() - start, pending, leaseExpired: true };
+    await new Promise((r) => setTimeout(r, 25));
+  }
 }
 
 /** Owner of an actor: { nodeId, url, alive } or null when unowned. */
@@ -167,6 +207,8 @@ export async function startCluster(fastify, { onRemoteStateChange } = {}) {
   const mod = await import('../registry/db-postgres.js');
   myUrl = process.env.STATEKEEP_NODE_URL;
   pg = mod;
+  // Report registry watermarks as soon as a sync completes (the barrier waits on them).
+  onRegistrySynced(async () => { await heartbeat(); });
   await heartbeat();
   heartbeatTimer = setInterval(() => heartbeat().catch((e) => fastify.log.error(`[cluster] heartbeat: ${e.message}`)), HEARTBEAT_MS());
   heartbeatTimer.unref();
@@ -183,6 +225,10 @@ export async function startCluster(fastify, { onRemoteStateChange } = {}) {
       if (!closing) setTimeout(() => connectListener().catch(() => {}), 1000).unref();
     });
     client.on('notification', (msg) => {
+      if (msg.channel === 'statekeep_registry') {
+        if (msg.payload !== NODE_ID) syncChangepointsFromDb().catch(() => {});
+        return;
+      }
       try {
         const m = JSON.parse(msg.payload);
         if (m.from !== NODE_ID) onRemoteStateChange?.(m.actorId, m.stateValue, m.context);
@@ -191,6 +237,7 @@ export async function startCluster(fastify, { onRemoteStateChange } = {}) {
     try {
       await client.connect();
       await client.query('LISTEN statekeep_state');
+      await client.query('LISTEN statekeep_registry');
       listener = client;
     } catch (err) {
       fastify.log.warn(`[cluster] LISTEN connect failed: ${err.message} — retrying`);

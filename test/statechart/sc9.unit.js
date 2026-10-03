@@ -51,21 +51,21 @@ describe('SC9-U: computeHistoryHash unit contracts', () => {
 
   test('U1: single event — computeHistoryHash matches worker chain', () => {
     const events = ['START_APPLICATION'];
-    assert.equal(computeHistoryHash(events), workerChain(events));
+    assert.equal(computeHistoryHash(events, 1), workerChain(events));
   });
 
   test('U1: loan 3-event path matches worker chain', () => {
     const events = ['START_APPLICATION', 'SUBMIT_PERSONAL_INFO', 'PAY_FEE'];
-    assert.equal(computeHistoryHash(events), workerChain(events));
+    assert.equal(computeHistoryHash(events, 1), workerChain(events));
   });
 
   test('U1: 10-event sequence matches worker chain', () => {
     const events = ['A','B','C','D','E','F','G','H','I','J'];
-    assert.equal(computeHistoryHash(events), workerChain(events));
+    assert.equal(computeHistoryHash(events, 1), workerChain(events));
   });
 
   test('U2: Gap 2 fix — worker starts from FNV_OFFSET not 0n', () => {
-    const correct = computeHistoryHash(['START']);       // starts from FNV_OFFSET
+    const correct = computeHistoryHash(['START'], 1);    // legacy v1: starts from FNV_OFFSET
     const broken  = brokenWorkerChain(['START']);        // starts from 0n (old bug)
     assert.notEqual(correct, broken,
       'FNV_OFFSET start and 0n start must produce different hashes — Gap 2 verifies this');
@@ -79,7 +79,7 @@ describe('SC9-U: computeHistoryHash unit contracts', () => {
 
   test('U2: computeHistoryHash matches worker, NOT broken-worker', () => {
     const events = ['START_APPLICATION', 'SUBMIT_PERSONAL_INFO', 'PAY_FEE'];
-    const hash   = computeHistoryHash(events);
+    const hash   = computeHistoryHash(events, 1);
     const worker = workerChain(events);
     const broken = brokenWorkerChain(events);
     assert.equal(hash, worker, 'Must match corrected worker');
@@ -98,12 +98,11 @@ describe('SC9-U: computeHistoryHash unit contracts', () => {
     assert.notEqual(two, three, 'Adding an event must change the fingerprint');
   });
 
-  test('U5: empty historyPath → bigIntToHex(FNV_OFFSET)', () => {
+  test('U5: empty historyPath → the empty fingerprint "0" (same key as a fresh actor)', () => {
     const fp = computeHistoryHash([]);
-    assert.equal(fp, bigIntToHex(FNV_OFFSET),
-      'Empty path must return FNV_OFFSET hex (zero-event fingerprint)');
-    assert.equal(fp.length, 16);
-    assert.match(fp, /^[0-9a-f]{16}$/);
+    assert.equal(fp, '0', 'Empty path must return the empty-history sentinel');
+    assert.equal(fingerprintToBigInt(fp), fingerprintToBigInt('0'));
+    assert.notEqual(fingerprintToBigInt(fp), 0n, 'the empty history is not the wildcard');
   });
 
   test('U5: absent historyPath in deployment → wildcard prefix_hash = 0n', () => {
@@ -292,33 +291,43 @@ describe('SC9-D: Direct routing mock — matching migrates, non-matching stays',
 
 describe('SC9-E: Fingerprint edge cases', () => {
 
-  test('Empty event sequence → bigIntToHex(FNV_OFFSET)', () => {
-    assert.equal(computeHistoryHash([]), bigIntToHex(FNV_OFFSET));
+  test('Empty event sequence → "0" in both schemes', () => {
+    assert.equal(computeHistoryHash([]), '0');
+    assert.equal(computeHistoryHash([], 1), '0');
   });
 
   test('Unicode event type hashes consistently', () => {
     const h1 = computeHistoryHash(['こんにちは', 'PAY_FEE']);
     const h2 = computeHistoryHash(['こんにちは', 'PAY_FEE']);
     assert.equal(h1, h2);
-    assert.match(h1, /^[0-9a-f]{16}$/);
+    assert.match(h1, /^2:[0-9a-f]{64}$/);
   });
 
-  test('1000-event sequence produces valid 16-char hex', () => {
+  test('1000-event sequence produces a valid v2 fingerprint', () => {
     const events = Array.from({ length: 1000 }, (_, i) => `EVENT_${i}`);
     const fp = computeHistoryHash(events);
-    assert.match(fp, /^[0-9a-f]{16}$/, `1000 events must still produce valid hex: ${fp}`);
+    assert.match(fp, /^2:[0-9a-f]{64}$/, `1000 events must still produce a valid fingerprint: ${fp}`);
   });
 
   test("'A' and 'B' hash differently", () => {
     assert.notEqual(computeHistoryHash(['A']), computeHistoryHash(['B']));
   });
 
-  test('computeHistoryHash output is always 16 lowercase hex chars', () => {
+  test('computeHistoryHash output is "2:" + 64 lowercase hex chars (v1: 16)', () => {
     const inputs = [['SINGLE'], ['A','B'], ['X','Y','Z','W']];
     for (const events of inputs) {
       const fp = computeHistoryHash(events);
-      assert.equal(fp.length, 16, `Expected 16 chars for ${JSON.stringify(events)}: ${fp}`);
-      assert.match(fp, /^[0-9a-f]{16}$/, `Must be lowercase hex: ${fp}`);
+      assert.match(fp, /^2:[0-9a-f]{64}$/, `Must be a v2 fingerprint: ${fp}`);
+      assert.match(computeHistoryHash(events, 1), /^[0-9a-f]{16}$/, 'v1: 16 lowercase hex chars');
     }
+  });
+});
+
+describe('SC9-V2: injective fingerprints', () => {
+  test('event boundaries matter: [PAY, MENT_OK] ≠ [PAYMENT_OK] (v1 collided)', () => {
+    assert.equal(computeHistoryHash(['PAY', 'MENT_OK'], 1), computeHistoryHash(['PAYMENT_OK'], 1));
+    assert.notEqual(computeHistoryHash(['PAY', 'MENT_OK']), computeHistoryHash(['PAYMENT_OK']));
+    assert.notEqual(computeHistoryHash(['A', 'BC']), computeHistoryHash(['AB', 'C']));
+    assert.notEqual(computeHistoryHash(['', 'A']), computeHistoryHash(['A', '']));
   });
 });

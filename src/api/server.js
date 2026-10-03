@@ -252,7 +252,17 @@ await engineReady;
 
 if (isPostgres) {
   const { bootstrapSchema } = await import('../registry/db-postgres.js');
-  await bootstrapSchema();
+  // A connection dropped by the database while the server boots (restart, failover,
+  // pg_terminate_backend) used to crash the start-up; retry for a while instead.
+  for (let attempt = 1; ; attempt++) {
+    try { await bootstrapSchema(); break; }
+    catch (err) {
+      const transient = /terminat|ECONN|timeout|Connection|57P0|08\d\d\d/i.test(`${err.code ?? ''} ${err.message ?? ''}`);
+      if (!transient || attempt >= 30) throw err;
+      console.warn(`[server] database not ready (${err.message}); retrying (${attempt})`);
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+  }
   console.log('[server] Postgres mode — SQLite single-writer warning suppressed');
 } else {
   getDb();
