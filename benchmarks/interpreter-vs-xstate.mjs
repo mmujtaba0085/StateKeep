@@ -14,7 +14,7 @@
  *   MEASURE_SECS=30 node benchmarks/interpreter-vs-xstate.mjs
  */
 
-import { createMachine, createActor }           from './node_modules/xstate/dist/xstate.cjs.mjs';
+import { createMachine, createActor }           from 'xstate';
 import { compileMachine }                        from '../src/runtime/definitionCompiler.js';
 import { computeInitialSnapshot, processEvent }  from '../src/runtime/interpreter.js';
 
