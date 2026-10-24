@@ -251,7 +251,7 @@ Write workflows as async functions with [`@statekeep/durable`](packages/durable/
   - deploy new versions mid-flight;
   - fire storms of concurrent, duplicate and unknown events.
 
-  Every actor is then checked against a ground-truth model kept independent of the system under test: no lost or duplicated events, no misrouted or misplaced actors. The full campaign ([`scripts/chaos-campaign.sh`](scripts/chaos-campaign.sh)) runs on **SQLite, PostgreSQL and a 2-server PostgreSQL cluster**, at normal and hard intensity. The latest run covered **2,600 actors and 51 live deployments** (2,247 migrations checked), with 41 API-server kills, 20 database-connection drops, 24 service crashes and 42 worker kills: **0 violations** ([results](docs/chaos-testing.md#campaign-results), [raw summary](benchmarks/chaos/summary.json)). All runs were on a single host with generated workflows.
+  Every actor is then checked against a ground-truth model kept independent of the system under test: no lost or duplicated events, no misrouted or misplaced actors. The full campaign ([`scripts/chaos-campaign.sh`](scripts/chaos-campaign.sh)) runs on **SQLite, PostgreSQL and a 2-server PostgreSQL cluster**, at normal and hard intensity. The latest run covered **2,600 actors and 64 live deployments** (2,033 migrations checked), with 37 API-server kills, 17 database-connection drops, 23 service crashes and 53 worker kills: **0 violations** ([results](docs/chaos-testing.md#campaign-results), [raw summary](benchmarks/chaos/summary.json)). All runs were on a single host with generated workflows.
 - **Test suites:** unit, property-based, integration, statechart (SC1–SC18), cluster and end-to-end. Run them with `npm run test:all`.
 
 ## ⚙️ Configuration essentials
