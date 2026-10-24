@@ -12,7 +12,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
-      - uses: mmujtaba0085/StateKeep/.github/actions/migration-plan@v1.1.0
+      - uses: mmujtaba0085/StateKeep/.github/actions/migration-plan@v1
         with:
           statekeep-url: ${{ vars.STATEKEEP_URL }}
           api-key: ${{ secrets.STATEKEEP_API_KEY }}

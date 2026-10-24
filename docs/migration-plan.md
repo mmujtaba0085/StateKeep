@@ -24,7 +24,7 @@ posts/updates one PR comment, writes the report to the job summary, and fails th
 release would strand actors.
 
 ```yaml
-- uses: mmujtaba0085/StateKeep/.github/actions/migration-plan@v1.1.0
+- uses: mmujtaba0085/StateKeep/.github/actions/migration-plan@v1
   with:
     statekeep-url: ${{ vars.STATEKEEP_URL }}
     api-key: ${{ secrets.STATEKEEP_API_KEY }}

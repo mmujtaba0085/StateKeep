@@ -1,6 +1,6 @@
 {
   "name": "statekeep",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Self-hosted engine for persistent statechart actors (XState v5) that migrates running workflows to new versions by the path each one took. No replay, no migration scripts, no downtime.",
   "keywords": [
     "state-machine",
