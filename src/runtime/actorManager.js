@@ -397,7 +397,11 @@ export async function sweepStranded() {
   let queued = 0;
   for (const [target, ids] of byTarget) {
     if (_sweepInProcess) {
-      for (const id of ids) { await migrateActorOwned(id, target).catch(() => null); queued++; }
+      for (const id of ids) {
+        // a failure leaves the actor stranded with no open job: the next sweep retries it
+        try { const r = await migrateActorOwned(id, target); if (r?.outcome === 'migrated') queued++; }
+        catch (e) { console.error(`[actorManager] stranded sweep: ${id} not rescued yet (${e.message}); retrying next sweep`); }
+      }
       continue;
     }
     const { createDeployment, updateDeploymentStatus } = await import('../registry/deploymentRepo.js');
@@ -1270,10 +1274,10 @@ export async function migrateActor(actorId, targetDefinitionId, { priority = 'no
   const auditTick = (() => { try { return Number(getEngine().clockTick()); } catch { return Date.now(); } })();
 
   // ── Atomic DB update ───────────────────────────────────────────────────────
-  // SQLite: single transaction cancels old after: timers, updates actor,
-  // and schedules after: timers for the new state — all or nothing.
-  // Postgres: best-effort (cancel then update); atomic transaction variant omitted
-  // since the primary deployment is SQLite.
+  // One transaction on both backends: records MIGRATED, cancels the old after: timers,
+  // updates the actor and schedules the after: timers of the new state — all or nothing.
+  // Entry actions of the landing state are NOT run (restoreSnapshot): a migration never
+  // fires side effects. Timers are scheduled because they are not side effects.
   if (!isPostgres) {
     const db        = getDb();
     const encCtx    = result.context != null

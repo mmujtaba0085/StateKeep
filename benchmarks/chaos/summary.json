@@ -1,0 +1,230 @@
+{
+  "generatedAt": "2026-10-24T08:28:51.535Z",
+  "totals": {
+    "runs": 7,
+    "actors": 2600,
+    "workflows": 28,
+    "deployments": 51,
+    "migrations": 2247,
+    "violations": 0,
+    "serverKills": 41,
+    "dbConnectionDrops": 20,
+    "serviceCrashes": 24,
+    "outages": 19,
+    "workerKills": 42
+  },
+  "runs": [
+    {
+      "run": "f-cl-h",
+      "backend": "cluster",
+      "intensity": "hard",
+      "seed": 66,
+      "minutes": 5,
+      "workflows": 4,
+      "actors": 300,
+      "deployments": 6,
+      "deploymentKinds": {
+        "rename": 2,
+        "add_step": 1,
+        "copy_field": 1,
+        "reroute_for_history": 2
+      },
+      "migrations": 53,
+      "faults": {
+        "serverKills": 5,
+        "serviceCrashes": 7,
+        "outages": 3,
+        "migrateWorkerKills": 5,
+        "schedulerKills": 4,
+        "dbBlips": 5,
+        "deploys": 6,
+        "deployRefused": 0,
+        "storms": 3,
+        "reviews": 55,
+        "clientRetries": 570
+      },
+      "violations": 0
+    },
+    {
+      "run": "f-cl-n",
+      "backend": "cluster",
+      "intensity": "normal",
+      "seed": 65,
+      "minutes": 6.7,
+      "workflows": 4,
+      "actors": 300,
+      "deployments": 7,
+      "deploymentKinds": {
+        "copy_field": 1,
+        "add_step": 5,
+        "rename": 1
+      },
+      "migrations": 209,
+      "faults": {
+        "serverKills": 3,
+        "serviceCrashes": 1,
+        "outages": 1,
+        "migrateWorkerKills": 0,
+        "schedulerKills": 3,
+        "dbBlips": 2,
+        "deploys": 7,
+        "deployRefused": 0,
+        "storms": 1,
+        "reviews": 157,
+        "clientRetries": 374
+      },
+      "violations": 0
+    },
+    {
+      "run": "f-pg-big",
+      "backend": "postgres",
+      "intensity": "hard",
+      "seed": 67,
+      "minutes": 19.2,
+      "workflows": 4,
+      "actors": 800,
+      "deployments": 17,
+      "deploymentKinds": {
+        "reroute_for_history": 2,
+        "copy_field": 3,
+        "add_step": 8,
+        "rename": 4
+      },
+      "migrations": 1563,
+      "faults": {
+        "serverKills": 11,
+        "serviceCrashes": 8,
+        "outages": 4,
+        "migrateWorkerKills": 6,
+        "schedulerKills": 4,
+        "dbBlips": 8,
+        "deploys": 17,
+        "deployRefused": 0,
+        "storms": 10,
+        "reviews": 704,
+        "clientRetries": 2439
+      },
+      "violations": 0
+    },
+    {
+      "run": "f-pg-h",
+      "backend": "postgres",
+      "intensity": "hard",
+      "seed": 64,
+      "minutes": 4.2,
+      "workflows": 4,
+      "actors": 300,
+      "deployments": 6,
+      "deploymentKinds": {
+        "add_step": 3,
+        "rename": 1,
+        "reroute_for_history": 1,
+        "copy_field": 1
+      },
+      "migrations": 100,
+      "faults": {
+        "serverKills": 7,
+        "serviceCrashes": 3,
+        "outages": 4,
+        "migrateWorkerKills": 4,
+        "schedulerKills": 1,
+        "dbBlips": 5,
+        "deploys": 6,
+        "deployRefused": 1,
+        "storms": 3,
+        "reviews": 21,
+        "clientRetries": 1083
+      },
+      "violations": 0
+    },
+    {
+      "run": "f-pg-n",
+      "backend": "postgres",
+      "intensity": "normal",
+      "seed": 63,
+      "minutes": 5.5,
+      "workflows": 4,
+      "actors": 300,
+      "deployments": 3,
+      "deploymentKinds": {
+        "rename": 2,
+        "copy_field": 1
+      },
+      "migrations": 101,
+      "faults": {
+        "serverKills": 4,
+        "serviceCrashes": 2,
+        "outages": 1,
+        "migrateWorkerKills": 1,
+        "schedulerKills": 2,
+        "dbBlips": 0,
+        "deploys": 3,
+        "deployRefused": 0,
+        "storms": 1,
+        "reviews": 119,
+        "clientRetries": 546
+      },
+      "violations": 0
+    },
+    {
+      "run": "f-sq-h",
+      "backend": "sqlite",
+      "intensity": "hard",
+      "seed": 62,
+      "minutes": 6.5,
+      "workflows": 4,
+      "actors": 300,
+      "deployments": 4,
+      "deploymentKinds": {
+        "reroute_for_history": 1,
+        "add_step": 3
+      },
+      "migrations": 84,
+      "faults": {
+        "serverKills": 7,
+        "serviceCrashes": 1,
+        "outages": 5,
+        "migrateWorkerKills": 5,
+        "schedulerKills": 5,
+        "dbBlips": 0,
+        "deploys": 4,
+        "deployRefused": 2,
+        "storms": 3,
+        "reviews": 256,
+        "clientRetries": 1712
+      },
+      "violations": 0
+    },
+    {
+      "run": "f-sq-n",
+      "backend": "sqlite",
+      "intensity": "normal",
+      "seed": 61,
+      "minutes": 3,
+      "workflows": 4,
+      "actors": 300,
+      "deployments": 8,
+      "deploymentKinds": {
+        "rename": 3,
+        "reroute_for_history": 3,
+        "copy_field": 1,
+        "add_step": 1
+      },
+      "migrations": 137,
+      "faults": {
+        "serverKills": 4,
+        "serviceCrashes": 2,
+        "outages": 1,
+        "migrateWorkerKills": 2,
+        "schedulerKills": 0,
+        "dbBlips": 0,
+        "deploys": 8,
+        "deployRefused": 0,
+        "storms": 0,
+        "reviews": 2,
+        "clientRetries": 876
+      },
+      "violations": 0
+    }
+  ]
+}

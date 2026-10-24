@@ -1,6 +1,6 @@
 # StateKeep
 
-> StateKeep is a self-hosted engine that runs workflows as persistent statechart actors (XState v5 JSON definitions) and migrates actors that are already running to new workflow versions, choosing per actor by the path it took (its event history). It needs no event replay and no migration scripts. Storage is SQLite or PostgreSQL, with an optional multi-server cluster mode. The routing model (APV, anchor-point versioning) is machine-checked in Lean 4.
+> StateKeep is a self-hosted engine that runs workflows as persistent statechart actors (XState v5 JSON definitions) and migrates actors that are already running to new workflow versions, choosing per actor by the path it took (its event history). It needs no event replay and no migration scripts. Storage is SQLite or PostgreSQL, with an optional multi-server cluster mode. The routing model (APV, anchor-point versioning) is machine-checked in Lean 4, and the shipped engine (a compiled WebAssembly module) is tested against it.
 
 Key facts:
 - Deploy a definition: `PUT /v1/definitions` with `id`, `definition` (XState v5 JSON), and optionally `parentId`, `historyPath` (an exact event history that selects which running actors move), `historyRegions` (per parallel region), `stateMapping` and `contextTransform`.
@@ -8,7 +8,8 @@ Key facts:
 - If a version removes occupied states without a mapping, the deploy returns `requires_confirmation` with the affected actors and a `confirmToken`. Confirmed actors become `needs_rescue` and are never misplaced.
 - Actors: `POST /v1/actors` (spawn) and `POST /v1/actors/:id/event` (send). An event is acknowledged only after it is committed.
 - Side effects have delivery modes (`idempotent`, `verify`, ...). An unknown outcome is never silently repeated.
-- Licence: Apache 2.0 with the Commons Clause. Free to use and self-host; selling it as a service needs an agreement.
+- Licence: source-available, Apache 2.0 with the Commons Clause (not OSI open source). Free to use, modify and self-host; selling it as a service needs an agreement.
+- Migration never runs entry actions or replays events. Optional event pruning (`STATEKEEP_MAX_EVENT_HISTORY_DAYS`, off by default) ends the complete audit log; routing is unaffected.
 
 ## Docs
 - [README](https://github.com/mmujtaba0085/StateKeep/blob/master/README.md): overview, 60-second demo, comparison, FAQ

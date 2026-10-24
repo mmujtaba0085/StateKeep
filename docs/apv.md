@@ -162,7 +162,7 @@ In StateKeep terms: when actors have `needs_rescue` status, a subsequent deploym
 
 ## 7. The FNV-1a Fingerprint Chain
 
-> **Current encoding (v2).** New fingerprints are a length-prefixed SHA-256 chain, written `2:<hex>`; the FNV-1a chain below hashes the plain concatenation of event types, so `[PAY, MENT_OK]` and `[PAYMENT_OK]` collide. It remains only for *legacy* actors. Those are upgraded from their event log when the replay provably determines their history (at start-up, `POST /v1/admin/fingerprints/upgrade`, or before an ambiguous history-targeted deployment; see `src/runtime/legacyFingerprints.js`). A legacy actor that cannot be upgraded is matched by a history pattern only when the pattern splits into the family's event types in exactly one way; otherwise the match is refused and the deployment warns `LEGACY_HISTORY_AMBIGUOUS`. The routing rule itself is formalized in `formal/APV.lean` and the code is tested against it by `test/test_model_oracle.js`.
+> **Current encoding (v2).** New fingerprints are a length-prefixed SHA-256 chain, written `2:<hex>`; the FNV-1a chain below hashes the plain concatenation of event types, so `[PAY, MENT_OK]` and `[PAYMENT_OK]` collide. It remains only for *legacy* actors. Those are upgraded from their event log when the replay provably determines their history (at start-up, `POST /v1/admin/fingerprints/upgrade`, or before an ambiguous history-targeted deployment; see `src/runtime/legacyFingerprints.js`). A legacy actor that cannot be upgraded is matched by a history pattern only when the pattern splits into the family's event types in exactly one way; otherwise the match is refused and the deployment warns `LEGACY_HISTORY_AMBIGUOUS`. The routing rule itself is formalized in `formal/APV.lean` and the code is tested against it by `test/test_model_oracle.js`. Storage is one fingerprint per actor, plus one per parallel region: constant per actor for a given definition, never growing with the history.
 
 The prefix class `[v]_t` is represented concretely as a 64-bit FNV-1a hash. This is the heart of APV's O(1) per-event memory guarantee.
 
@@ -224,7 +224,7 @@ This starts from `FNV_OFFSET` and chains `fnv1aUpdate` for each event type — i
 
 The core routing logic runs in a WebAssembly module compiled from C (see `src/ffi/Makefile`). At startup, `src/ffi/engine.js` imports `src/ffi/apv-engine.mjs` (a small loader with the WASM binary inlined), which initialises the WebAssembly instance and exposes the APV C functions as JavaScript-callable methods. The JavaScript layer wraps these into a unified object.
 
-The pre-built WASM engine (`src/ffi/apv-engine.mjs`) is included in the repository — no build step is required. Rebuilding the engine requires proprietary C source not included in the open-source release.
+The pre-built WASM engine (`src/ffi/apv-engine.mjs`) is included in the repository — no build step is required. The engine's C source is proprietary and not part of this repository, so the module cannot be rebuilt from it; if it is missing, restore it with `git checkout -- src/ffi/apv-engine.mjs` or re-clone. The routing rule it implements is published and proved in [`formal/`](../formal/), and the engine is tested against it (`test/test_model_oracle.js`).
 
 ### The 13 Exported Symbols
 
@@ -373,6 +373,31 @@ Actors whose fingerprint does not match `"a3f2c9018bd4e701"` get `null` from `co
 ### Step 5: No Change-Point → No Migration
 
 Actors that never processed `APPROVE` — or processed it in a different order — have a different fingerprint. The engine returns `null` for them. They keep running on `loan-v1` indefinitely (or until a wildcard deploy targets them).
+
+---
+
+### What a migration does and does not do
+
+| A migration… | |
+|---|---|
+| keeps the actor's context (after `contextTransform`) and its history fingerprint | ✅ |
+| places the actor in its landing state (`stateMapping`, per leaf for nested and parallel states) | ✅ |
+| writes a `MIGRATED` event in the same transaction as the move | ✅ |
+| cancels the old state's `after:` timers and schedules the landing state's timers | ✅ (timers are not side effects) |
+| runs the landing state's **entry actions** | ❌ never |
+| replays any events | ❌ never |
+
+Not running entry actions is what guarantees that a migration never fires side effects:
+an actor already in `shipped` has already had `shipped`'s entry actions run on the version
+it entered. The flip side is that if v2 **adds** an entry action to a state, actors that
+migrate *into* that state do not run it; only actors that enter the state by a transition
+afterwards do. If the new action must reach migrated actors, send them an event that runs it,
+or deploy a step that does. (An opt-in to run selected entry actions on migration is being
+considered; actions have delivery modes, so it can be made safe.)
+
+**Event-history pruning.** With `STATEKEEP_MAX_EVENT_HISTORY_DAYS` set (off by default), old
+user events are deleted, so the history is no longer a complete audit log and no longer
+replays to the current state. Routing is unaffected because it uses the stored fingerprints.
 
 ---
 

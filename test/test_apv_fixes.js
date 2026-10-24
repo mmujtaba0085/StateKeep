@@ -213,7 +213,7 @@ test('embedded mode: a deployment registers a change-point and migrates actors i
     const act = await sk.spawnActor({ definitionId: v1.id });
     const v2 = await sk.deployDefinition({ id: 'emb', initial: 'a', states: { a: { on: { GO: 'b' } }, b: {}, c: {} } }, { parentId: v1.id });
     const s = await sk.getActor(act.id);
-    console.log(JSON.stringify({ v2: v2.id, def: s.definitionId, migrated: v2.migrated }));
+    console.log(JSON.stringify({ v2: v2.id, def: s.definitionId, migrated: v2.migrated, failed: v2.failed, failures: v2.failures }));
     await sk.close(); process.exit(0);`;
   const file = join(process.cwd(), `.emb-test-${process.pid}.mjs`);
   writeFileSync(file, script);
@@ -225,6 +225,8 @@ test('embedded mode: a deployment registers a change-point and migrates actors i
   const out = JSON.parse(line);
   assert.equal(out.def, out.v2);
   assert.equal(out.migrated, 1);
+  assert.equal(out.failed, 0, 'failures are reported, not swallowed');
+  assert.deepEqual(out.failures, []);
 });
 
 test('legacy fingerprints: upgraded from the event log, and never matched ambiguously', async () => {

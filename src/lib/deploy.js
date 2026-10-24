@@ -13,7 +13,7 @@
 
 import { randomUUID, createHash } from 'crypto';
 import { createDefinition, updateCompiledJson, findDefinitionById } from '../registry/definitionRepo.js';
-import { createDeployment, updateDeploymentStatus } from '../registry/deploymentRepo.js';
+import { createDeployment, updateDeploymentStatus, incrementMigrated, incrementFailed } from '../registry/deploymentRepo.js';
 import { findActorsByMachine } from '../registry/actorRepo.js';
 import { insertChangepoint } from '../registry/changepointRepo.js';
 import { nextDeployTick, withFamilyDeployLock } from '../registry/deployClock.js';
@@ -62,20 +62,36 @@ export async function deployDefinition(definitionJson, {
     try { invalidateMigrationCacheForDefinition(parentId); } catch {}
 
     // Route every actor of the family that has a pending route, in-process.
+    // An actor that cannot be routed or migrated here is not lost: it stays on its current
+    // version and is routed by the same rule before its next event (a failed lookup refuses
+    // the event rather than running it unrouted), and stranded actors are retried by the
+    // stranded-actor sweep. It is still reported, never counted as done.
     const actors = await findActorsByMachine(machineId ?? family);
     const pending = [];
+    const failed = [];
     for (const a of actors) {
-      const target = await routeTargetFor(a).catch(() => null);
+      let target = null;
+      try { target = await routeTargetFor(a); }
+      catch (e) { failed.push({ actorId: a.id, stage: 'routing', error: e.message }); continue; }
       if (target && target !== a.definitionId) pending.push(a.id);
     }
-    const deploymentId = await createDeployment({ definitionId: id, affectedActors: pending.length });
-    let migrated = 0, stranded = 0;
+    const deploymentId = await createDeployment({ definitionId: id, affectedActors: pending.length + failed.length });
+    let migrated = 0, stranded = 0, unchanged = 0;
     for (const actorId of pending) {
-      const r = await migrateActorOwned(actorId, id, { deploymentId }).catch(() => null);
-      if (r?.outcome === 'migrated') migrated++;
+      let r;
+      try { r = await migrateActorOwned(actorId, id, { deploymentId }); }
+      catch (e) { failed.push({ actorId, stage: 'migration', error: e.message }); continue; }
+      if (r?.outcome === 'migrated') { migrated++; await incrementMigrated(deploymentId).catch(() => {}); }
       else if (r?.outcome === 'needs_rescue') stranded++;
+      else unchanged++;                       // finished meanwhile, or no longer applicable
     }
-    await updateDeploymentStatus(deploymentId, 'complete');
-    return { id, machineId, deployedAt: Number(tStar), deploymentId, migrationJobs: pending.length, migrated, stranded };
+    for (let i = 0; i < failed.length; i++) await incrementFailed(deploymentId).catch(() => {});
+    if (failed.length) {
+      console.error(`[deploy] ${id}: ${failed.length} actor(s) could not be routed now; they stay on their `
+        + `current version and are routed before their next event:`, failed.slice(0, 10));
+    }
+    await updateDeploymentStatus(deploymentId, failed.length && !migrated ? 'failed' : 'complete');
+    return { id, machineId, deployedAt: Number(tStar), deploymentId, migrationJobs: pending.length,
+      migrated, stranded, unchanged, failed: failed.length, failures: failed };
   });
 }

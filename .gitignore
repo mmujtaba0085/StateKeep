@@ -33,7 +33,7 @@ mock/libapv-mock.c
 test/c/test_ffi_direct
 test/c/test_ffi_direct.c
 
-# VPS / infrastructure — not part of the open-source release
+# VPS / infrastructure — not part of the public repository
 vps-mcp/
 src/config/
 ecosystem.config.cjs
@@ -75,3 +75,6 @@ bank.jsonl
 effects.jsonl
 chaos-report*.json
 formal/.toolchain/
+
+# raw chaos-campaign runs (large); the summary is committed
+benchmarks/chaos/runs/

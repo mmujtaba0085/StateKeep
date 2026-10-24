@@ -7,7 +7,7 @@ const useApp = () => useContext(AppCtx);
 
 function AppProvider({ children }) {
   const [route, setRoute] = useState(() => (window.location.hash.replace(/^#/, "") || "command"));
-  const [org] = useState({ name: "StateKeep", tier: "Open Source" });
+  const [org] = useState({ name: "StateKeep", tier: "Self-hosted" });
   const [selectedMachine, setSelectedMachine] = useState(null);
   const [selectedActorId, setSelectedActorId] = useState(null);
   const [toasts, setToasts] = useState([]);

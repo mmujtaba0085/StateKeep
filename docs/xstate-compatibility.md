@@ -33,82 +33,67 @@ The following config fields are stored and used:
 | `stateMapping` | Used — renamed-state migration |
 | `historyPath` / `historyRegions` | Used — APV migration targeting |
 
-## What is NOT supported
+## Guards, actions and services
 
-### Guards
+Guards, actions and invoked services **are executed**. Their implementations live outside
+the definition, so the definition stays plain JSON: versionable, diffable and migratable.
 
-Guards in transition definitions are parsed and stored but **never evaluated**. Every transition fires unconditionally — the first matching event wins.
-
-```json
-{
-  "on": {
-    "APPROVE": {
-      "target": "approved",
-      "guard": "isEligible"
-    }
-  }
-}
-```
-
-StateKeep will take this transition regardless of `isEligible`. **Do not rely on guards to protect transitions.** Move that logic to your own backend before sending the event.
-
-### Actions and services
-
-Entry/exit actions, transition actions, and invoked services are ignored:
+| Where an implementation comes from | How |
+|---|---|
+| Expression guards | `"guard": "cond:amount < 1000000"`, evaluated by StateKeep with no code and no registry ([grammar](../src/runtime/conditionGuards.js)) |
+| A local JavaScript module | `STATEKEEP_REGISTRY_PATH=/path/registry.js` exporting `{ guards, actions, services }`. Wrap side-effecting actions with `StateKeep.durable(fn, { delivery })` ([side effects](side-effects.md)) |
+| Your own service, any language | `STATEKEEP_REMOTE_URL` + `STATEKEEP_REMOTE_SECRET`: guards and actions over signed HTTP ([remote implementations](remote-implementations.md)) |
 
 ```json
 {
-  "entry": ["logEntry", "sendNotification"],
+  "on": { "APPROVE": { "target": "approved", "guard": "isEligible" } },
+  "entry": ["sendNotification"],
   "invoke": { "src": "fetchCreditScore" }
 }
 ```
 
-StateKeep will store these fields and advance the actor's state correctly, but it will **not execute** the actions or invoke the service. Your backend owns side effects — read the returned `stateValue` and act accordingly, or configure a webhook.
+How they behave:
+
+- **Guards** decide transitions. A guard that throws, times out, or has no implementation
+  evaluates to **false** (fail closed), so a guarded transition is never taken by accident.
+- **Actions** run as durable jobs, queued in the same transaction as the transition. Each
+  action has a **delivery mode** (`idempotent`, `verify`, ...). An action whose outcome is
+  unknown after a crash is never silently repeated: it's retried only when that's safe,
+  otherwise it goes to human review ([side effects](side-effects.md)).
+- **Invoked services** run while their state is active. Their result is sent back to the
+  actor as an event.
+- **Deploy-time check:** when a registry or remote service is configured, a definition that
+  names a guard or action that exists in neither is rejected with `422` (this catches
+  typos). Malformed `cond:` expressions are always rejected.
+- **No implementations configured:** if neither `STATEKEEP_REGISTRY_PATH` nor
+  `STATEKEEP_REMOTE_URL` is set, named guards evaluate to false and named actions do
+  nothing. The server logs a warning at start-up. `cond:` guards still work.
+- **Migration** restores an actor into its landing state **without running entry
+  actions**, so a migration never fires side effects. See [APV: what a migration does](apv.md#what-a-migration-does-and-does-not-do).
 
 ### XState `setup()` / TypeScript-native syntax
 
-XState v5 encourages a `setup({ guards, actions, actors })` call that wires implementations inline with TypeScript functions:
+XState v5's `setup({ guards, actions, actors })` wires implementations inline as
+functions. Functions can't be sent over HTTP, so split the machine in two:
 
 ```typescript
-// This does NOT work with StateKeep
-import { setup } from 'xstate';
-
-const machine = setup({
-  guards:  { isEligible: ({ context }) => context.score > 700 },
-  actions: { notify:     ({ context }) => sendEmail(context.email) },
-}).createMachine({ initial: 'submitted', states: { … } });
-```
-
-StateKeep cannot receive TypeScript functions over HTTP. To use a machine defined this way with StateKeep, extract the JSON config and strip the implementations:
-
-```typescript
-// Extract the plain config object
+// 1. The config (plain JSON) is what you deploy
 const config = {
   initial: 'submitted',
   states: {
-    submitted: { on: { APPROVE: 'approved' } },
-    approved:  { type: 'final' },
+    submitted: { on: { APPROVE: { target: 'approved', guard: 'isEligible' } } },
+    approved:  { entry: ['notify'], type: 'final' },
   },
 };
 
-// Deploy the config — guards/actions are handled by your backend
-await client.deployDefinition({ id: 'loan-machine', machineDefinition: config });
+// 2. The implementations go in your registry module (or remote service)
+export const guards  = { isEligible: ({ context }) => context.score > 700 };
+export const actions = { notify: StateKeep.durable(({ context }, { jobId }) =>
+  mail.send(context.email, { idempotencyKey: jobId }), { delivery: 'idempotent' }) };
 ```
 
-## Recommended pattern
-
-1. **Define structure in JSON** — states, transitions, and hierarchy live in StateKeep.
-2. **Implement logic in your backend** — check eligibility before calling `sendEvent`; respond to `stateValue` to trigger downstream actions.
-3. **Use webhooks for async work** — register `POST /v1/webhooks` to receive `actor.transitioned` events and run background jobs.
-
-```
-Customer backend                   StateKeep
-──────────────────────────────────────────────────
- 1. Check guard logic locally
- 2. Call POST /v1/actors/:id/event ──────────────► advance state
- 3. Read stateValue in response   ◄──────────────
- 4. Execute action (email, DB) ◄─── OR use webhook
-```
+For in-process XState apps that don't use a StateKeep server, see
+[`@statekeep/xstate-apv`](../packages/xstate-apv/), which keeps XState's own implementations.
 
 ## Context transforms on migration
 
@@ -142,7 +127,14 @@ By default, StateKeep retains all events forever. To cap storage growth, set `ST
 STATEKEEP_MAX_EVENT_HISTORY_DAYS=90
 ```
 
-The `gc-worker` process will prune events older than this threshold on each GC cycle. The following lifecycle events are **always retained** regardless of age:
+The `gc-worker` process will prune events older than this threshold on each GC cycle.
+
+> [!WARNING]
+> Pruning is off by default. Once it is on, the event history is **no longer a complete
+> audit log**, and an actor's history can no longer be replayed to its current state.
+> Routing is not affected: it uses each actor's stored fingerprint, not its log.
+
+The following lifecycle events are **always retained** regardless of age:
 
 - `SPAWN`
 - `MIGRATED`
@@ -153,4 +145,9 @@ The `gc-worker` process will prune events older than this threshold on each GC c
 
 ## Why this design
 
-StateKeep's value is **state persistence, migration, and multi-version routing** — not running arbitrary customer code. Keeping the engine pure JSON means definitions are versionable, diffable, and migratable without code execution. Guards and actions belong in the customer's backend where they have access to secrets, databases, and the full application context.
+StateKeep's job is **state persistence, migration and multi-version routing**, and it runs
+your guards and actions as part of that. The definition holds only structure and the
+*names* of implementations. The code lives in your registry module or your own service,
+next to your secrets and databases. This split keeps definitions plain data that can be
+diffed, reviewed in a pull request and migrated, while the engine controls *when* and *how
+safely* each side effect runs (durable jobs, delivery modes, human review).

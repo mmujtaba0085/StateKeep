@@ -19,8 +19,8 @@
   <a href="https://github.com/mmujtaba0085/StateKeep/tags"><img alt="Version" src="https://img.shields.io/github/v/tag/mmujtaba0085/StateKeep?label=version&color=4f46e5"></a>
   <img alt="Node 22+" src="https://img.shields.io/badge/node-%E2%89%A522-339933?logo=nodedotjs&logoColor=white">
   <img alt="XState v5 definitions" src="https://img.shields.io/badge/definitions-XState%20v5-2c3e50">
-  <a href="formal/"><img alt="Routing rule proved in Lean 4" src="https://img.shields.io/badge/routing%20rule-proved%20in%20Lean%204-0d9488"></a>
-  <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-Apache%202.0%20%2B%20Commons%20Clause-blue"></a>
+  <a href="formal/"><img alt="Routing model proved in Lean 4, engine tested against it" src="https://img.shields.io/badge/routing%20model-proved%20in%20Lean%204%20%C2%B7%20engine%20tested%20against%20it-0d9488"></a>
+  <a href="LICENSE"><img alt="License: source-available (Apache 2.0 + Commons Clause)" src="https://img.shields.io/badge/license-source--available%20(Apache%202.0%20%2B%20Commons%20Clause)-blue"></a>
   <a href="https://github.com/mmujtaba0085/StateKeep/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/mmujtaba0085/StateKeep?style=social"></a>
 </p>
 
@@ -106,7 +106,7 @@ Removing a state that actors occupy returns a **preview with a confirm token**, 
 <td valign="top">
 
 ### 💾 Durable by default
-An event is acknowledged only after it's committed. Actors survive crashes, restarts and deploys. Context is encrypted with AES-256-GCM, and the event history is an immutable audit log.
+An event is acknowledged only after it's committed. Actors survive crashes, restarts and deploys. Context is encrypted with AES-256-GCM, and the event history is an append-only audit log (unless you turn on optional pruning).
 
 </td>
 <td valign="top">
@@ -159,17 +159,18 @@ flowchart LR
 ```
 
 * Every deployment registers a **change-point**: *from logical time t, actors of this family whose history matches π go to version d′*. π is either an exact history or "all actors".
-* Every actor carries a **history fingerprint**, a length-prefixed SHA-256 chain over the events that changed its state. That's O(1) storage per actor, and routing never scans the log.
+* Every actor carries a **history fingerprint**, a length-prefixed SHA-256 chain over the events that changed its state. Storage is constant per actor (one fingerprint, plus one per parallel region) and never grows with the history; routing never scans the log.
 * Before each event, the actor is routed to a **fixpoint** through every pending version. Then the event runs.
+* A migration places the actor in its landing state **without running entry actions** and without replay, so it never fires side effects ([details](docs/apv.md#what-a-migration-does-and-does-not-do)).
 
-This scheme is called **APV** (*anchor-point versioning*). Its core properties are **machine-checked in Lean 4**: [`formal/APV.lean`](formal/):
+This scheme is called **APV** (*anchor-point versioning*). The core properties of its **routing model** are **machine-checked in Lean 4** ([`formal/APV.lean`](formal/)):
 * determinism and progress (routing terminates and never revisits a version);
 * completeness;
 * safety (an actor is never placed in a state that doesn't exist);
 * the parallel-region order;
 * the garbage-collection frontier.
 
-The routing code is **differentially tested** against those same Lean definitions run as a program ([`test/test_model_oracle.js`](test/test_model_oracle.js)).
+The proofs are about the model, not the shipped engine (a compiled WebAssembly module). The engine and the routing code are **differentially tested** against those same Lean definitions run as a program ([`test/test_model_oracle.js`](test/test_model_oracle.js)): the model is proved, and the code is tested against it.
 
 ## ⚖️ How it compares
 
@@ -243,14 +244,14 @@ Write workflows as async functions with [`@statekeep/durable`](packages/durable/
 
 ## 🔬 Evidence it works
 
-- **Proofs:** the routing model is machine-checked in Lean 4 with no `sorry` and only standard axioms ([`formal/`](formal/)).
+- **Proofs:** the routing *model* is machine-checked in Lean 4 with no `sorry` and only standard axioms ([`formal/`](formal/)). This covers the model, not the engine binary.
 - **Model-vs-code testing:** the live routing code, the deploy-preview code and the analysis driver are compared hop-by-hop with the Lean definitions on random registries.
 - **Fault injection:** [`npm run chaos`](docs/chaos-testing.md) and [`npm run chaos:workflows`](docs/chaos-testing.md) run generated workflows while they:
   - kill API servers, workers and services;
   - deploy new versions mid-flight;
   - fire storms of concurrent, duplicate and unknown events.
 
-  Every actor is then checked against a ground-truth model kept independent of the system under test: no lost or duplicated events, no misrouted or misplaced actors. The most recent run (SQLite backend) covered 660 actors across both campaigns, with 9 live deployments landing mid-flight, and **0 violations**.
+  Every actor is then checked against a ground-truth model kept independent of the system under test: no lost or duplicated events, no misrouted or misplaced actors. The full campaign ([`scripts/chaos-campaign.sh`](scripts/chaos-campaign.sh)) runs on **SQLite, PostgreSQL and a 2-server PostgreSQL cluster**, at normal and hard intensity. The latest run covered **2,600 actors and 51 live deployments** (2,247 migrations checked), with 41 API-server kills, 20 database-connection drops, 24 service crashes and 42 worker kills: **0 violations** ([results](docs/chaos-testing.md#campaign-results), [raw summary](benchmarks/chaos/summary.json)). All runs were on a single host with generated workflows.
 - **Test suites:** unit, property-based, integration, statechart (SC1–SC18), cluster and end-to-end. Run them with `npm run test:all`.
 
 ## ⚙️ Configuration essentials
@@ -317,7 +318,7 @@ It's at v1.1, with extensive automated testing (proofs, model-vs-code tests, fau
 <details>
 <summary><b>Is it open source?</b></summary>
 
-The source is public under **Apache 2.0 with the Commons Clause**. You can use, modify and self-host it for any purpose. Selling StateKeep, or a modified version, as a hosted service or product needs a commercial agreement. The APV routing engine ships as a compiled WebAssembly module, and its routing model is published and proved in [`formal/`](formal/).
+No, it's **source-available**. The code is public under **Apache 2.0 with the Commons Clause**, which is not an OSI-approved open-source licence. You can use, modify and self-host it for any purpose, but selling StateKeep, or a modified version, as a hosted service or product needs a commercial agreement. The APV routing engine ships as a compiled WebAssembly module whose C source is not public. Its routing model is published and proved in [`formal/`](formal/), and the engine is tested against that model.
 </details>
 
 ## 🤝 Contributing

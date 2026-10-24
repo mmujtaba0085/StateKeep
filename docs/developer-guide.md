@@ -133,7 +133,7 @@ StateKeep accepts **plain JSON** compatible with XState v5 structure. Key rules:
 - `initial` must reference an existing state
 - Every transition target must be an existing state
 - Final states (`"type": "final"`) cannot have outgoing transitions
-- No inline JavaScript functions — guards and actions are no-ops (see [XState Compatibility](xstate-compatibility.md))
+- No inline JavaScript functions in the definition: guards and actions are referenced by name and implemented in a registry module, a remote service, or as `cond:` expressions (see [XState Compatibility](xstate-compatibility.md))
 - State names must be unique
 
 **Soft warnings** (definition still stored):

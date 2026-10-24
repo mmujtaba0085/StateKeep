@@ -11,7 +11,7 @@ Production deployment checklist, Caddy/Nginx TLS termination config, and systemd
 - Nginx 1.18+ for TLS termination
 - A valid TLS certificate (Let's Encrypt via Certbot recommended)
 
-> **APV engine:** The pre-built WASM engine (`src/ffi/apv-engine.mjs`) is included in the repository — no build step is required. Rebuilding the engine requires proprietary C source not included in the open-source release.
+> **APV engine:** The pre-built WASM engine (`src/ffi/apv-engine.mjs`) is included in the repository — no build step is required. The engine's C source is proprietary and not part of this repository, so the module cannot be rebuilt from it; if it is missing, restore it with `git checkout -- src/ffi/apv-engine.mjs` or re-clone. The routing rule it implements is published and proved in [`formal/`](../formal/), and the engine is tested against it (`test/test_model_oracle.js`).
 
 ---
 

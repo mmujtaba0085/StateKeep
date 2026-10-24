@@ -37,8 +37,9 @@ async function loadEngine() {
   const mjsPath = join(__dirname, 'apv-engine.mjs');
   if (!existsSync(mjsPath)) {
     throw new Error(
-      '[ffi/engine] WASM engine not built.\n' +
-      '  Run: make wasm -C src/ffi   (requires Emscripten — https://emscripten.org)'
+      '[ffi/engine] APV engine module missing: src/ffi/apv-engine.mjs.\n' +
+      '  It ships pre-built in the repository and is not built from this source tree.\n' +
+      '  Restore it with `git checkout -- src/ffi/apv-engine.mjs`, or re-clone / reinstall StateKeep.'
     );
   }
 
