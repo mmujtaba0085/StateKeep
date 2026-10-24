@@ -1,153 +1,331 @@
-<div align="center">
+<!--
+  StateKeep: self-hosted engine for persistent statechart actors with history-based live version migration.
+  Keywords: state machine engine, workflow engine, statecharts, XState v5, durable execution, actor model,
+  workflow versioning, live migration, zero-downtime deployment, long-running workflows, SQLite, PostgreSQL.
+-->
 
-# StateKeep
+<p align="center">
+  <a href="#-see-it-in-60-seconds">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="docs/assets/hero-dark.svg">
+      <source media="(prefers-color-scheme: light)" srcset="docs/assets/hero-light.svg">
+      <img alt="StateKeep: two actors reach the same state by different paths; a new version deployed with historyPath moves only the one that took that path." src="docs/assets/hero-dark.svg" width="100%">
+    </picture>
+  </a>
+</p>
 
-**Durable, versioned state machines — for workflows, and for AI agents that have to survive the real world.**
+<p align="center">
+  <a href="https://github.com/mmujtaba0085/StateKeep/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/mmujtaba0085/StateKeep/actions/workflows/ci.yml/badge.svg?branch=master"></a>
+  <a href="https://github.com/mmujtaba0085/StateKeep/tags"><img alt="Version" src="https://img.shields.io/github/v/tag/mmujtaba0085/StateKeep?label=version&color=4f46e5"></a>
+  <img alt="Node 22+" src="https://img.shields.io/badge/node-%E2%89%A522-339933?logo=nodedotjs&logoColor=white">
+  <img alt="XState v5 definitions" src="https://img.shields.io/badge/definitions-XState%20v5-2c3e50">
+  <a href="formal/"><img alt="Routing rule proved in Lean 4" src="https://img.shields.io/badge/routing%20rule-proved%20in%20Lean%204-0d9488"></a>
+  <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-Apache%202.0%20%2B%20Commons%20Clause-blue"></a>
+  <a href="https://github.com/mmujtaba0085/StateKeep/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/mmujtaba0085/StateKeep?style=social"></a>
+</p>
 
-[![License](https://img.shields.io/badge/license-Apache%202.0%20%2B%20Commons%20Clause-blue)](LICENSE)
-[![Node](https://img.shields.io/badge/node-%3E%3D22.0.0-339933?logo=node.js&logoColor=white)](package.json)
-[![CI](https://img.shields.io/badge/CI-GitHub%20Actions-2088FF?logo=githubactions&logoColor=white)](.github/workflows/ci.yml)
-[![XState v5 compatible](https://img.shields.io/badge/definitions-XState%20v5%20compatible-6b46c1)](docs/xstate-compatibility.md)
-[![Self-hosted](https://img.shields.io/badge/deploy-self--hosted-black)](#quick-start)
-
-[Quick Start](#quick-start) · [AI Agents](#-built-for-ai-agents) · [Features](#features) · [Docs](#documentation) · [Why Not Just Use X](#why-not-just-use-x)
-
-</div>
-
----
-
-Every long-running process — an order, a loan, a support ticket, an AI agent mid-conversation — is a state machine whether you modeled it that way or not. StateKeep lets you define it explicitly, run it as a persistent actor, and **change its logic while it's still running**, without replaying history, without downtime, and without a migration script that only breaks in production.
-
-```bash
-curl -X PUT localhost:3001/v1/definitions -d '{
-  "id": "order-v1",
-  "definition": { "id": "order", "initial": "pending", "states": {
-    "pending": { "on": { "PAY": "paid" } },
-    "paid":    { "type": "final" }
-  }}
-}'
-
-curl -X POST localhost:3001/v1/actors -d '{"definitionId":"order-v1"}'
-# → { "id": "a1b2c3", "stateValue": "pending" }
-
-curl -X POST localhost:3001/v1/actors/a1b2c3/event -d '{"type":"PAY"}'
-# → { "stateValue": "paid" }
-```
-
-That actor now **lives forever** — survives restarts, crashes, deploys — and when you ship `order-v2`, StateKeep decides, per actor, based on the exact path each one took, whether it should move. Two actors sitting in the same state can get different, both-correct routing decisions in the same deployment.
+<p align="center">
+  <a href="#-see-it-in-60-seconds"><b>60-second demo</b></a> ·
+  <a href="#-quick-start"><b>Quick start</b></a> ·
+  <a href="#-how-it-works"><b>How it works</b></a> ·
+  <a href="#-how-it-compares"><b>Compare</b></a> ·
+  <a href="docs/API.md"><b>API</b></a> ·
+  <a href="#-faq"><b>FAQ</b></a>
+</p>
 
 ---
 
-## 🤖 Built for AI Agents
+**StateKeep** runs your workflows as **persistent statechart actors** (orders, loans, onboarding, support tickets, AI agent sessions) and lets you ship **new versions to actors that are already running**.
 
-An agent loop — *user message → model call → tool call → wait for human approval → reply* — is just a state machine with unusually expensive transitions. Model it as a StateKeep actor and the hard parts disappear:
+Each actor moves to the right version based on **the path it took** to get where it is. You don't replay events, write migration scripts, or keep old workers alive.
 
-```
-idle ──USER_MESSAGE──▶ thinking (callModel)
-                         │ REPLY ─────────────▶ idle
-                         │ TOOL_CALL (refund) ──▶ awaiting_approval ─APPROVE─▶ running_tool ─▶ thinking
-                         │ TOOL_CALL (other)  ──▶ running_tool              └─DENY──▶ thinking
-```
+You define a machine in **XState v5** JSON, deploy it with one HTTP call, and send events. StateKeep stores every actor's state, context (encrypted) and full event history in **SQLite or PostgreSQL**. It survives crashes, and it can run as a **cluster**.
 
-| Problem with agent loops in production | What you get for free |
-|---|---|
-| Server restarts mid-conversation → lost context | Transcript and pending step are committed before an event is even acknowledged |
-| Tool calls double-fire on retry | Every tool call carries a `jobId`; the SDK replays the first result instead of re-running it |
-| "Human in the loop" means building your own queue | `awaiting_approval` is just a state. The session waits a week if it has to. Costs nothing while it waits |
-| Policy changes ("refunds over $50 need approval") require a redeploy of running sessions | It's a `cond:` guard in the definition — reviewable in a pull request, versioned like everything else |
-| Shipping a new system prompt means losing every in-flight session | Deploy `v2` with a `parentId`. Every live session — including ones sitting in `awaiting_approval` right now — picks up the new prompt and policy without losing its place or its transcript |
-| "What did the agent actually do at 3am?" | Every model step, tool call, approval and denial is an immutable event in that actor's history |
+> [!TIP]
+> **The one-sentence idea:** two orders can both be `shipped`, but if only one was ever put `on hold`, a fix for held orders should reach only that one. StateKeep makes that a deployment flag: `"historyPath": ["HOLD", "RELEASE"]`.
 
-A full working example — a refund agent, its v1→v2 upgrade mid-flight, and the tests proving a session survives `kill -9` of the server — is in [`examples/agent/`](examples/agent/) and [`docs/agent-sessions.md`](docs/agent-sessions.md).
+## 🤔 Why this exists
 
----
+Once a workflow is live, three problems show up.
 
-## Features
-
-- **🔀 Zero-downtime migration** — the APV (Anchor Point Versioning) engine routes every live actor to the right version of your definition based on the exact event path it took, not just its current state. No replay, no migration script.
-- **🛡️ Stranded-actor protection** — deploying a version that removes a state actors currently occupy doesn't fail silently. You get a preview, a confirm token, and a rescue path.
-- **⚙️ Durable workflows** — [`@statekeep/durable`](packages/durable) gives you code-first durable functions with history-based version routing, no YAML required.
-- **📬 Delivery guarantees per action** — idempotent, verify-based, or at-most-once side effects. A charge, a refund notification, and an SMS don't need the same safety net, so they don't get charged the same cost.
-- **🌐 Cluster mode** — multiple nodes, one registry, pause-safe visibility barriers so a deploy never races an actor's own lease.
-- **🧩 Bring your own definitions** — importers for BPMN, Amazon States Language, and SCXML; an XState v5-compatible format; SDKs for [Go](sdks/go), [Python](sdks/python), and [JS](sdk/).
-- **🔍 Full audit trail** — every transition, migration, and side effect is an immutable event row. Nothing is inferred after the fact.
-
----
-
-## Battle-tested, not just unit-tested
-
-Most workflow engines ship with unit tests and call it done. StateKeep additionally runs two **chaos-engineering campaigns** against real processes — real `SIGKILL`s, real crashed services, real mid-flight deployments — and checks every result against ground truth that's deliberately kept independent of the system under test. One campaign rebuilds every actor from its own audit log, using a second, in-memory replay of the interpreter, and diffs it against the live result.
-
-On top of that, the routing model itself — the part that decides which actor goes where during a migration — is [formally verified in Lean 4](formal/), with the real runtime cross-checked against the proof.
-
-```bash
-npm run chaos            # fault-injected payment workflows: real crashes, real retries
-npm run chaos:workflows   # the same, across 8 unrelated generated domains
-```
-
-Read [`docs/chaos-testing.md`](docs/chaos-testing.md) for how the fault injection and the independent oracle actually work.
-
----
-
-## Why Not Just Use X?
-
-| | Best at | What you still have to build |
+| Problem | What usually happens | What StateKeep does |
 |---|---|---|
-| **Temporal** | Durable, code-heavy async workflows with compensating transactions | Versioning is tied to your function code, not a definition. Old workers stay alive until every in-flight workflow they own completes — there's no built-in way to migrate a running workflow onto new logic. |
-| **Inngest** | Event-driven pipelines with minimal infra | No explicit state machine model or versioned definition concept — you build one inside a function if you need it. |
-| **XState** | Modeling stateful logic, excellent DX and ecosystem | It's a library, not infrastructure. Persistence, actor lifecycle, and migration routing for *running* actors are still on you. |
-| **StateKeep** | Treating the definition itself as versioned data, migrated surgically across live actors | — |
+| **Changing logic for in-flight instances** | Hand-written migration scripts that pass staging and fail on years of production edge cases | Every actor is routed to the new version by a deterministic rule, and its state is mapped declaratively |
+| **Old versions you can never retire** | v1 workers stay alive until the last v1 instance finishes | Running actors move forward, and old versions empty out and are collected |
+| **Instances silently left behind** | Actors keep running stale logic in states that no longer exist | Before you commit, a preview lists exactly which actors would be stranded. They're held for rescue, not misplaced |
 
-Use Temporal when the workflow *is* code. Use Inngest for zero-infra event pipelines. Use StateKeep when the definition is the product: it needs to be versioned, audited, and migrated as data — not replayed as a journal.
-
----
-
-## Quick Start
+## ⚡ See it in 60 seconds
 
 ```bash
-# 1. Generate a secret
-node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+docker compose up -d                                   # API on :3001, dashboard on /dashboard
+sk() { curl -s -H 'content-type: application/json' -H "x-api-key: $STATEKEEP_API_KEY" "$@"; }
 
-# 2. Configure
-cp .env.example .env   # set STATEKEEP_ENCRYPTION_KEY, STATEKEEP_ADMIN_KEY, STATEKEEP_API_KEY
+# 1. Deploy v1 of an order workflow
+sk -X PUT localhost:3001/v1/definitions -d '{"id":"order-v1","definition":{"id":"order","initial":"placed","states":{
+  "placed":{"on":{"PAY":"paid","HOLD":"on_hold"}}, "paid":{"on":{"SHIP":"shipped"}},
+  "on_hold":{"on":{"RELEASE":"shipped"}}, "shipped":{"on":{"DELIVER":"delivered"}}, "delivered":{"type":"final"}}}}'
 
-# 3. Run
-docker compose up -d
+# 2. Two orders reach "shipped" by different paths
+A=$(sk -X POST localhost:3001/v1/actors -d '{"definitionId":"order-v1"}' | jq -r .id)
+B=$(sk -X POST localhost:3001/v1/actors -d '{"definitionId":"order-v1"}' | jq -r .id)
+sk -X POST localhost:3001/v1/actors/$A/event -d '{"type":"PAY"}';  sk -X POST localhost:3001/v1/actors/$A/event -d '{"type":"SHIP"}'
+sk -X POST localhost:3001/v1/actors/$B/event -d '{"type":"HOLD"}'; sk -X POST localhost:3001/v1/actors/$B/event -d '{"type":"RELEASE"}'
 
-# 4. Check it's alive
-curl http://localhost:3001/v1/health
-# → {"status":"ok","engine":"wasm","db":"ok"}
+# 3. Ship v2 (held orders need an audit before delivery), only for orders that were held
+sk -X PUT localhost:3001/v1/definitions -d '{"id":"order-v2","parentId":"order-v1","historyPath":["HOLD","RELEASE"],
+  "definition":{"id":"order","initial":"placed","states":{
+  "placed":{"on":{"PAY":"paid","HOLD":"on_hold"}}, "paid":{"on":{"SHIP":"shipped"}},
+  "on_hold":{"on":{"RELEASE":"shipped"}}, "shipped":{"on":{"DELIVER":"audit"}},
+  "audit":{"on":{"APPROVE":"delivered"}}, "delivered":{"type":"final"}}}}'
+
+sleep 2                                               # the migrate worker moves B in the background
+sk localhost:3001/v1/actors/$A | jq .definitionId    # "order-v1"  (paid normally: untouched)
+sk localhost:3001/v1/actors/$B | jq .definitionId    # "order-v2"  (was held: now gets the audit step)
 ```
 
-No Docker? `npm install && node --env-file=.env src/api/server.js` works the same way — see [`docs/getting-started.md`](docs/getting-started.md) for the full walkthrough, including deploying a second version with path-based routing.
+Both orders were in the same state. Their histories differed, so they got different versions, with no replay and no script.
 
-**Windows:** runs natively, no WSL required for the server itself — just run `npm install` from PowerShell, not WSL, so `better-sqlite3` gets the right prebuilt binary. Details in [`docs/deployment.md`](docs/deployment.md).
+## ✨ What you get
 
----
+<table>
+<tr>
+<td width="50%" valign="top">
 
-## Documentation
+### 🧭 History-targeted versioning
+Deploy a version for **all** running actors, or only those whose history matches a pattern (`historyPath`, or per-region `historyRegions` for parallel states). Chains of pending versions are followed to a fixpoint.
 
-| | |
+</td>
+<td width="50%" valign="top">
+
+### 🛟 No silent strandings
+Removing a state that actors occupy returns a **preview with a confirm token**, not a broken deploy. Map states with `stateMapping` (dotted paths for nested states), reshape context with `contextTransform`, and rescue stranded actors later.
+
+</td>
+</tr>
+<tr>
+<td valign="top">
+
+### 💾 Durable by default
+An event is acknowledged only after it's committed. Actors survive crashes, restarts and deploys. Context is encrypted with AES-256-GCM, and the event history is an immutable audit log.
+
+</td>
+<td valign="top">
+
+### 🔁 Side effects never silently repeated
+Each action has a **delivery mode** (`idempotent`, `verify`, …). When an outcome is unknown after a crash, the action is retried safely or sent to a human for review, never fired twice by accident. [Read more](docs/side-effects.md)
+
+</td>
+</tr>
+<tr>
+<td valign="top">
+
+### 🌐 SQLite → Postgres → cluster
+Start with one SQLite file. Switch to PostgreSQL, then run several API servers behind any load balancer. Each actor has one owner, requests are forwarded, and a failed owner is taken over safely. [Read more](docs/multi-server.md)
+
+</td>
+<td valign="top">
+
+### 🤖 AI agent sessions
+Run an agent loop as an actor with tool calls with retries, human approval states, and **live prompt/policy upgrades for sessions already running**. [Read more](docs/agent-sessions.md)
+
+</td>
+</tr>
+<tr>
+<td valign="top">
+
+### 🧪 Know before you ship
+Static analysis on every deploy (unreachable states, dead ends, bad targets), scenario tests, and `statekeep plan`: a *terraform-plan*-style report of what a release does to production actors, also available as a GitHub Action. [Read more](docs/migration-plan.md)
+
+</td>
+<td valign="top">
+
+### 🔌 Bring your stack
+Guards and actions in **any language** over HTTP, SDKs for **TypeScript, Python and Go**, importers for **AWS Step Functions, SCXML and BPMN**, webhooks, WebSocket streams and a dashboard.
+
+</td>
+</tr>
+</table>
+
+## 🧠 How it works
+
+```mermaid
+flowchart LR
+    E["Event for actor a"] --> R{"Routing rule (APV):<br/>earliest applicable change-point<br/>for a's family, time and history"}
+    R -- "none" --> P["Process the event<br/>on a's current version"]
+    R -- "change-point c" --> M["Migrate: map state (μ)<br/>and context (τ) to c's version"]
+    M --> R
+    M -- "state can't be placed" --> S["Stranded: held for rescue,<br/>never misplaced"]
+    P --> C[("Commit state + event<br/>then acknowledge")]
+```
+
+* Every deployment registers a **change-point**: *from logical time t, actors of this family whose history matches π go to version d′*. π is either an exact history or "all actors".
+* Every actor carries a **history fingerprint**, a length-prefixed SHA-256 chain over the events that changed its state. That's O(1) storage per actor, and routing never scans the log.
+* Before each event, the actor is routed to a **fixpoint** through every pending version. Then the event runs.
+
+This scheme is called **APV** (*anchor-point versioning*). Its core properties are **machine-checked in Lean 4**: [`formal/APV.lean`](formal/):
+* determinism and progress (routing terminates and never revisits a version);
+* completeness;
+* safety (an actor is never placed in a state that doesn't exist);
+* the parallel-region order;
+* the garbage-collection frontier.
+
+The routing code is **differentially tested** against those same Lean definitions run as a program ([`test/test_model_oracle.js`](test/test_model_oracle.js)).
+
+## ⚖️ How it compares
+
+| | **StateKeep** | Temporal | Camunda 8 | XState (library) |
+|---|---|---|---|---|
+| Workflow model | Statechart (XState v5 JSON) | Code | BPMN | Statechart |
+| How in-flight instances get a new version | Routed automatically on their next event, per instance, by history | Keep running the old code; changes via patching/versioning APIs in your code | Explicit migration plans applied to chosen instances | You build it |
+| Choose instances by the path they took | ✅ Built in (`historyPath`) | Manual (code branches) | Manual (instance queries) | Manual |
+| Preview who'd be stranded before deploying | ✅ With confirm token | — | Validation of the migration plan | — |
+| Replays history to restore state | No: state is stored | Yes (deterministic replay) | No | No (snapshots) |
+| Minimum to self-host | Node 22 + one SQLite file | Temporal server + database | Orchestration cluster + secondary storage | Your app |
+
+**When to pick what:**
+- **Temporal** if your workflow *is* code and replay fits.
+- **Camunda** if BPMN and process modelling teams are the center of gravity.
+- **StateKeep** if the workflow definition is the product: you need to version it as data, change it for instances already running, and audit it as plain database rows.
+
+## 🚀 Quick start
+
+<details open>
+<summary><b>Docker</b> (recommended)</summary>
+
+```bash
+git clone https://github.com/mmujtaba0085/StateKeep && cd StateKeep
+cp .env.example .env
+node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"   # paste as STATEKEEP_ENCRYPTION_KEY
+# also set STATEKEEP_ADMIN_KEY and STATEKEEP_API_KEY in .env
+docker compose up -d
+curl localhost:3001/v1/health          # {"status":"ok",...}
+```
+Then open `http://localhost:3001/dashboard/` in a browser.
+</details>
+
+<details>
+<summary><b>Node.js</b> (22+)</summary>
+
+```bash
+npm install
+cp .env.example .env                   # set the three keys as above
+npm start &                            # API server
+npm run migrate-worker &               # background migrations
+node --env-file=.env src/workers/scheduler-worker.js &   # timers / delayed events
+```
+Windows works natively. Run `npm install` from PowerShell, not WSL.
+</details>
+
+<details>
+<summary><b>Embedded</b> (no server)</summary>
+
+Use StateKeep in-process via `statekeep/lib` ([example](examples/embedded-demo.js)). Or add history-based version routing to plain **XState v5** apps with [`@statekeep/xstate-apv`](packages/xstate-apv/), which wraps XState's own persist/restore.
+</details>
+
+<details>
+<summary><b>Code-first workflows</b></summary>
+
+Write workflows as async functions with [`@statekeep/durable`](packages/durable/). Runs survive crashes, and runs already in progress move to new code versions based on the steps they've completed.
+</details>
+
+## 🧰 Ecosystem
+
+| Piece | What it's for |
 |---|---|
-| [Getting Started](docs/getting-started.md) | Step-by-step first deployment, with curl examples |
-| [Plain-English Overview](docs/simple-overview.md) | What StateKeep does, no technical background assumed |
-| [API Reference](docs/API.md) | Every route, request/response shape, error code |
-| [Anchor Point Versioning](docs/apv.md) | How the migration engine actually decides where an actor goes |
-| [AI Agent Sessions](docs/agent-sessions.md) | Agent loops as durable actors, with a full working example |
-| [Side Effects & Delivery Modes](docs/side-effects.md) | Idempotent / verify / at-most-once, and when to use which |
-| [Remote Implementations](docs/remote-implementations.md) | Wiring your own services (any language) into actions |
-| [Importers](docs/importers.md) | Bringing in BPMN, ASL, and SCXML definitions |
-| [Multi-Server / Cluster Mode](docs/multi-server.md) | Running more than one node against one registry |
-| [Chaos Testing](docs/chaos-testing.md) | How the fault-injection campaigns work |
-| [Developer Guide](docs/developer-guide.md) | Integrating StateKeep into your backend |
-| [Deployment](docs/deployment.md) | Production checklist, Windows setup, scaling notes |
+| [`sdk/`](sdk/) · [`sdks/python`](sdks/python/) · [`sdks/go`](sdks/go/) | Client SDKs (TypeScript, Python stdlib-only, Go) |
+| [`packages/durable`](packages/durable/) | Code-first durable workflows on top of StateKeep |
+| [`packages/xstate-apv`](packages/xstate-apv/) | History-based version routing for XState v5, no server |
+| `statekeep` CLI | `push`, `preview`, `plan`, `import`, `dev` (file watcher) |
+| [GitHub Action](examples/github/migration-plan.yml) | Comments a migration plan on every pull request |
+| [Importers](docs/importers.md) | AWS Step Functions (ASL), SCXML, BPMN → StateKeep |
+| [Remote implementations](docs/remote-implementations.md) | Guards and actions in any language over HTTP |
+| Dashboard | `/dashboard`: actors, versions, deployment preview, queues, metrics |
 
----
+## 🔬 Evidence it works
 
-## Contributing
+- **Proofs:** the routing model is machine-checked in Lean 4 with no `sorry` and only standard axioms ([`formal/`](formal/)).
+- **Model-vs-code testing:** the live routing code, the deploy-preview code and the analysis driver are compared hop-by-hop with the Lean definitions on random registries.
+- **Fault injection:** [`npm run chaos`](docs/chaos-testing.md) and [`npm run chaos:workflows`](docs/chaos-testing.md) run generated workflows while they:
+  - kill API servers, workers and services;
+  - deploy new versions mid-flight;
+  - fire storms of concurrent, duplicate and unknown events.
 
-StateKeep is built by a small team, in the open. Issues and PRs are welcome — see [`CONTRIBUTING.md`](CONTRIBUTING.md) to get a dev environment running.
+  Every actor is then checked against a ground-truth model kept independent of the system under test: no lost or duplicated events, no misrouted or misplaced actors. The most recent run (SQLite backend) covered 660 actors across both campaigns, with 9 live deployments landing mid-flight, and **0 violations**.
+- **Test suites:** unit, property-based, integration, statechart (SC1–SC18), cluster and end-to-end. Run them with `npm run test:all`.
 
-## License
+## ⚙️ Configuration essentials
 
-[Apache 2.0 with the Commons Clause](LICENSE). Use, modify, and self-host StateKeep freely. Selling StateKeep (or a modified version of it) as a hosted service requires a separate commercial agreement — reach out at [statekeep.support@gmail.com](mailto:statekeep.support@gmail.com).
+| Variable | Purpose |
+|---|---|
+| `STATEKEEP_ENCRYPTION_KEY` | 64 hex chars, AES-256-GCM key for actor context (**required**) |
+| `STATEKEEP_API_KEY` | Required `x-api-key` for the API. Without it, the server binds to `127.0.0.1` only |
+| `STATEKEEP_ADMIN_KEY` | Admin endpoints (`x-admin-key`) |
+| `STATEKEEP_DB_PATH` / `STATEKEEP_DB_URL` | SQLite file, or `postgresql://…` |
+| `STATEKEEP_CLUSTER=true` | Several API servers on one Postgres ([guide](docs/multi-server.md)) |
+| `STATEKEEP_REMOTE_URL` | Your service implementing guards and actions in any language |
+
+Everything else is in [`.env.example`](.env.example) and [`docs/deployment.md`](docs/deployment.md).
+
+## 📚 Documentation
+
+| Start here | Go deeper | Operate |
+|---|---|---|
+| [Plain-English overview](docs/simple-overview.md) | [APV: the routing model](docs/apv.md) | [Production deployment](docs/deployment.md) |
+| [Getting started](docs/getting-started.md) | [Side effects & delivery modes](docs/side-effects.md) | [Cluster mode](docs/multi-server.md) |
+| [Developer guide](docs/developer-guide.md) | [AI agent sessions](docs/agent-sessions.md) | [Logging](docs/logging.md) |
+| [API reference](docs/API.md) | [XState compatibility](docs/xstate-compatibility.md) | [Chaos testing](docs/chaos-testing.md) |
+| [Scenarios: tickets, loans](docs/scenarios/scenarios-index.md) | [Migration plan in PRs](docs/migration-plan.md) | [Importers](docs/importers.md) |
+
+## ❓ FAQ
+
+<details>
+<summary><b>What is StateKeep, in one line?</b></summary>
+
+A self-hosted engine that runs statechart workflows as persistent actors and migrates the ones already running to new versions, chosen per actor by the path it took.
+</details>
+
+<details>
+<summary><b>Do I need to write migration scripts?</b></summary>
+
+No. Added states and changed transitions need nothing. Renamed or removed states need a declarative `stateMapping`. New context fields need a `contextTransform` (copy, constant or default). The preview tells you which you need before anything is written.
+</details>
+
+<details>
+<summary><b>What happens to an actor sitting in a state the new version deletes?</b></summary>
+
+If there's no mapping for it, the deploy returns `requires_confirmation` with the affected actors and a confirm token. If you confirm, those actors are marked `needs_rescue`. They're never moved into a wrong state. A later rescue deployment (or a periodic sweep) moves them forward.
+</details>
+
+<details>
+<summary><b>How is this different from Temporal's versioning?</b></summary>
+
+Temporal keeps in-flight workflows on the code they started with and lets you branch with patching or versioning APIs inside your code. StateKeep versions the *definition as data* and moves running instances forward automatically. You choose which instances by their history, without replay.
+</details>
+
+<details>
+<summary><b>Does it work with my existing XState machines?</b></summary>
+
+Yes. Definitions use the XState v5 JSON format, and the runtime is StateKeep's own interpreter. See [XState compatibility](docs/xstate-compatibility.md). For in-app XState with no server, use [`@statekeep/xstate-apv`](packages/xstate-apv/).
+</details>
+
+<details>
+<summary><b>Is it production-ready?</b></summary>
+
+It's at v1.1, with extensive automated testing (proofs, model-vs-code tests, fault injection, multi-server tests). Evaluation so far has been on single hosts with generated workflows. If you run it in production, we'd love to hear from you, so please open an issue.
+</details>
+
+<details>
+<summary><b>Is it open source?</b></summary>
+
+The source is public under **Apache 2.0 with the Commons Clause**. You can use, modify and self-host it for any purpose. Selling StateKeep, or a modified version, as a hosted service or product needs a commercial agreement. The APV routing engine ships as a compiled WebAssembly module, and its routing model is published and proved in [`formal/`](formal/).
+</details>
+
+## 🤝 Contributing
+
+Issues and pull requests are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md), then run `npm run test:all`. If you're evaluating StateKeep for a real workload, open an issue describing it. Real-world cases shape the roadmap.
+
+If StateKeep is useful to you, a ⭐ helps other people find it.
+
+## 📄 License
+
+[Apache 2.0 with the Commons Clause](LICENSE). Commercial licensing: [mmujtaba0085@gmail.com](mailto:mmujtaba0085@gmail.com).

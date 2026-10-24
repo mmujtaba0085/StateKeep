@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" role="img" aria-labelledby="title desc">
+<title id="title">StateKeep — upgrade workflows that are already running</title>
+<desc id="desc">Two actors reach the state "shipped" by different paths. A new version is deployed with historyPath [HOLD, RELEASE]; only the actor that took that path moves to v2, the other stays on v1.</desc>
+<defs>
+  <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#0b1020"/><stop offset="1" stop-color="#121a33"/></linearGradient>
+  <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse"><path d="M32 0H0V32" fill="none" stroke="#1c2647" stroke-width="1"/></pattern>
+  <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5a90"/></marker>
+  <marker id="arr2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#fbbf24"/></marker>
+  <radialGradient id="glowA"><stop offset="0" stop-color="#2dd4bf" stop-opacity=".55"/><stop offset="1" stop-color="#2dd4bf" stop-opacity="0"/></radialGradient>
+  <radialGradient id="glowB"><stop offset="0" stop-color="#fbbf24" stop-opacity=".55"/><stop offset="1" stop-color="#fbbf24" stop-opacity="0"/></radialGradient>
+</defs>
+<rect width="1280" height="640" fill="url(#bg)"/><rect width="1280" height="640" fill="url(#grid)" opacity=".55"/>
+<g transform="translate(72,86)">
+  <rect x="0" y="0" width="22" height="22" rx="6" fill="none" stroke="#818cf8" stroke-width="3"/>
+  <rect x="30" y="18" width="22" height="22" rx="6" fill="#818cf8"/>
+  <path d="M22 11 H41 V16" fill="none" stroke="#818cf8" stroke-width="3"/>
+  <text x="66" y="34" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="34" font-weight="800" fill="#eef2ff" letter-spacing="-0.5">StateKeep</text>
+</g>
+<text font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="50" font-weight="800" fill="#eef2ff" letter-spacing="-1.2"><tspan x="72" y="232">Upgrade workflows</tspan><tspan x="72" y="292">that are <tspan fill="#818cf8">already running.</tspan></tspan></text>
+<text font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="20" fill="#a9b4d6"><tspan x="72" y="352">Persistent statechart actors that move to new versions</tspan><tspan x="72" y="380">by the path they took. No replay, no migration scripts,</tspan><tspan x="72" y="408">no downtime.</tspan></text>
+<rect x="72" y="456" width="184" height="34" rx="17" fill="#18213f" stroke="#2c3a6b"/><text x="164" y="478" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" fill="#a9b4d6">XState v5 definitions</text>
+<rect x="266.1" y="456" width="233" height="34" rx="17" fill="#18213f" stroke="#2c3a6b"/><text x="382" y="478" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" fill="#a9b4d6">SQLite · Postgres · cluster</text>
+<rect x="72" y="500" width="103" height="34" rx="17" fill="#18213f" stroke="#2c3a6b"/><text x="124" y="522" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" fill="#a9b4d6">Self-hosted</text>
+<rect x="185.1" y="500" width="249" height="34" rx="17" fill="#18213f" stroke="#2c3a6b"/><text x="310" y="522" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" fill="#a9b4d6">Routing rule proved in Lean 4</text>
+<text x="72" y="584" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace" font-size="15" fill="#6f7aa3">$ docker compose up -d</text>
+<rect x="642" y="120" width="590" height="440" rx="22" fill="#18213f" fill-opacity=".35" stroke="#2c3a6b"/>
+<text x="666" y="152" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace" font-size="13" fill="#6f7aa3">order · v1</text>
+<line x1="788" y1="288" x2="831" y2="215" stroke="#4a5a90" stroke-width="2" marker-end="url(#arr)"/><text x="791.5" y="244" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace" font-size="12" font-weight="600" fill="#6f7aa3">PAY</text>
+<line x1="788" y1="312" x2="831" y2="385" stroke="#4a5a90" stroke-width="2" marker-end="url(#arr)"/><text x="785.5" y="366" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace" font-size="12" font-weight="600" fill="#6f7aa3">HOLD</text>
+<line x1="959" y1="215" x2="1011" y2="288" stroke="#4a5a90" stroke-width="2" marker-end="url(#arr)"/><text x="1011.0" y="245" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace" font-size="12" font-weight="600" fill="#6f7aa3">SHIP</text>
+<line x1="959" y1="385" x2="1011" y2="312" stroke="#4a5a90" stroke-width="2" marker-end="url(#arr)"/><text x="1025.0" y="365" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace" font-size="12" font-weight="600" fill="#6f7aa3">RELEASE</text>
+<rect x="660.0" y="277.0" width="128" height="46" rx="12" fill="#18213f" stroke="#3a4a80" stroke-width="1.5"/><text x="724" y="305" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="16" font-weight="600" fill="#eef2ff">placed</text>
+<rect x="831.0" y="182.0" width="128" height="46" rx="12" fill="#18213f" stroke="#3a4a80" stroke-width="1.5"/><text x="895" y="210" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="16" font-weight="600" fill="#eef2ff">paid</text>
+<rect x="831.0" y="372.0" width="128" height="46" rx="12" fill="#18213f" stroke="#3a4a80" stroke-width="1.5"/><text x="895" y="400" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="16" font-weight="600" fill="#eef2ff">on hold</text>
+<rect x="1011.0" y="277.0" width="128" height="46" rx="12" fill="#18213f" stroke="#3a4a80" stroke-width="1.5"/><text x="1075" y="305" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="16" font-weight="600" fill="#eef2ff">shipped</text>
+<g opacity="0">
+  <animate attributeName="opacity" dur="9s" repeatCount="indefinite" values="0;0;1;1;0" keyTimes="0;0.5;0.56;0.93;1"/>
+  <line x1="1075" y1="324" x2="1075" y2="456" stroke="#fbbf24" stroke-width="2.5" stroke-dasharray="6 5" marker-end="url(#arr2)"/>
+  <rect x="1000.0" y="456.0" width="150" height="52" rx="12" fill="#1a2c3d" stroke="#2dd4bf" stroke-width="1.5"/><text x="1075" y="480" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="16" font-weight="600" fill="#eef2ff">shipped</text><text x="1075" y="497" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace" font-size="11" fill="#6f7aa3">order · v2 → audit</text>
+</g>
+<g opacity="0">
+  <animate attributeName="opacity" dur="9s" repeatCount="indefinite" values="0;0;1;1;0" keyTimes="0;0.47;0.51;0.93;1"/>
+  <rect x="666" y="470" width="292" height="62" rx="12" fill="#312e81"/>
+  <text x="682" y="494" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" font-weight="700" fill="#e0e7ff">PUT /v1/definitions  ·  order-v2</text>
+  <text x="682" y="518" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace" font-size="13" fill="#e0e7ff">historyPath: ["HOLD","RELEASE"]</text>
+</g>
+<g opacity="0"><animate attributeName="opacity" dur="9s" repeatCount="indefinite" values="0;1;1;0" keyTimes="0;0.05;0.93;1"/><animateMotion dur="9s" repeatCount="indefinite" calcMode="linear" path="M724,270 L895,175 L1061,270" keyPoints="0;0;0.506;1;1" keyTimes="0;0.1;0.25;0.42;1"/><circle r="22" fill="url(#glowA)"/><circle r="9" fill="#2dd4bf" stroke="#0b1020" stroke-width="2.5"/></g>
+<g opacity="0"><animate attributeName="opacity" dur="9s" repeatCount="indefinite" values="0;1;1;0" keyTimes="0;0.05;0.93;1"/><animateMotion dur="9s" repeatCount="indefinite" calcMode="linear" path="M724,330 L895,425 L1089,330 L1167,482" keyPoints="0;0;0.336;0.707;0.707;1;1" keyTimes="0;0.1;0.25;0.42;0.58;0.7;1"/><circle r="22" fill="url(#glowB)"/><circle r="9" fill="#fbbf24" stroke="#0b1020" stroke-width="2.5"/></g>
+<g opacity="0"><animate attributeName="opacity" dur="9s" repeatCount="indefinite" values="0;0;1;1;0" keyTimes="0;0.7;0.74;0.93;1"/>
+  <text x="1172" y="248" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="700" fill="#2dd4bf">stays on v1</text>
+  <text x="1170" y="430" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="700" fill="#fbbf24">moves to v2</text>
+</g>
+<g font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace" font-size="12">
+  <circle cx="972" cy="150" r="6" fill="#2dd4bf"/><text x="984" y="154" fill="#a9b4d6">PAY → SHIP</text>
+  <circle cx="1090" cy="150" r="6" fill="#fbbf24"/><text x="1102" y="154" fill="#a9b4d6">HOLD → RELEASE</text>
+</g>
+<text x="937" y="590" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="15" font-style="italic" fill="#6f7aa3">Same state. Different history. Different version.</text>
+</svg>

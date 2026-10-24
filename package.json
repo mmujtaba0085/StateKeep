@@ -1,7 +1,32 @@
 {
   "name": "statekeep",
   "version": "1.1.0",
-  "description": "Open-source actor-based state machine engine with zero-downtime migration",
+  "description": "Self-hosted engine for persistent statechart actors (XState v5) that migrates running workflows to new versions by the path each one took. No replay, no migration scripts, no downtime.",
+  "keywords": [
+    "state-machine",
+    "statecharts",
+    "xstate",
+    "workflow-engine",
+    "durable-execution",
+    "actor-model",
+    "workflow-versioning",
+    "live-migration",
+    "zero-downtime",
+    "long-running-workflows",
+    "sqlite",
+    "postgres",
+    "event-sourcing-alternative",
+    "ai-agents",
+    "lean4"
+  ],
+  "homepage": "https://github.com/mmujtaba0085/StateKeep#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mmujtaba0085/StateKeep.git"
+  },
+  "bugs": {
+    "url": "https://github.com/mmujtaba0085/StateKeep/issues"
+  },
   "type": "module",
   "license": "Apache-2.0 WITH Commons-Clause",
   "engines": {

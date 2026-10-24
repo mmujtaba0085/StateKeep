@@ -9,9 +9,9 @@ name: StateKeep CI
 
 on:
   push:
-    branches: [main, develop]
+    branches: [master, main, develop]
   pull_request:
-    branches: [main]
+    branches: [master, main]
 
 env:
   NODE_VERSION: '22'
