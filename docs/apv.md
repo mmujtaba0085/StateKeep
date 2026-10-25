@@ -215,11 +215,25 @@ The chain runs where the event is processed (`src/runtime/interpreter.js`, via `
 
 ## 8. The APV Engine (APV Registry)
 
-The core routing logic runs in a WebAssembly module compiled from C (see `src/ffi/Makefile`). At startup, `src/ffi/engine.js` imports `src/ffi/apv-engine.mjs` (a small loader with the WASM binary inlined), which initialises the WebAssembly instance and exposes the APV C functions as JavaScript-callable methods. The JavaScript layer wraps these into a unified object.
+The core routing logic runs in a WebAssembly module compiled from C. At startup, `src/ffi/engine.js` imports `src/ffi/apv-engine.mjs` (a small loader with the WASM binary inlined), which initialises the WebAssembly instance and exposes the APV C functions as JavaScript-callable methods. The JavaScript layer wraps these into a unified object.
 
-The pre-built WASM engine (`src/ffi/apv-engine.mjs`) is included in the repository — no build step is required. The engine's C source is proprietary and not part of this repository, so the module cannot be rebuilt from it; if it is missing, restore it with `git checkout -- src/ffi/apv-engine.mjs` or re-clone. The routing rule it implements is published and proved in [`formal/`](../formal/), and the engine is tested against it (`test/test_model_oracle.js`).
+The pre-built engine (`src/ffi/apv-engine.mjs`) is included in the repository, and no build step is required. If it's missing, restore it with `git checkout -- src/ffi/apv-engine.mjs` or re-clone.
 
-### The 13 Exported Symbols
+The engine's C source is closed and not part of this repository. The module is still traceable:
+- its header records the compiler (zig 0.13.0, pinned), the flags, and the SHA-256 of the embedded WebAssembly;
+- the build is reproducible byte for byte from the engine source (`make verify` in the engine package);
+- `make -C src/ffi check` confirms the module loads and has every export StateKeep uses.
+
+The routing rule it implements is published and proved in [`formal/`](../formal/), and the engine is tested against it (`test/test_model_oracle.js`, `test/test_engine_ex.js`).
+
+**Keys.** The engine works on opaque 64-bit keys, and StateKeep bridges them to its 256-bit fingerprints:
+- The scalar key of a v2 fingerprint is the **first 64 bits of its SHA-256 digest**. For a legacy v1 actor, it's the 64-bit FNV-1a fingerprint itself.
+- Different histories can share a key. Every engine hit is therefore **confirmed against the full fingerprint**, and a mismatch falls back to an exact scan (`src/runtime/routingRegistry.js`), so a shared key costs a scan and never misroutes.
+- **Scalar key 0 is reserved for the wildcard:** a change-point with key 0 applies to every actor. StateKeep never produces 0 as the key of a real history (`engineKey` maps 0 to 1).
+- Parallel region keys hash the region path together with the regional fingerprint. They have no reserved value.
+- Inside the engine, FNV-1a is used only to combine a parallel selector's keys into one composite key, which picks a hash bucket; the full selector set is still compared. The `apv_fnv1a_*` helpers serve legacy keys and family scope ids.
+
+### Exported Functions
 
 | C Function | Purpose |
 |---|---|
@@ -228,9 +242,6 @@ The pre-built WASM engine (`src/ffi/apv-engine.mjs`) is included in the reposito
 | `apv_clock_tick` | Advance and return the monotonic APV clock |
 | `apv_register_changepoint` | Register a scalar (single-fingerprint) change-point |
 | `apv_compute_accessible` | Route an actor by its scalar fingerprint |
-| `apv_actor_started` | Notify registry that an actor started on a definition |
-| `apv_actor_stopped` | Notify registry that an actor terminated |
-| `apv_vacate_prefix` | Mark a prefix class as vacated (triggers GC) |
 | `apv_fnv1a_init` | Initialize an FNV hash accumulator (legacy v1 fingerprints) |
 | `apv_fnv1a_update` | Update the hash with new bytes |
 | `apv_fnv1a_final` | Finalize the hash |
@@ -245,6 +256,10 @@ The pre-built WASM engine (`src/ffi/apv-engine.mjs`) is included in the reposito
 | `apv_clock_advance_to` | `clock = max(clock, t)` in O(1) — restores the clock after a restart (before, the server called `apv_clock_tick` once per past tick) |
 | `apv_register_changepoint_scoped` / `apv_compute_accessible_scoped` | Scalar change-points in a **scope** |
 | `apv_register_changepoint_parallel_scoped` / `apv_compute_accessible_parallel_scoped` | Parallel change-points in a scope |
+| `apv_compute_accessible_scoped_ex` / `apv_compute_accessible_parallel_scoped_ex` | Lookups that also return the hit's t\* (and, for scalar lookups, the matched key: the actor's own or 0 for the wildcard) |
+| `apv_collect_before_scoped` | Remove every change-point of a scope below the collection frontier: this is the registry's garbage collection |
+
+**Removed:** `apv_actor_started`, `apv_actor_stopped` and `apv_vacate_prefix` (per-actor live counting). They only searched scope 0, while every change-point is registered in a family scope, so they never had any effect. Garbage collection is `apv_collect_before_scoped`, driven by the collection frontier.
 
 **Scopes.** The registry is shared by every workflow on a server. Unscoped, the first
 change-point a lookup found could belong to *another* workflow; StateKeep discarded that
@@ -358,9 +373,7 @@ Actors whose fingerprint does not match `"a3f2c9018bd4e701"` get `null` from `co
 
 3. **Persist** — the actor row is updated: `definition_id → loan-v2`, `history_fingerprint` unchanged (the fingerprint is never recomputed from context — it represents the event chain, not the current state).
 
-4. **actorStarted** — notifies the APV engine: `eng.actorStarted(targetDef.deployedAt, actorFp)`. The engine increments the live-count for the target prefix class, which feeds GC safety.
-
-5. **MIGRATED event** — inserted into the immutable events log.
+4. **MIGRATED event**: inserted into the events log, in the same transaction as the move.
 
 ### Step 5: No Change-Point → No Migration
 
@@ -780,10 +793,9 @@ For each job:
      → actorManager sends HYDRATE to worker pool
      → worker uses custom interpreter to restore actor at landing state
      → write buffer flushes updated actor row (new definitionId, same fingerprint)
-  5. eng.actorStarted(targetDef.deployedAt, migratedActor.historyFingerprint)
-  6. INSERT MIGRATED event into events log
-  7. markDone(job_id)
-  8. evictFromApiCache(actor_id) — hot registry cache cleared
+  5. INSERT MIGRATED event into events log (same transaction as the move)
+  6. markDone(job_id)
+  7. evictFromApiCache(actor_id) — hot registry cache cleared
           │
           ▼
 Actor is now on new definition, fingerprint unchanged, context transformed if configured
@@ -835,12 +847,9 @@ Corollaries 5.5 and 5.7 describe GC of *child* versions at vacated prefix classe
 
 The `Live(t*, P)` set (Definition 5.4) includes every active actor carrying prefix class `P` at `t*`. If an actor is actively running on version `v`, it is in the `Live` set of `v`'s own prefix class. A prefix class is only vacated when `Live(t*, P) = ∅` — so as long as any actor runs on `v`, `v`'s prefix class is not vacated. GC of `v` is axiomatically impossible while any actor is on it.
 
-In practice: `gc-worker.js` calls `vacatePrefix` only on **archived** actors (idle > 24h, status changed to `archived`). The lifecycle is:
-1. Actor idles for 24h → archived to disk, `updateActorStatus('archived')`
-2. `actorStopped(logicalStartTick, prefixHash)` → removes from the engine's Live set
-3. `vacatePrefix(logicalStartTick, prefixHash)` → if the Live set is now empty, marks the prefix class vacated; child versions at that location become GC-eligible
+In practice, the registry is collected by **frontier**. For each workflow family, StateKeep computes the earliest logical time that any routable actor (active, stranded or archived) or any future spawn can still have. That is the collection frontier, which is proved safe in `formal/APV.lean`. Every change-point below it is removed (`apv_collect_before_scoped`). A running actor's logical time is at or above the frontier by definition, so nothing it can still reach is ever removed.
 
-A mid-flight actor (status `active` or `migrating`) is never archived, therefore its version's prefix class is never vacated, therefore the version is never GC'd.
+An archived actor still counts toward the frontier, because it can be restored.
 
 ---
 
@@ -937,22 +946,11 @@ Section 11 defines a "well-formed" parallel change-point registry as one where n
 
 ### Symbol Table Accuracy
 
-The 13 exported symbols in Section 8 are verified against `src/ffi/engine.js`. They match. This table should be kept in sync with the engine ABI.
+The exported functions in Section 8 match what `src/ffi/engine.js` calls; `make -C src/ffi check` verifies the ones StateKeep needs.
 
-### apv_vacate_prefix — When It Is Called
+### Actor archival
 
-`apv_vacate_prefix(tStar, prefixHash)` is called in `src/workers/gc-worker.js` after an actor is archived:
-
-```javascript
-eng.actorStopped(actor.logicalStartTick, prefixHash);
-eng.vacatePrefix(actor.logicalStartTick, prefixHash);
-```
-
-The call sequence is: (1) `actorStopped` decrements the live-count for the prefix class at `logicalStartTick`; (2) if the live-count reaches zero, `vacatePrefix` marks the prefix class as vacated in the APV engine's registry, making all child versions at that location GC-eligible per Corollary 5.5.
-
-In the current implementation, vacating is per-actor not per-prefix-class (i.e., it is called for each archived actor individually). The APV engine internally aggregates: when the last actor carrying a prefix class is vacated, the GC trigger fires. The engine's internal live-count tracks this.
-
-`gc-worker.js` runs on a 60-second loop, archiving actors idle for more than 24 hours per batch of 500.
+`gc-worker.js` runs on a 60-second loop, archiving actors idle for more than 24 hours, in batches of 500. Archival doesn't touch the routing registry: archived actors still count toward the collection frontier, so they can be restored and routed.
 
 ---
 

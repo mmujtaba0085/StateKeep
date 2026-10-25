@@ -657,14 +657,6 @@ export async function spawnActor({ definitionId, initialContext, logicalStartTic
     lastAccess:       Date.now(),
   });
 
-  // Notify engine: actor born at logicalStartTick with no events yet (0n = empty fingerprint)
-  try {
-    const eng = getEngine();
-    eng.actorStarted(BigInt(actorLogicalTick), 0n);
-  } catch (e) {
-    console.warn(`[actorManager] actorStarted notification failed for ${actorId}: ${e.message}`);
-  }
-
   return {
     id: actorId,
     definitionId: def.id,
@@ -1108,15 +1100,6 @@ async function _sendEventLocked(actorId, event, tick, opts = {}) {
   }
 
   if (result.done) {
-    try {
-      const _eng = getEngine();
-      if (_eng.available) {
-        _eng.actorStopped(
-          BigInt(entry.logicalStartTick ?? 0),
-          fingerprintToBigInt(result.historyFingerprint)
-        );
-      }
-    } catch {}
     // Flush terminal status to DB immediately and evict from hot cache so
     // getActorState falls through to the DB and returns 'terminated' correctly.
     // Without this, getActorState returns status:'active' for any hot-cache hit.
@@ -1188,12 +1171,6 @@ export async function getActorState(actorId, { priority = 'normal' } = {}) {
 export async function terminateActor(actorId, { priority = 'normal' } = {}) {
   const pool = getWorkerPool();
 
-  // Capture before removal so actorStopped gets accurate args
-  const hot    = hotRegistry.get(actorId);
-  const fromDb = hot ? null : await findActorById(actorId);
-  const fp     = hot?.historyFingerprint ?? fromDb?.historyFingerprint ?? '0';
-  const lst    = hot?.logicalStartTick   ?? fromDb?.logicalStartTick   ?? 0;
-
   try {
     await pool.send(actorId, { type: 'TERMINATE', actorId }, { priority });
   } catch {}
@@ -1206,11 +1183,6 @@ export async function terminateActor(actorId, { priority = 'normal' } = {}) {
   await getWriteBuffer().flushActor(actorId);  // persist latest state before marking terminal
   await cancelAllPendingForActor(actorId);      // cancel any outstanding scheduled events
   await updateActorStatus(actorId, 'terminated');
-
-  try {
-    const eng = getEngine();
-    if (eng.available) eng.actorStopped(BigInt(lst), fingerprintToBigInt(fp));
-  } catch {}
 
   emitWebhookEvent('actor.terminated', { actorId });
 }
@@ -1387,12 +1359,6 @@ export async function migrateActor(actorId, targetDefinitionId, { priority = 'no
     });
   }
 
-  try {
-    const eng = getEngine();
-    eng.actorStarted(BigInt(targetDef.deployedAt), fingerprintToBigInt(actor.historyFingerprint));
-  } catch (e) {
-    console.warn(`[actorManager] actorStarted notification failed for ${actorId}: ${e.message}`);
-  }
 
   // Always (not only when the actor is already hot): an inline migration of an actor
   // that was just loaded from the database continues with the hot entry, and must not

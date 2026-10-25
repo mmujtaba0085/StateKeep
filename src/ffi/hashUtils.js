@@ -70,14 +70,14 @@ export function bigIntToHex(bi) {
 
 /**
  * Convert a stored fingerprint hex string to BigInt for engine calls.
- * The '0' sentinel means "no events processed" and maps to FNV64_OFFSET.
+ * The '0' sentinel means "no events processed" (hexToBigInt maps it to the wildcard 0n).
  *
  * Use hexToBigInt when you want 0n as an explicit wildcard (e.g. for
  * apv_register_changepoint when no historyPath is provided).
  *
- * Use fingerprintToBigInt when passing an actor's historyFingerprint
- * to apv_compute_accessible or apv_actor_started — '0' must map to
- * FNV64_OFFSET because 0n == APV_PREFIX_WILDCARD.
+ * Use fingerprintToBigInt when passing an actor's historyFingerprint to a scalar
+ * lookup. It is never 0n, because scalar key 0 is the engine's wildcard
+ * (see engineKey in fingerprintChain.js and the "Keys" note in docs/apv.md §8).
  */
 export function hexToBigInt(hex) {
   if (!hex || hex === '0') return 0n;

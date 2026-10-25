@@ -159,7 +159,7 @@ flowchart LR
 ```
 
 * Every deployment registers a **change-point**: *from logical time t, actors of this family whose history is π go to version d′*. π is either an exact history, the actor's whole transition history from its first event (not a substring), or "all actors".
-* Every actor carries a **history fingerprint**, a length-prefixed SHA-256 chain over the events that changed its state. Storage is constant per actor (one fingerprint, plus one per parallel region) and never grows with the history; routing never scans the log.
+* Every actor carries a **history fingerprint**, a length-prefixed SHA-256 chain over the events that changed its state. Storage is constant per actor (one fingerprint, plus one per parallel region) and never grows with the history; routing never scans the log. The routing engine indexes the first 64 bits of the fingerprint, and every hit is confirmed against the full 256-bit value, so two histories that share a 64-bit key are never confused ([details](docs/apv.md#8-the-apv-engine-apv-registry)).
 * Before each event, the actor is routed to a **fixpoint** through every pending version. Then the event runs.
 * A migration places the actor in its landing state **without running entry actions** and without replay, so it never fires side effects ([details](docs/apv.md#what-a-migration-does-and-does-not-do)).
 

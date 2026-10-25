@@ -3,7 +3,8 @@
  *
  * Background process: runs every 60s.
  *   - Archives actors idle > 24h (compresses state to JSON file)
- *   - Calls apv_actor_stopped() and apv_vacate_prefix() on archived actors
+ *   - (Routing-registry garbage collection is separate: actorManager collects change-points
+ *     below each family's collection frontier.)
  *
  * Managed by statekeep-gc-worker.service (systemd).
  */
@@ -16,8 +17,6 @@ import { getDb, isPostgres } from '../registry/db.js';
 import { startHeartbeat } from './heartbeat.js';
 import { findIdleActors, updateActorStatus } from '../registry/actorRepo.js';
 import { cancelAllPendingForActor } from '../registry/scheduledEventRepo.js';
-import { getEngine, engineReady } from '../ffi/engine.js';
-import { fingerprintToBigInt } from '../ffi/hashUtils.js';
 
 const DB_PATH          = process.env.STATEKEEP_DB_PATH ?? 'data/statekeep.db';
 const DATA_DIR         = process.env.STATEKEEP_DATA_DIR ?? dirname(DB_PATH);
@@ -30,7 +29,6 @@ const VACUUM_INTERVAL  = parseInt(process.env.STATEKEEP_VACUUM_INTERVAL_HOURS ??
 let lastVacuumAt = 0;
 
 console.log('[gc-worker] Starting...');
-await engineReady;
 
 if (isPostgres) {
   const { bootstrapSchema } = await import('../registry/db-postgres.js');
@@ -43,7 +41,6 @@ startHeartbeat('gc');
 mkdirSync(ARCHIVE_DIR, { recursive: true });
 
 async function runGC() {
-  const eng    = getEngine();
   const actors = await findIdleActors(IDLE_MS, BATCH_SIZE);
 
   if (actors.length === 0) return;
@@ -88,13 +85,6 @@ async function runGC() {
             actor.stateValue ? JSON.stringify(actor.stateValue) : null, actor.definitionId
           );
         }
-      } catch {}
-
-      // Notify engine
-      try {
-        const prefixHash = fingerprintToBigInt(actor.historyFingerprint);
-        eng.actorStopped(actor.logicalStartTick, prefixHash);
-        eng.vacatePrefix(actor.logicalStartTick, prefixHash);
       } catch {}
 
     } catch (err) {

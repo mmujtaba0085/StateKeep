@@ -167,10 +167,6 @@ async function loadEngine() {
       return n;
     },
 
-    actorStarted(tStar, pH)  { wasm._apv_actor_started(reg, BigInt(tStar), BigInt(pH)); },
-    actorStopped(tStar, pH)  { wasm._apv_actor_stopped(reg, BigInt(tStar), BigInt(pH)); },
-    vacatePrefix(tStar, pH)  { wasm._apv_vacate_prefix(reg, BigInt(tStar), BigInt(pH)); },
-
     registerChangepointParallel(tStar, rHashes, ref, cid, scope = 0n) {
       const rp = toPtr(regionHashesToBuffer(rHashes));
       const sp = strPtr(cid);
