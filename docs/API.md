@@ -829,7 +829,7 @@ Valid event types:
 - `state.changed` — actor transitioned to a new state
 - `actor.migrated` — actor migrated to a new definition version
 - `actor.terminated` — actor was terminated
-- `actor.needs_rescue` — actor became stranded
+- `actor.needs_rescue` — actor became stranded (`consented`: whether a deployment preview listed it)
 - `scheduled.fired` — a scheduled event was delivered
 - `scheduled.failed` — a scheduled event failed all retries
 
@@ -1114,4 +1114,11 @@ When `PUT /v1/definitions` returns HTTP 200 (not 201) with `status: "requires_co
 3. **Re-submit** the same request body with `"confirmToken": "<token>"` added
 4. The definition is written, stranded actors are tagged `needs_rescue`
 
-If the confirm token expires or the stranded count grows by >10% between preview and confirm, you get a fresh preview automatically.
+The confirming PUT predicts the stranding again, under the workflow's deploy lock, immediately before the commit. You get a fresh preview (with a new `confirmToken`) instead of a deployment when the token is expired or already used, the definition changed, or **any** actor that would now be stranded was not listed in the preview (`notInPreview` gives how many). Fewer stranded actors than previewed is fine. Tokens are stored in the database: a preview from one server can be confirmed through any other, and survives restarts.
+
+An actor whose state changes between that final check and the commit can still be stranded without having been in the preview. Every stranding emits the `actor.needs_rescue` webhook with `consented: true|false`, so these are reported, never silent:
+
+```json
+{ "actorId": "…", "fromDefinitionId": "order-v1", "toDefinitionId": "order-v2",
+  "reason": "STATE_NOT_FOUND", "stateValue": "shipped", "consented": false }
+```

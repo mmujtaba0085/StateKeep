@@ -13,9 +13,11 @@
  *     STATEKEEP_NODE_TTL_MS (or forwarding to it fails and it has expired), another
  *     server takes the actor over, drops any stale cached copy and reloads it from the
  *     database — safe because every acknowledged event is already committed.
- *   - Before handling an actor locally, a server confirms (cheap indexed read) that it
- *     is still the owner, so a server that was paused and "declared dead" can't write
- *     with a stale cache.
+ *   - Every claim or takeover increments the ownership generation (actor_owners.gen), and
+ *     the write buffer commits an owner's writes only while that generation is still
+ *     current (ownership.js). A server that was paused and "declared dead" therefore
+ *     cannot commit anything from its stale cache, however long the pause or whatever
+ *     its clock says: its unit answers 503 OWNER_CHANGED and the client retries.
  *   - State-change notifications fan out with Postgres LISTEN/NOTIFY so WebSocket
  *     subscribers connected to any server receive them.
  *
@@ -27,6 +29,7 @@ import {
   evictFromHotRegistry, registryWatermarks, onRegistrySynced, syncChangepointsFromDb, REGISTRY_LEASE_MS,
   markClusterJoined,
 } from '../runtime/actorManager.js';
+import { setOwnedGen } from './ownership.js';
 
 export const clusterEnabled = () => process.env.STATEKEEP_CLUSTER === 'true';
 const TTL_MS       = () => parseInt(process.env.STATEKEEP_NODE_TTL_MS ?? '5000', 10);
@@ -58,17 +61,17 @@ async function heartbeat() {
      ON CONFLICT (node_id) DO UPDATE SET url = EXCLUDED.url, last_seen = EXCLUDED.last_seen,
        cp_low = EXCLUDED.cp_low, par_low = EXCLUDED.par_low, cp_seen = EXCLUDED.cp_seen, par_seen = EXCLUDED.par_seen`,
     [NODE_ID, myUrl, now, w.cp, w.par, JSON.stringify(w.cpSeen.slice(0, 500)), JSON.stringify(w.parSeen.slice(0, 500))]);
-  // Visible to deployment barriers from now on: only syncs that start after this renew
-  // the registry lease.
   markClusterJoined();
 }
 
 // ── Registry visibility across servers ──────────────────────────────────────
-// A deployment NOTIFYs statekeep_registry; every server syncs at once and reports its
-// registry watermarks. The deploying server waits (awaitRegistryBarrier) until every live
-// server has registered the new change-point, or until the registry lease has run out —
-// a server that has not synced within the lease stops processing events by itself
-// (actorManager.ensureRegistryLease). After the barrier no server routes without it.
+// Correctness comes from the registry epoch (actorManager "Registry fencing"): every unit
+// on every server reads it before routing and syncs if its registry is older, so no unit
+// that starts after a deployment's commit routes without it — no clocks involved.
+// On top of that, a deployment NOTIFYs statekeep_registry; every server syncs at once and
+// reports its registry watermarks, and the deploying server waits (bounded) until live
+// servers have acknowledged (awaitRegistryBarrier). That only warms their registries so
+// their next units need no extra sync.
 export async function publishRegistryChange() {
   if (!clusterEnabled() || !pg) return;
   await pg.query(`SELECT pg_notify('statekeep_registry', $1)`, [NODE_ID]).catch(() => {});
@@ -76,11 +79,9 @@ export async function publishRegistryChange() {
 
 export async function awaitRegistryBarrier({ cp = 0, par = 0 } = {}) {
   if (!clusterEnabled() || !pg) return { waitedMs: 0, pending: [] };
-  // A server may route only while its lease (REGISTRY_LEASE_MS since the start of its last
-  // complete sync) is valid, and it renews the lease only after reporting (heartbeat) —
-  // so a server that can still route without this change-point has a heartbeat within
-  // the last lease period. Every such server must acknowledge, or the lease must run out.
-  // Liveness is judged on the database clock; the wait on this process's monotonic clock.
+  // Waits for servers with a recent heartbeat (database clock) to acknowledge, at most
+  // REGISTRY_LEASE_MS + MARGIN. A server that does not acknowledge in time is still
+  // correct: it syncs before its next event because its registry epoch is older.
   const MARGIN = 500;
   const start = performance.now();
   const deadline = start + REGISTRY_LEASE_MS + MARGIN;
@@ -104,23 +105,27 @@ export async function awaitRegistryBarrier({ cp = 0, par = 0 } = {}) {
 /** Owner of an actor: { nodeId, url, alive } or null when unowned. */
 async function ownerOf(actorId) {
   const row = await pg.queryOne(
-    `SELECT o.node_id, n.url, n.last_seen, (EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint AS db_now
+    `SELECT o.node_id, o.gen, n.url, n.last_seen, (EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint AS db_now
        FROM actor_owners o LEFT JOIN cluster_nodes n ON n.node_id = o.node_id WHERE o.actor_id = $1`,
     [actorId]);
   if (!row) return null;
+  if (row.node_id === NODE_ID) setOwnedGen(actorId, row.gen);   // e.g. after a restart
   return { nodeId: row.node_id, url: row.url, alive: row.last_seen != null && Number(row.db_now) - Number(row.last_seen) < TTL_MS() };
 }
 
 /** Claim an unowned actor, or take it over from `fromNode` (only if that is still the owner). */
 async function claim(actorId, fromNode = null) {
   const now = Date.now();
+  // A takeover waits for the old owner's in-flight flush (it holds the row FOR SHARE), and
+  // the new generation fences everything the old owner had not committed.
   const row = fromNode
-    ? await pg.queryOne(`UPDATE actor_owners SET node_id = $1, claimed_at = $2 WHERE actor_id = $3 AND node_id = $4 RETURNING node_id`,
+    ? await pg.queryOne(`UPDATE actor_owners SET node_id = $1, claimed_at = $2, gen = gen + 1 WHERE actor_id = $3 AND node_id = $4 RETURNING node_id, gen`,
         [NODE_ID, now, actorId, fromNode])
-    : await pg.queryOne(`INSERT INTO actor_owners (actor_id, node_id, claimed_at) VALUES ($1,$2,$3)
-                         ON CONFLICT (actor_id) DO NOTHING RETURNING node_id`, [actorId, NODE_ID, now]);
+    : await pg.queryOne(`INSERT INTO actor_owners (actor_id, node_id, claimed_at, gen) VALUES ($1,$2,$3,1)
+                         ON CONFLICT (actor_id) DO NOTHING RETURNING node_id, gen`, [actorId, NODE_ID, now]);
   if (row?.node_id === NODE_ID) {
     evictFromHotRegistry(actorId);          // never serve a copy cached before we (re)gained ownership
+    setOwnedGen(actorId, row.gen);
     return true;
   }
   return false;
@@ -129,8 +134,9 @@ async function claim(actorId, fromNode = null) {
 /** Record that this server owns a freshly spawned actor. */
 export async function claimNew(actorId) {
   if (!clusterEnabled() || !pg) return;
-  await pg.query(`INSERT INTO actor_owners (actor_id, node_id, claimed_at) VALUES ($1,$2,$3) ON CONFLICT (actor_id) DO NOTHING`,
-    [actorId, NODE_ID, Date.now()]);
+  const row = await pg.queryOne(`INSERT INTO actor_owners (actor_id, node_id, claimed_at, gen) VALUES ($1,$2,$3,1)
+    ON CONFLICT (actor_id) DO NOTHING RETURNING gen`, [actorId, NODE_ID, Date.now()]);
+  if (row) setOwnedGen(actorId, row.gen);
 }
 
 async function forward(owner, request, reply) {

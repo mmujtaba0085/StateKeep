@@ -17,6 +17,12 @@
 import { getDb, encrypt, isPostgres } from '../registry/db.js';
 import { randomUUID } from 'crypto';
 import { serializeRegionFingerprints } from '../registry/regionFingerprintCodec.js';
+import { ownedGen, fencedIds, ownerFenceEnabled } from '../cluster/ownership.js';
+import { testPausePoint } from '../lib/testHooks.js';
+import { now as clusterNow } from '../lib/clusterClock.js';
+
+// (cluster) The ownership generation a write is made under; null outside cluster mode.
+const genOf = (actorId) => (ownerFenceEnabled() ? ownedGen(actorId) : null);
 
 const FLUSH_MS   = parseInt(process.env.STATEKEEP_WRITE_BUFFER_MS ?? '50', 10);
 const HIGH_WATER = 200;
@@ -24,7 +30,7 @@ const DURABLE_RETRIES = parseInt(process.env.STATEKEEP_DURABLE_RETRIES ?? '8', 1
 
 /** An action_jobs row (encrypted snapshots), as queued here or written at spawn. */
 export function makeActionJobRow({ actorId, actionName, context, event, maxRetries, fireAt }) {
-  const now = Date.now();
+  const now = clusterNow();
   return {
     id: randomUUID(), actorId, actionName,
     contextSnap: context != null ? encrypt(Buffer.from(JSON.stringify(context))) : null,
@@ -55,6 +61,7 @@ class WriteBuffer {
 
   queueState(actorId, data) {
     const row      = this._serialize(actorId, data);
+    row._gen       = genOf(actorId);
     const existing = this._states.get(actorId);
     // Bug #3: if this write skips context but a prior pending write for the same actor
     // already has an encrypted context, carry it forward so it isn't dropped in the flush.
@@ -66,12 +73,14 @@ class WriteBuffer {
   }
 
   queueEvent(row) {
+    row._gen = genOf(row.actor_id);
     this._events.push(row);
     if (row.idempotency_key) this._pending.add(`${row.actor_id}:${row.idempotency_key}`);
     if (this._states.size + this._events.length >= HIGH_WATER) this.flush().catch(() => {});
   }
 
   queueDecision(args) {
+    args._gen = genOf(args[0]);
     this._decisions.push(args);
   }
 
@@ -80,7 +89,7 @@ class WriteBuffer {
    * Processed atomically with state writes in the next flush().
    */
   queueScheduledCancel(actorId, stateKey) {
-    this._scheduledCancels.push({ actorId, stateKey });
+    this._scheduledCancels.push({ actorId, stateKey, _gen: genOf(actorId) });
   }
 
   /**
@@ -89,7 +98,7 @@ class WriteBuffer {
    */
   queueScheduledCreate({ actorId, eventType, fireAt, payload }) {
     this._scheduledCreates.push({ actorId, eventType, fireAt,
-      payload: JSON.stringify(payload) });
+      payload: JSON.stringify(payload), _gen: genOf(actorId) });
   }
 
   /**
@@ -128,7 +137,9 @@ class WriteBuffer {
    * transition that was not persisted (or a persisted transition without its job).
    */
   queueActionJob(args) {
-    this._actionJobs.push(makeActionJobRow(args));
+    const job = makeActionJobRow(args);
+    job._gen = genOf(args.actorId);
+    this._actionJobs.push(job);
   }
 
   hasPendingEvent(actorId, idempotencyKey) {
@@ -156,8 +167,11 @@ class WriteBuffer {
            row.region_fingerprints, row.last_event_tick, row.status, row.updated_at,
            row.state_entry_id, row.id];
       // Behind any flush in flight, so an older batch cannot overwrite this newer row.
-      const run = this._flushChain.then(() => import('../registry/db-postgres.js')).then(({ query }) =>
-        query(sql, args).catch((e) => {
+      const run = this._flushChain.then(() => import('../registry/db-postgres.js')).then(({ transaction }) =>
+        transaction(async (client) => {
+          if (row._gen != null && (await fencedIds(client, [{ id: actorId, gen: row._gen }])).size) return;
+          await client.query(sql, args);
+        }).catch((e) => {
           console.error(`[writeBuffer] flushActor PG ${actorId} (will retry):`, e.message);
           if (!this._states.has(actorId)) this._states.set(actorId, row);
           throw e;
@@ -276,6 +290,24 @@ class WriteBuffer {
     try {
       const { transaction } = await import('../registry/db-postgres.js');
       await transaction(async (client) => {
+        // (cluster) Commit only the writes made under the ownership generation that is still
+        // current; the ownership rows stay share-locked until commit, so a takeover waits.
+        const keyed = [
+          ...rows.map((r) => ({ id: r.id, gen: r._gen })), ...events.map((e) => ({ id: e.actor_id, gen: e._gen })),
+          ...decisions.map((d) => ({ id: d[0], gen: d._gen })), ...scheduledCancels.map((c) => ({ id: c.actorId, gen: c._gen })),
+          ...scheduledCreates.map((c) => ({ id: c.actorId, gen: c._gen })), ...actionJobs.map((j) => ({ id: j.actorId, gen: j._gen })),
+        ].filter((k) => k.gen != null);
+        const out = keyed.length ? await fencedIds(client, keyed) : new Set();
+        if (keyed.length) testPausePoint('flush-after-owner-check');
+        if (out.size) {
+          const keep = (id, gen) => gen == null || !out.has(`${id}:${gen}`);
+          rows = rows.filter((r) => keep(r.id, r._gen));
+          events = events.filter((e) => keep(e.actor_id, e._gen));
+          decisions = decisions.filter((d) => keep(d[0], d._gen));
+          scheduledCancels = scheduledCancels.filter((c) => keep(c.actorId, c._gen));
+          scheduledCreates = scheduledCreates.filter((c) => keep(c.actorId, c._gen));
+          actionJobs = actionJobs.filter((j) => keep(j.actorId, j._gen));
+        }
         for (const row of rows) {
           if (row.context_json === undefined) {
             await client.query(

@@ -228,3 +228,27 @@ export async function markCollected(machineId, frontier) {
   }
   return n;
 }
+
+// ── Registry epoch: the fencing token for routing visibility ──────────────────────────
+// A deployment increments the epoch once its change-point row is committed (the
+// increment is the deployment's commit point for routing). A sync that reads epoch E
+// before reading the change-point rows, and registers every row it reads, has a
+// registry that contains every change-point committed at or before E.
+
+/** Increment the registry epoch; returns the new value. */
+export async function bumpRegistryEpoch() {
+  if (isPostgres) {
+    const { queryOne } = await import('./db-postgres.js');
+    return Number((await queryOne(`UPDATE registry_epoch SET epoch = epoch + 1 WHERE id = 1 RETURNING epoch`)).epoch);
+  }
+  return Number(getDb().prepare(`UPDATE registry_epoch SET epoch = epoch + 1 WHERE id = 1 RETURNING epoch`).get().epoch);
+}
+
+/** The current registry epoch (one primary-key read). */
+export async function readRegistryEpoch() {
+  if (isPostgres) {
+    const { queryOne } = await import('./db-postgres.js');
+    return Number((await queryOne(`SELECT epoch FROM registry_epoch WHERE id = 1`)).epoch);
+  }
+  return Number(getDb().prepare(`SELECT epoch FROM registry_epoch WHERE id = 1`).get().epoch);
+}

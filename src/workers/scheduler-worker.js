@@ -11,6 +11,7 @@
 
 import { getDb, encrypt, isPostgres } from '../registry/db.js';
 import { findDueEvents, markFired, markDispatchFailed, scheduleRetryOrFail, retryScheduledEventSoon, cancelScheduledEventById } from '../registry/scheduledEventRepo.js';
+import { now as clusterNow, startClusterClock } from '../lib/clusterClock.js';
 import { startHeartbeat } from './heartbeat.js';
 import { findActorById } from '../registry/actorRepo.js';
 import { getEngine, engineReady } from '../ffi/engine.js';
@@ -35,10 +36,11 @@ if (isPostgres) {
   getDb();
 }
 
+await startClusterClock();
 startHeartbeat('scheduler');
 
 async function tick() {
-  const now  = Date.now();
+  const now  = clusterNow();          // database time line, not this machine's clock
   const rows = await findDueEvents(now);
 
   for (const row of rows) {
@@ -105,7 +107,7 @@ async function tick() {
       // The API server could not be reached or had a transient failure: the timer is not
       // at fault, so it neither spends a retry nor waits 30 s+ — it is late by seconds.
       if (err.status === undefined || err.status >= 500) {
-        await retryScheduledEventSoon(row.id, Date.now() + UNREACHABLE_RETRY_MS, errMsg);
+        await retryScheduledEventSoon(row.id, clusterNow() + UNREACHABLE_RETRY_MS, errMsg);
         console.warn(`[scheduler-worker] Scheduled event ${row.id}: server unreachable, retrying soon (${errMsg})`);
         continue;
       }

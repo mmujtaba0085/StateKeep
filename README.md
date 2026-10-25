@@ -120,7 +120,7 @@ Each action has a **delivery mode** (`idempotent`, `verify`, …). When an outco
 <td valign="top">
 
 ### 🌐 SQLite → Postgres → cluster
-Start with one SQLite file. Switch to PostgreSQL, then run several API servers behind any load balancer. Each actor has one owner, requests are forwarded, and a failed owner is taken over safely. [Read more](docs/multi-server.md)
+Start with one SQLite file. Switch to PostgreSQL, then run several API servers behind any load balancer. Each actor has one owner, requests are forwarded, and a failed owner is taken over safely. Correctness never depends on clocks or timing: a paused or slow server can't commit stale state or route past a deployment (fencing tokens checked at commit), and timers run on the database's time line. [Read more](docs/multi-server.md)
 
 </td>
 <td valign="top">
@@ -294,7 +294,7 @@ No. Added states and changed transitions need nothing. Renamed or removed states
 <details>
 <summary><b>What happens to an actor sitting in a state the new version deletes?</b></summary>
 
-If there's no mapping for it, the deploy returns `requires_confirmation` with the affected actors and a confirm token. If you confirm, those actors are marked `needs_rescue`. They're never moved into a wrong state. A later rescue deployment (or a periodic sweep) moves them forward.
+If there's no mapping for it, the deploy returns `requires_confirmation` with the affected actors and a confirm token. If you confirm, those actors are marked `needs_rescue`. The confirmation is re-checked right before the commit: an actor that wasn't in your preview gets you a fresh preview, never a silent stranding. They're never moved into a wrong state. A later rescue deployment (or a periodic sweep) moves them forward.
 </details>
 
 <details>

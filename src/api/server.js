@@ -339,6 +339,7 @@ startStrandedSweep();
 }
 
 await startCluster(fastify, { onRemoteStateChange: notifyLocalSubscribers });
+{ const { startClusterClock } = await import('../lib/clusterClock.js'); await startClusterClock(); }
 
 // In cluster mode the actor may be owned by another server: deliver follow-up events
 // through the routed internal dispatch instead of this process's cache.

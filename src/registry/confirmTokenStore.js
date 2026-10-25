@@ -1,123 +1,131 @@
 /**
  * src/registry/confirmTokenStore.js
  *
- * In-memory store for deployment confirmation tokens.
+ * Confirmation tokens for deployments that would strand actors, and the consent they record.
  *
- * A token is issued when PUT /v1/definitions detects stranded actors.
- * The caller must re-submit the PUT with the token to confirm they
- * understand actors will be tagged needs_rescue.
+ * A token is issued when PUT /v1/definitions predicts that actors would be stranded. It
+ * records EXACTLY which actors the preview listed, and the definition it was issued for
+ * (id and content hash). Re-submitting the same PUT with the token confirms it:
  *
- * Tokens are:
- *   - One-time use (deleted on consumption)
- *   - Short-lived (TOKEN_TTL_MS, default 5 minutes)
- *   - Drift-checked (if stranded actor count has grown since preview,
- *     the token is invalidated and a new preview is required)
+ *   - the final prediction is recomputed under the family's deploy lock, immediately
+ *     before the commit;
+ *   - the deployment proceeds only if every actor it would now strand was in the preview
+ *     (fewer is fine: an actor may have moved to a placeable state meanwhile);
+ *   - otherwise a fresh preview is returned, naming the actors that were not in it.
  *
- * Stored in memory only — tokens do not survive server restarts.
- * This is intentional: a restart resets in-flight deployments, and the
- * caller must re-run their PUT to get a fresh preview.
+ * Tokens live in the database, so a preview from one API server can be confirmed through
+ * any other, and a restart does not lose them. They are one-time and expire after
+ * CONFIRM_TOKEN_TTL_MS (default 5 minutes).
+ *
+ * After the commit, the consented actors are recorded per target definition
+ * (recordConsent), so a stranding that the operator did not see in the preview — an actor
+ * whose state changed between the final check and the commit — is reported by
+ * actorManager.strandActor (webhook actor.stranded with consented: false) rather than
+ * passing silently.
  */
 
 import { randomUUID } from 'crypto';
+import { getDb, isPostgres } from './db.js';
 
-const TOKEN_TTL_MS    = parseInt(process.env.CONFIRM_TOKEN_TTL_MS ?? String(5 * 60 * 1000), 10);
-const DRIFT_THRESHOLD = parseFloat(process.env.CONFIRM_DRIFT_THRESHOLD ?? '0.10'); // 10% growth
+const TOKEN_TTL_MS = parseInt(process.env.CONFIRM_TOKEN_TTL_MS ?? String(5 * 60 * 1000), 10);
 
-/** @type {Map<string, TokenEntry>} */
-const store = new Map();
-
-/**
- * @typedef {object} StrandedGroup
- * @property {string} state
- * @property {number} count
- */
+async function pgq() { return import('./db-postgres.js'); }
 
 /**
- * @typedef {object} TokenPayload
- * @property {string}          definitionId   — the new definition being deployed
- * @property {string}          parentId       — its parent definition
- * @property {string}          definitionHash — SHA-256 hex of the definition JSON
- * @property {StrandedGroup[]} strandedGroups — state → count snapshot at preview time
- * @property {number}          totalStranded  — total stranded actor count at preview
+ * Issue a token for a preview.
+ * @param {{ definitionId: string, definitionHash: string, actorIds: string[] }} p
+ * @returns {Promise<{ token: string, expiresAt: number, expiresIn: number }>}
  */
-
-/**
- * @typedef {object} TokenEntry
- * @property {TokenPayload} payload
- * @property {number}       expiresAt
- */
-
-// ── Cleanup interval ──────────────────────────────────────────────────────────
-
-setInterval(() => {
-  const now = Date.now();
-  for (const [id, entry] of store) {
-    if (entry.expiresAt < now) store.delete(id);
-  }
-}, 60_000).unref();
-
-// ── Public API ────────────────────────────────────────────────────────────────
-
-/**
- * Issue a new confirmation token.
- * @param {TokenPayload} payload
- * @returns {{ token: string, expiresAt: number, expiresIn: number }}
- */
-export function issueToken(payload) {
-  const token     = randomUUID();
+export async function issueToken({ definitionId, definitionHash, actorIds }) {
+  const token = randomUUID();
   const expiresAt = Date.now() + TOKEN_TTL_MS;
-  store.set(token, { payload, expiresAt });
+  const ids = JSON.stringify([...new Set(actorIds)].sort());
+  if (isPostgres) {
+    const { query } = await pgq();
+    await query(`DELETE FROM confirm_tokens WHERE expires_at < $1`, [Date.now()]);
+    await query(`INSERT INTO confirm_tokens (token, definition_id, definition_hash, actor_ids, expires_at) VALUES ($1,$2,$3,$4,$5)`,
+      [token, definitionId, definitionHash, ids, expiresAt]);
+  } else {
+    const db = getDb();
+    db.prepare(`DELETE FROM confirm_tokens WHERE expires_at < ?`).run(Date.now());
+    db.prepare(`INSERT INTO confirm_tokens (token, definition_id, definition_hash, actor_ids, expires_at) VALUES (?,?,?,?,?)`)
+      .run(token, definitionId, definitionHash, ids, expiresAt);
+  }
   return { token, expiresAt, expiresIn: Math.floor(TOKEN_TTL_MS / 1000) };
 }
 
-/**
- * Verify and consume a token.
- *
- * Also accepts `currentStrandedCount` to detect drift: if the number of
- * stranded actors has grown by more than DRIFT_THRESHOLD since preview,
- * the token is invalidated (but not deleted — let it expire naturally).
- *
- * @param {string} token
- * @param {{ definitionId: string, currentStrandedCount: number }} opts
- * @returns {{ ok: true, payload: TokenPayload } | { ok: false, reason: string, newPreviewNeeded?: boolean }}
- */
-export function consumeToken(token, { definitionId, currentStrandedCount }) {
-  const entry = store.get(token);
-
-  if (!entry) {
-    return { ok: false, reason: 'Token not found or already used' };
+async function takeToken(token) {
+  if (isPostgres) {
+    const { queryOne } = await pgq();
+    return queryOne(`DELETE FROM confirm_tokens WHERE token = $1 RETURNING definition_id, definition_hash, actor_ids, expires_at`, [token]);
   }
+  return getDb().prepare(`DELETE FROM confirm_tokens WHERE token = ? RETURNING definition_id, definition_hash, actor_ids, expires_at`).get(token);
+}
 
-  if (Date.now() > entry.expiresAt) {
-    store.delete(token);
-    return { ok: false, reason: 'Token has expired — re-submit without confirmToken to get a new preview', newPreviewNeeded: true };
+async function peekToken(token) {
+  if (isPostgres) {
+    const { queryOne } = await pgq();
+    return queryOne(`SELECT definition_id FROM confirm_tokens WHERE token = $1`, [token]);
   }
-
-  if (entry.payload.definitionId !== definitionId) {
-    return { ok: false, reason: `Token was issued for definition "${entry.payload.definitionId}", not "${definitionId}"` };
-  }
-
-  // Drift check — if stranded count grew by more than threshold, force re-preview
-  const previewCount  = entry.payload.totalStranded;
-  const growth        = previewCount > 0
-    ? (currentStrandedCount - previewCount) / previewCount
-    : (currentStrandedCount > 0 ? 1 : 0);
-
-  if (growth > DRIFT_THRESHOLD) {
-    store.delete(token);
-    return {
-      ok: false,
-      reason: `Stranded actor count grew from ${previewCount} to ${currentStrandedCount} since preview (${(growth * 100).toFixed(0)}% increase exceeds ${(DRIFT_THRESHOLD * 100).toFixed(0)}% threshold) — re-submit without confirmToken to get a fresh preview`,
-      newPreviewNeeded: true,
-    };
-  }
-
-  // Valid — consume it
-  store.delete(token);
-  return { ok: true, payload: entry.payload };
+  return getDb().prepare(`SELECT definition_id FROM confirm_tokens WHERE token = ?`).get(token);
 }
 
 /**
- * How many tokens are currently in the store (for monitoring).
+ * Check a token against the prediction made just before the commit, and consume it.
+ * @returns {Promise<{ ok: true, actorIds: string[] } |
+ *                   { ok: false, reason: string, newPreviewNeeded?: boolean, unconsented?: string[] }>}
  */
-export function pendingCount() { return store.size; }
+export async function consumeToken(token, { definitionId, definitionHash, strandedIds }) {
+  // A token issued for another definition is a client error: report it, keep the token.
+  const peek = await peekToken(token);
+  if (peek && peek.definition_id !== definitionId) {
+    return { ok: false, reason: `Token was issued for definition "${peek.definition_id}", not "${definitionId}"` };
+  }
+  const row = await takeToken(token);
+  if (!row) {
+    return { ok: false, reason: 'Token not found, already used or expired — this is a fresh preview', newPreviewNeeded: true };
+  }
+  if (Date.now() > Number(row.expires_at)) {
+    return { ok: false, reason: 'Token has expired — this is a fresh preview', newPreviewNeeded: true };
+  }
+  if (row.definition_hash !== definitionHash) {
+    return { ok: false, reason: 'The definition changed since the preview — this is a fresh preview', newPreviewNeeded: true };
+  }
+  const consented = new Set(JSON.parse(row.actor_ids));
+  const unconsented = strandedIds.filter((id) => !consented.has(id));
+  if (unconsented.length > 0) {
+    return {
+      ok: false, newPreviewNeeded: true, unconsented,
+      reason: `${unconsented.length} actor(s) that were not in the preview would now be stranded ` +
+              `(their state changed since) — this is a fresh preview including them`,
+    };
+  }
+  return { ok: true, actorIds: [...consented] };
+}
+
+/** Record which actors were consented for a deployment (replacing an earlier attempt's). */
+export async function recordConsent(definitionId, actorIds) {
+  if (isPostgres) {
+    const { query } = await pgq();
+    await query(`DELETE FROM stranding_consents WHERE definition_id = $1`, [definitionId]);
+    for (const id of actorIds ?? []) {
+      await query(`INSERT INTO stranding_consents (definition_id, actor_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`, [definitionId, id]);
+    }
+    return;
+  }
+  const db = getDb();
+  const ins = db.prepare(`INSERT OR IGNORE INTO stranding_consents (definition_id, actor_id) VALUES (?, ?)`);
+  db.transaction(() => {
+    db.prepare(`DELETE FROM stranding_consents WHERE definition_id = ?`).run(definitionId);
+    for (const id of actorIds ?? []) ins.run(definitionId, id);
+  })();
+}
+
+/** Was stranding this actor at this target consented in a preview? */
+export async function strandingConsented(definitionId, actorId) {
+  if (isPostgres) {
+    const { queryOne } = await pgq();
+    return !!(await queryOne(`SELECT 1 AS x FROM stranding_consents WHERE definition_id = $1 AND actor_id = $2`, [definitionId, actorId]));
+  }
+  return !!getDb().prepare(`SELECT 1 AS x FROM stranding_consents WHERE definition_id = ? AND actor_id = ?`).get(definitionId, actorId);
+}

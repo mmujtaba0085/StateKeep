@@ -6,6 +6,7 @@
  */
 
 import { getDb, encrypt, decrypt, isPostgres } from './db.js';
+import { now as clusterNow } from '../lib/clusterClock.js';
 
 let stmts = null;
 
@@ -148,7 +149,7 @@ export async function scheduleRetryOrFail(row, error) {
     const { query } = await import('./db-postgres.js');
     if (row.retry_count < effectiveMax) {
       const backoffMs  = Math.min(2 ** row.retry_count * 30_000, 240_000);
-      const nextRetry  = Date.now() + backoffMs;
+      const nextRetry  = clusterNow() + backoffMs;
       await query(
         `UPDATE scheduled_events SET status='pending', retry_count=retry_count+1, next_retry_at=$1, error=$2 WHERE id=$3`,
         [nextRetry, error, row.id]
@@ -165,7 +166,7 @@ export async function scheduleRetryOrFail(row, error) {
   const s = getStmts();
   if (row.retry_count < effectiveMax) {
     const backoffMs  = Math.min(2 ** row.retry_count * 30_000, 240_000);
-    const nextRetry  = Date.now() + backoffMs;
+    const nextRetry  = clusterNow() + backoffMs;
     s.scheduleRetry.run(nextRetry, error, row.id);
     return true;
   }

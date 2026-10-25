@@ -431,7 +431,8 @@ The 8 stranded actors are now tagged `needs_rescue`. They can be seen in the das
 
 - Expires in **5 minutes** (default) — regenerated automatically if expired
 - One-time use — consumed on the confirming PUT
-- Drift-protected: if the number of stranded actors grows by >10% between preview and confirm, the token is invalidated and you get a fresh preview
+- Exact consent: the confirming request re-checks, just before the commit, which actors would be stranded. If any of them was not in your preview, nothing is deployed and you get a fresh preview
+- Works through any server in a cluster (tokens are stored in the database)
 
 ### Rescuing an actor manually
 

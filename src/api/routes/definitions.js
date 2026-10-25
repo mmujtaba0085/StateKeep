@@ -20,9 +20,18 @@
  *   → nothing is written to the DB
  *
  * Second PUT (with confirmToken in body):
- *   → server verifies token (not expired, correct def, no large actor drift)
+ *   → under the family's deploy lock (cluster-wide), the stranding is predicted again,
+ *     immediately before the commit
+ *   → the token must be unused and unexpired, for this definition id and content, and every
+ *     actor that would now be stranded must have been listed in the preview; otherwise a
+ *     fresh preview is returned (naming the actors that were not in it)
  *   → stores definition, tags stranded actors as needs_rescue
  *   → returns 201 as normal
+ *
+ * Tokens and consents live in the database (confirmTokenStore.js), so any API server can
+ * confirm a preview made by another. An actor that changes state between the final
+ * prediction and the commit, and is stranded by the deployment without having been in the
+ * preview, is reported by the actor.needs_rescue webhook with consented: false.
  *
  * If there are NO stranded actors the confirm flow is skipped entirely.
  */
@@ -59,8 +68,8 @@ import { getEngine, scopeOf }         from '../../ffi/engine.js';
 import { invalidateMigrationCacheForDefinition, evictFromHotRegistry, invalidateDefinitionCache } from '../../runtime/actorManager.js';
 import { computeHistoryHash, fingerprintToBigInt, computeRegionHashes, regionFingerprintsToArray } from '../../ffi/hashUtils.js';
 import { analyseDefinition }          from '../lib/staticAnalysis.js';
-import { issueToken, consumeToken }   from '../../registry/confirmTokenStore.js';
-import { insertChangepoint, insertParChangepoint } from '../../registry/changepointRepo.js';
+import { issueToken, consumeToken, recordConsent } from '../../registry/confirmTokenStore.js';
+import { insertChangepoint, insertParChangepoint, bumpRegistryEpoch } from '../../registry/changepointRepo.js';
 import { normalizeHistoryRegions } from '../../runtime/statePaths.js';
 import { getWriteBuffer } from '../../runtime/writeBuffer.js';
 import { isSafeContextPath } from '../../runtime/actorWorker.js';
@@ -94,7 +103,7 @@ function strandedGroupsOf(analysis, scopeCount) {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-/** Stable hex hash of a definition JSON (for token drift detection). */
+/** Stable hex hash of a definition JSON (binds a confirm token to the previewed content). */
 function hashDefinition(definition) {
   return createHash('sha256').update(JSON.stringify(definition)).digest('hex');
 }
@@ -473,18 +482,25 @@ export async function definitionRoutes(fastify) {
             `field to proceed, or add stateMapping entries for these states.`,
           ...extra,
         });
+        const tokenFor = { definitionId: id, definitionHash: hashDefinition(definition) };
         if (confirmToken) {
-          const result = consumeToken(confirmToken, { definitionId: id, currentStrandedCount: totalStranded });
+          // This prediction is made under the family's deploy lock, right before the commit:
+          // the deployment strands exactly these actors unless one changes state meanwhile.
+          const result = await consumeToken(confirmToken, { ...tokenFor, strandedIds: predictedStranded });
           if (!result.ok) {
             if (result.newPreviewNeeded) {
-              const fresh = issueToken({ definitionId: id, parentId, definitionHash: hashDefinition(definition), strandedGroups, totalStranded });
-              return reply.code(200).send(preview({ reason: result.reason, confirmToken: fresh.token, expiresIn: fresh.expiresIn }));
+              const fresh = await issueToken({ ...tokenFor, actorIds: predictedStranded });
+              return reply.code(200).send(preview({
+                reason: result.reason, confirmToken: fresh.token, expiresIn: fresh.expiresIn,
+                ...(result.unconsented ? { notInPreview: result.unconsented.length } : {}),
+              }));
             }
             return reply.code(400).send({ error: result.reason });
           }
-          // Token valid — fall through to storage
+          // Consent recorded before the change-point becomes visible to any routing.
+          await recordConsent(id, result.actorIds);
         } else {
-          const issued = issueToken({ definitionId: id, parentId, definitionHash: hashDefinition(definition), strandedGroups, totalStranded });
+          const issued = await issueToken({ ...tokenFor, actorIds: predictedStranded });
           return reply.code(200).send(preview({ confirmToken: issued.token, expiresIn: issued.expiresIn }));
         }
       }
@@ -594,13 +610,19 @@ export async function definitionRoutes(fastify) {
     // event types just changed).
     await refreshLegacyAmbiguity(machineId).catch(() => {});
 
-    // ── Visibility barrier (cluster) ────────────────────────────────────────
-    // The deployment is committed once every live server has registered it, or once the
-    // registry lease has run out (a server that has not synced by then stops routing).
+    // ── Commit point for routing: the registry epoch ─────────────────────────
+    // From here on every event unit, on every server, reads an epoch that includes this
+    // change-point and syncs before it routes (actorManager.ensureRegistryCurrent).
+    await bumpRegistryEpoch();
+
+    // ── Acknowledgements (cluster) ──────────────────────────────────────────
+    // Wait (bounded) until live servers have registered the change-point. This only warms
+    // their registries so their next units need no extra sync; correctness comes from the
+    // epoch above, not from this wait.
     await publishRegistryChange();
     const barrier = await awaitRegistryBarrier(cpRow);
     if (barrier.leaseExpired && barrier.pending.length) {
-      request.log.warn(`[definitions] ${id}: servers ${barrier.pending.join(', ')} did not acknowledge within the registry lease; they are fenced until they sync`);
+      request.log.warn(`[definitions] ${id}: servers ${barrier.pending.join(', ')} did not acknowledge in time; they sync before their next event (registry epoch)`);
     }
 
     // ── Step 4: Strand the actors predicted to be stranded (only after confirm) ──

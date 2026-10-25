@@ -27,6 +27,7 @@ import {
 import { decrypt, encrypt } from '../registry/db.js';
 import { getGlobalRegistry } from './implementationRegistry.js';
 import { withRemote, remoteEnabled, refreshRemoteManifest } from './remoteImplementations.js';
+import { now as clusterNow } from '../lib/clusterClock.js';
 
 const POLL_MS    = 1_000;
 const BACKOFF_MAX_MS = parseInt(process.env.STATEKEEP_ACTION_BACKOFF_MAX_MS ?? '300000', 10);
@@ -46,7 +47,7 @@ export function startActionJobWorker(sendEventFn, registry) {
   _timer     = setTimeout(runLoop, POLL_MS);
   // Keep leases of long-running actions alive so no other poll claims them again.
   _leaseTimer = setInterval(() => {
-    renewActionJobLeases([...active], Date.now() + ACTION_JOB_LEASE_MS)
+    renewActionJobLeases([...active], clusterNow() + ACTION_JOB_LEASE_MS)
       .catch((e) => console.error('[actionJobWorker] lease renewal:', e.message));
   }, Math.max(250, Math.floor(ACTION_JOB_LEASE_MS / 3)));
   _leaseTimer.unref?.();
@@ -65,7 +66,7 @@ async function runLoop() {
     const jobs = room > 0 ? await claimActionJobs(room) : [];
     for (const job of jobs) {
       if (actorBusy.has(job.actor_id)) {        // keep per-actor order: hand it back for the next poll
-        await retryActionJobAfter(job.id, job.retry_count ?? 0, Date.now(), { sent: job.started_at != null }).catch(() => {});
+        await retryActionJobAfter(job.id, job.retry_count ?? 0, clusterNow(), { sent: job.started_at != null }).catch(() => {});
         continue;
       }
       active.add(job.id); actorBusy.add(job.actor_id);
@@ -98,7 +99,7 @@ async function complete(job, answer) {
         || /is (terminated|archived)|not found|dispatch (404|409)/.test(err.message ?? '');
       if (!gone) {
         // delivery failed for another reason: keep the answer, try the delivery again soon
-        await retryActionJobAfter(job.id, job.retry_count ?? 0, Date.now() + 1000, { sent: true });
+        await retryActionJobAfter(job.id, job.retry_count ?? 0, clusterNow() + 1000, { sent: true });
         return;
       }
       console.warn(`[actionJobWorker] '${job.action_name}' job ${job.id} succeeded but actor ${job.actor_id} is gone: follow-up ${send.type} dropped`);
@@ -153,7 +154,7 @@ async function processJob(job) {
         return complete(job, status);
       }
       if (status?.running === true) {                                        // still executing: check again soon
-        return retryActionJobAfter(job.id, job.retry_count ?? 0, Date.now() + 1000, { sent: true });
+        return retryActionJobAfter(job.id, job.retry_count ?? 0, clusterNow() + 1000, { sent: true });
       }
       if (status?.done !== false) return unknownOutcome(job, 'the implementation cannot tell whether it happened');
       // done === false: it certainly did not happen → run it, telling the implementation the
@@ -201,5 +202,5 @@ async function retryLater(job, opts, err, { sent }) {
   }
   // Exponential backoff: 1s, 2s, 4s, …, capped at 5 minutes
   const backoffMs = Math.min(1000 * 2 ** (newRetryCount - 1), BACKOFF_MAX_MS);
-  await retryActionJobAfter(job.id, newRetryCount, Date.now() + backoffMs, { sent }).catch(() => {});
+  await retryActionJobAfter(job.id, newRetryCount, clusterNow() + backoffMs, { sent }).catch(() => {});
 }

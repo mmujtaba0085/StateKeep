@@ -750,6 +750,28 @@ export function getDb() {
     console.log('[db] Migration v28 applied: change-point collection');
   }
 
+  // v29 — registry epoch (fencing token for routing visibility; see changepointRepo.js)
+  if (!appliedVersions.has(29)) {
+    _db.transaction(() => {
+      _db.exec(`CREATE TABLE IF NOT EXISTS registry_epoch (id INTEGER PRIMARY KEY CHECK (id = 1), epoch INTEGER NOT NULL)`);
+      _db.exec(`INSERT OR IGNORE INTO registry_epoch (id, epoch) VALUES (1, 0)`);
+      _db.exec(`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (29, unixepoch())`);
+    })();
+    console.log('[db] Migration v29 applied: registry epoch');
+  }
+
+  // v30 — stranding consent (confirm tokens shared by every server; consented actors)
+  if (!appliedVersions.has(30)) {
+    _db.transaction(() => {
+      _db.exec(`CREATE TABLE IF NOT EXISTS confirm_tokens (token TEXT PRIMARY KEY, definition_id TEXT NOT NULL,
+        definition_hash TEXT NOT NULL, actor_ids TEXT NOT NULL, expires_at INTEGER NOT NULL)`);
+      _db.exec(`CREATE TABLE IF NOT EXISTS stranding_consents (definition_id TEXT NOT NULL, actor_id TEXT NOT NULL,
+        PRIMARY KEY (definition_id, actor_id))`);
+      _db.exec(`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (30, unixepoch())`);
+    })();
+    console.log('[db] Migration v30 applied: stranding consent');
+  }
+
   // Graceful shutdown
   process.on('exit',    () => { try { _db.close(); } catch {} });
   process.on('SIGINT',  () => { process.exit(0); });

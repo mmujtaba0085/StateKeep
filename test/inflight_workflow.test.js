@@ -7,7 +7,7 @@
  *   3.  stateMapping: renamed state preserves actor position
  *   4.  needs_rescue: state removed, no mapping → 409 on next event
  *   5.  Rescue: deploy definition that re-adds missing state → actor unblocked
- *   6.  Confirm-token flow: stranded actor gate + drift check
+ *   6.  Confirm-token flow: stranded actor gate + one-time use
  *   7.  Concurrent in-flight actors: N actors mid-transition during redeploy
  *   8.  Event history: MIGRATED event appears after inline migration
  *   9.  Fingerprint routing: historyPath-scoped deployment only takes eligible actors
@@ -368,7 +368,7 @@ test('5. Rescue deployment unblocks needs_rescue actors', async () => {
 });
 
 // =============================================================================
-// TEST 6 — Confirm-token expiry / drift protection
+// TEST 6 — Confirm-token one-time use
 // =============================================================================
 test('6. Confirm-token: second deployment with same token fails (one-time use)', async () => {
   // Spawn an actor and put it in a state that v3 doesn't have

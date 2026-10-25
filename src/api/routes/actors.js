@@ -251,6 +251,7 @@ export async function actorRoutes(fastify) {
       let code = 400;
       if (err.message.includes('not found')) code = 404;
       if (err.code === 'ACTOR_NEEDS_RESCUE' || err.code === 'ACTOR_TERMINATED' || err.code === 'ACTOR_ARCHIVED') code = 409;
+      if (err.statusCode === 503) code = 503;   // REGISTRY_STALE, OWNER_CHANGED: retry
       return reply.code(code).send({
         error:  err.message,
         ...(err.code ? { code: err.code } : {}),

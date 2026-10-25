@@ -247,6 +247,7 @@ LEGACY_FILES=(
   test/test_writebuffer_retry.js
   test/test_apv_families.js
   test/test_apv_fixes.js
+  test/test_confirm_consent.js
   test/test_engine_ex.js
   test/test_model_oracle.js
   packages/xstate-apv/test.js

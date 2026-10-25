@@ -14,7 +14,7 @@
  *   8. Verify GET /v1/actors/needs-rescue lists stranded actors
  *   9. Deploy rescue version → actors can be migrated to safety
  *  10. Token expiry — re-submit without token to get fresh preview
- *  11. Token drift — actor count changes between preview and confirm
+ *  11. Token consent — an actor not in the preview would be stranded (test/confirm_consent.test.js)
  *  12. No stranded actors → single PUT succeeds without confirmation flow
  *  13. Wrong token ID → 400 (not for this definition)
  *  14. Validate endpoint returns errors array + warnings array on bad definitions

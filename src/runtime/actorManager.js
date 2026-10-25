@@ -35,7 +35,11 @@ import { consumePendingNotifications } from '../registry/migrationNotificationRe
 import { getDb, encrypt, isPostgres } from '../registry/db.js';
 import { serializeRegionFingerprints } from '../registry/regionFingerprintCodec.js';
 import { emitWebhookEvent } from '../api/lib/webhookEmitter.js';
-import { findFamilyChangepoint, loadChangepointsAfter, loadParChangepointsAfter, familyFrontiers, markCollected } from '../registry/changepointRepo.js';
+import { strandingConsented } from '../registry/confirmTokenStore.js';
+import { ownedGen, wasFenced, onFenced, ownerChangedError, assertOwnerInTx, ownerFenceEnabled } from '../cluster/ownership.js';
+import { findFamilyChangepoint, loadChangepointsAfter, loadParChangepointsAfter, familyFrontiers, markCollected, readRegistryEpoch } from '../registry/changepointRepo.js';
+import { testPausePoint } from '../lib/testHooks.js';
+import { now as clusterNow } from '../lib/clusterClock.js';
 import { cancelAllPendingForActor } from '../registry/scheduledEventRepo.js';
 
 const HOT_REGISTRY_SIZE  = parseInt(process.env.HOT_REGISTRY_SIZE    ?? '10000',  10);
@@ -48,6 +52,15 @@ const IDLE_TIMEOUT_MS    = parseInt(process.env.IDLE_TIMEOUT_SECONDS  ?? '300', 
 const hotRegistry = new LRUCache(HOT_REGISTRY_SIZE, async (actorId, entry) => {
   detachActorInvokes(actorId);  // explicit intent — invoke Promises survive independently
   // Must persist state before dropping registry entry: next event will HYDRATE from DB, recovering from last successful write
+  if (process.env.STATEKEEP_CLUSTER === 'true') {
+    // Through the write buffer, so the write is fenced by the ownership generation: a copy
+    // that went stale while another server owned the actor is never written back.
+    getWriteBuffer().queueState(actorId, {
+      stateValue: entry.stateValue, context: entry.context, historyFingerprint: entry.historyFingerprint,
+      regionFingerprints: entry.regionFingerprints ?? null, lastEventTick: entry.lastEventTick, status: 'active',
+    });
+    return;
+  }
   try {
     await updateActorState(actorId, {
       stateValue:          entry.stateValue,
@@ -168,38 +181,38 @@ async function registerParChangepointRow(row) {
   });
 }
 
-// Registry lease (cluster mode): this server may process events only while its registry
-// was synced from the database within the last REGISTRY_LEASE_MS, measured from the start
-// of the last sync that registered every row it read, and that started after this server
-// became visible to other servers (its first heartbeat). A deployment waits until every
-// live server has acknowledged its change-point, or until the lease has run out, before it
-// is committed (cluster.js awaitRegistryBarrier), so no server keeps routing on a registry
-// that lacks a committed deployment.
+// Registry fencing (cluster mode). Every deployment increments the registry epoch once its
+// change-point row is committed (changepointRepo.bumpRegistryEpoch); that increment is the
+// deployment's commit point for routing. A sync that reads epoch E before it reads the
+// change-point rows, and registers every row it reads, leaves a registry that contains every
+// change-point committed at or before E (_syncedEpoch). Before an event unit routes, it reads
+// the current epoch and, if the registry is older, syncs first (ensureRegistryCurrent). So a
+// unit never routes without a deployment that committed before the unit read the epoch, and
+// a unit that read it earlier is ordered before that deployment — however long the process
+// pauses afterwards, and whatever its clock does. No lease, clock or clock rate is involved.
+// (REGISTRY_LEASE_MS only bounds how long a deployment waits for other servers to
+// acknowledge it, which warms their registries; correctness does not depend on it.)
 export const REGISTRY_LEASE_MS = parseInt(process.env.STATEKEEP_REGISTRY_LEASE_MS ?? '2000', 10);
 const LEASE_WAIT_MS = parseInt(process.env.STATEKEEP_REGISTRY_LEASE_WAIT_MS ?? '10000', 10);
-let _lastSyncStartOk = 0;
-let _joinedAt = 0;
+let _syncedEpoch = -1;
 let _syncInFlight = null, _syncNext = null;
 let _onSynced = null;
 /** cluster.js reports this server's watermarks to the other servers after each sync. */
 export function onRegistrySynced(fn) { _onSynced = fn; }
 /** cluster.js: this server's heartbeat is now visible to deployments' barriers. */
-export function markClusterJoined() { if (!_joinedAt) _joinedAt = mono(); }
-// Lease times are measured on this process's monotonic clock (wall-clock jumps cannot
-// extend a lease); only durations are compared with other servers.
+export function markClusterJoined() {}
+/** The registry epoch this server's routing registry is known to be current with. */
+export function syncedRegistryEpoch() { return _syncedEpoch; }
 function mono() { return performance.now(); }
 
 async function _runSync() {
-  const started = mono();
+  // Read the epoch BEFORE the rows: every change-point committed at or before it is then
+  // among the rows read below.
+  let epoch = null;
+  try { epoch = await readRegistryEpoch(); } catch {}
   const complete = await _syncOnce();
-  // In a cluster the lease is renewed only once the new watermarks have been reported
-  // (heartbeat): a server whose lease is valid is then always visible to deployment
-  // barriers as recently alive, so a barrier never skips it.
-  let reported = true;
-  try { await _onSynced?.(registryWatermarks()); } catch { reported = false; }
-  if (complete && (reported || process.env.STATEKEEP_CLUSTER !== 'true')) {
-    _lastSyncStartOk = Math.max(_lastSyncStartOk, started);
-  }
+  try { await _onSynced?.(registryWatermarks()); } catch {}
+  if (complete && epoch !== null && epoch > _syncedEpoch) _syncedEpoch = epoch;
   if (!complete) throw Object.assign(new Error('some change-points could not be registered yet'), { code: 'SYNC_INCOMPLETE' });
 }
 
@@ -314,28 +327,34 @@ export async function upgradeLegacyActors({ limit = 1000 } = {}) {
   return out;
 }
 
-function leaseValid() {
-  return _joinedAt > 0 && _lastSyncStartOk >= _joinedAt && mono() - _lastSyncStartOk <= REGISTRY_LEASE_MS;
-}
-
 /**
- * (cluster) Before a unit routes: renew the registry lease if it has run out, retrying
- * for up to LEASE_WAIT_MS (a short database blip delays the unit instead of failing it);
- * then throw REGISTRY_STALE (503).
+ * (cluster) Before a unit routes: make sure the routing registry contains every deployment
+ * committed so far (see "Registry fencing" above). One primary-key read when the registry
+ * is current; otherwise a sync. Retries for up to LEASE_WAIT_MS (a short database blip
+ * delays the unit), then throws REGISTRY_STALE (503).
  */
-async function ensureRegistryLease() {
+async function ensureRegistryCurrent() {
   if (process.env.STATEKEEP_CLUSTER !== 'true') return;
-  if (leaseValid()) return;
+  // Test-only switch (NODE_ENV=test): lets the cluster test prove it detects a missing fence.
+  if (process.env.NODE_ENV === 'test' && process.env.STATEKEEP_TEST_DISABLE_REGISTRY_FENCE === '1') return;
   const deadline = mono() + LEASE_WAIT_MS;
   for (;;) {
-    try { await syncChangepointsFromDb(); } catch {}
-    if (leaseValid()) return;
+    let current = null;
+    try { current = await readRegistryEpoch(); } catch {}
+    if (current !== null) {
+      if (current <= _syncedEpoch) return;
+      try { await syncChangepointsFromDb(); } catch {}
+      if (current <= _syncedEpoch) return;
+    }
     if (mono() >= deadline) break;
     await new Promise((r) => setTimeout(r, 200));
   }
-  throw Object.assign(new Error('Routing registry is stale (database unreachable); retry shortly'),
+  throw Object.assign(new Error('Routing registry could not be brought up to date (database unreachable?); retry shortly'),
     { code: 'REGISTRY_STALE', statusCode: 503 });
 }
+
+// (cluster) A server whose writes were fenced has a stale copy of that actor: drop it.
+onFenced((actorId) => { hotRegistry.delete(actorId); });
 
 export const _migrationPollTimer = setInterval(async () => {
   try {
@@ -598,13 +617,13 @@ export async function spawnActor({ definitionId, initialContext, logicalStartTic
     // a later write: a crash in between left an actor whose first actions never ran.)
     const actionJobs = (snapResult.durableActions ?? []).map((d) => makeActionJobRow({
       actorId, actionName: d.name, context: d.context, event: d.event,
-      maxRetries: d.opts?.maxRetries ?? 3, fireAt: Date.now() }));
+      maxRetries: d.opts?.maxRetries ?? 3, fireAt: clusterNow() }));
     const timers = [];
     if (!snapResult.done) {
       for (const op of snapResult.scheduledEventOps ?? []) {
         if (op.op !== 'create') continue;
         for (const { eventType, delayMs } of op.entries) {
-          timers.push({ eventType, fireAt: Date.now() + delayMs,
+          timers.push({ eventType, fireAt: clusterNow() + delayMs,
             payloadEnc: encrypt(JSON.stringify({ stateEntryId: op.newEntryId })) });
         }
       }
@@ -825,8 +844,11 @@ async function _sendEventLocked(actorId, event, tick, opts = {}) {
   }
 
   // ── Inline migration check ─────────────────────────────────────────────────
-  // (cluster) never route on a registry older than the lease: see REGISTRY_LEASE_MS
-  await ensureRegistryLease();
+  // (cluster) never route on a registry that lacks a committed deployment: see
+  // "Registry fencing" above.
+  testPausePoint('unit-before-registry-check');
+  await ensureRegistryCurrent();
+  testPausePoint('unit-after-registry-check');
   const eng = getEngine();
   let migratedTo = null;
   const fromDefId = entry.definitionId;  // capture before any migration reassigns entry
@@ -996,7 +1018,7 @@ async function _sendEventLocked(actorId, event, tick, opts = {}) {
     context:     ctx,
     event:       ev,
     maxRetries:  opts?.maxRetries ?? 3,
-    fireAt:      Date.now(),
+    fireAt:      clusterNow(),
   }));
 
   // Start invoke services for the new state
@@ -1056,6 +1078,8 @@ async function _sendEventLocked(actorId, event, tick, opts = {}) {
   hotRegistry.set(actorId, entry);  // update LRU position
 
   const buf = getWriteBuffer();
+  // (cluster) The ownership generation these writes are made under (see ownership.js).
+  const unitGen = ownerFenceEnabled() ? ownedGen(actorId) : null;
   // durability: 'buffered' (default) — flush every FLUSH_MS (50ms window)
   // durability: 'sync'     — flush immediately before returning (zero loss)
   // durability: 'async'    — skip write buffer entirely; relies on LRU eviction to persist
@@ -1091,7 +1115,7 @@ async function _sendEventLocked(actorId, event, tick, opts = {}) {
           buf.queueScheduledCreate({
             actorId,
             eventType,
-            fireAt:  Date.now() + delayMs,
+            fireAt:  clusterNow() + delayMs,
             payload: { stateEntryId: op.newEntryId },
           });
         }
@@ -1109,6 +1133,9 @@ async function _sendEventLocked(actorId, event, tick, opts = {}) {
 
   // Group commit: don't acknowledge (or fire webhooks for) a transition that isn't on disk yet.
   if (durability === 'group') await buf.durable();
+  // (cluster) Ownership moved while this unit ran (e.g. this server was paused and another
+  // took the actor over): its writes were not committed, so it must not be acknowledged.
+  if (wasFenced(actorId, unitGen)) { hotRegistry.delete(actorId); throw ownerChangedError(actorId); }
 
   // Emit webhook events (never throws — emitWebhookEvent swallows errors)
   emitWebhookEvent('state.changed', {
@@ -1313,6 +1340,7 @@ export async function migrateActor(actorId, targetDefinitionId, { priority = 'no
       ? encrypt(Buffer.from(JSON.stringify(result.context)))
       : null;
     await pgTransaction(async (client) => {
+      await assertOwnerInTx(client, actorId);
       await client.query(
         `INSERT INTO events (actor_id, event_type, event_payload, tick, processed_at) VALUES ($1, 'MIGRATED', $2, $3, $4)`,
         [actorId, auditPayload, auditTick, Date.now()]
@@ -1343,7 +1371,7 @@ export async function migrateActor(actorId, targetDefinitionId, { priority = 'no
         const newStateKey = stateKeyOf(result.stateValue);
         const afters      = afterTransitions[newStateKey] ?? [];
         if (afters.length > 0) {
-          const tsNow = Date.now();
+          const tsNow = clusterNow();
           for (const { delayMs, eventType } of afters) {
             await client.query(
               `INSERT INTO scheduled_events
@@ -1399,6 +1427,7 @@ async function strandActor(actorId, fromDefId, targetDefId, err, deploymentId) {
   if (isPostgres) {
     const { transaction } = await import('../registry/db-postgres.js');
     await transaction(async (client) => {
+      await assertOwnerInTx(client, actorId);
       await client.query(`UPDATE actors SET definition_id=$1, status='needs_rescue', updated_at=$2 WHERE id=$3`, [targetDefId, now, actorId]);
       await client.query(`INSERT INTO events (actor_id, event_type, event_payload, tick, processed_at) VALUES ($1,'MIGRATION_FAILED',$2,$3,$4)`, [actorId, payload, now, now]);
     });
@@ -1409,6 +1438,15 @@ async function strandActor(actorId, fromDefId, targetDefId, err, deploymentId) {
       db.prepare(`INSERT INTO events (actor_id, event_type, event_payload, tick, processed_at) VALUES (?, 'MIGRATION_FAILED', ?, ?, ?)`).run(actorId, payload, now, now);
     })();
   }
+  // Report it. consented: whether the operator confirmed stranding this actor in the
+  // deployment preview (false: its state changed after the preview's final check, or the
+  // stranding happened later, when the actor reached a history this version cannot place).
+  let consented = false;
+  try { consented = await strandingConsented(targetDefId, actorId); } catch {}
+  emitWebhookEvent('actor.needs_rescue', {
+    actorId, fromDefinitionId: fromDefId, toDefinitionId: targetDefId,
+    reason: err.code ?? null, stateValue: err.currentStateValue ?? null, consented,
+  });
 }
 
 export async function migrateActorOwned(actorId, targetDefinitionId, { deploymentId = null } = {}) {

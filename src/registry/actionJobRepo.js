@@ -1,10 +1,11 @@
 // src/registry/actionJobRepo.js
 import { randomUUID } from 'crypto';
 import { getDb, encrypt, isPostgres } from './db.js';
+import { now as clusterNow } from '../lib/clusterClock.js';
 
 export async function insertActionJob({ actorId, actionName, context, event, maxRetries, fireAt }) {
   const id  = randomUUID();
-  const now = Date.now();
+  const now = clusterNow();
   const contextSnap = context != null ? encrypt(Buffer.from(JSON.stringify(context))) : null;
   const eventSnap   = event   != null ? encrypt(Buffer.from(JSON.stringify(event))) : null;
 
@@ -31,7 +32,7 @@ export async function insertActionJob({ actorId, actionName, context, event, max
 export const ACTION_JOB_LEASE_MS = parseInt(process.env.STATEKEEP_ACTION_LEASE_MS ?? '120000', 10);
 
 export async function claimActionJobs(batchSize = 50) {
-  const now = Date.now();
+  const now = clusterNow();           // leases are compared across servers
   const leaseUntil = now + ACTION_JOB_LEASE_MS;
   if (isPostgres) {
     const { queryAll } = await import('./db-postgres.js');
@@ -167,6 +168,6 @@ export async function resolveActionJob(id, happened) {
     // the job marked as started (e.g. it crashed mid-call) knows a human cleared it.
     // A fresh retry budget: earlier failures belong to the attempt that was reviewed.
     : await run(`UPDATE action_jobs SET status='pending', outcome='rerun-approved', started_at=NULL, retry_count=0, next_retry_at=$1 WHERE id=$2 AND outcome='unknown'`,
-                `UPDATE action_jobs SET status='pending', outcome='rerun-approved', started_at=NULL, retry_count=0, next_retry_at=? WHERE id=? AND outcome='unknown'`, [Date.now(), id]);
+                `UPDATE action_jobs SET status='pending', outcome='rerun-approved', started_at=NULL, retry_count=0, next_retry_at=? WHERE id=? AND outcome='unknown'`, [clusterNow(), id]);
   return (res.rowCount ?? res.changes ?? 0) > 0;
 }

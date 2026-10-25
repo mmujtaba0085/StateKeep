@@ -15,7 +15,7 @@ import { randomUUID, createHash } from 'crypto';
 import { createDefinition, updateCompiledJson, findDefinitionById } from '../registry/definitionRepo.js';
 import { createDeployment, updateDeploymentStatus, incrementMigrated, incrementFailed } from '../registry/deploymentRepo.js';
 import { findActorsByMachine } from '../registry/actorRepo.js';
-import { insertChangepoint } from '../registry/changepointRepo.js';
+import { insertChangepoint, bumpRegistryEpoch } from '../registry/changepointRepo.js';
 import { nextDeployTick, withFamilyDeployLock } from '../registry/deployClock.js';
 import { getEngine } from '../ffi/engine.js';
 import { computeHistoryHash, fingerprintToBigInt } from '../ffi/hashUtils.js';
@@ -57,6 +57,7 @@ export async function deployDefinition(definitionJson, {
     const rowId = await insertChangepoint({ tStar: Number(tStar), prefixHash: storedPrefix, refinement: 1, childDefId: id });
     registerScalar({ tStar, storedPrefix, childDefId: id, machineId: machineId ?? family, historyPath: hasPath ? path : null });
     markChangepointRowRegistered('cp', rowId);
+    await bumpRegistryEpoch();
 
     if (!parentId) return { id, machineId, deployedAt: Number(tStar) };
     try { invalidateMigrationCacheForDefinition(parentId); } catch {}
