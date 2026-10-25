@@ -5,11 +5,11 @@
 -->
 
 <p align="center">
-  <a href="#-see-it-in-60-seconds">
+  <a href="docs/agent-sessions.md">
     <picture>
       <source media="(prefers-color-scheme: dark)" srcset="docs/assets/hero-dark.svg">
       <source media="(prefers-color-scheme: light)" srcset="docs/assets/hero-light.svg">
-      <img alt="StateKeep: two actors reach the same state by different paths; a new version deployed with historyPath moves only the one that took that path." src="docs/assets/hero-dark.svg" width="100%">
+      <img alt="StateKeep: an AI agent session waits for a manager to approve an $80 refund; the server is killed and the session is unaffected; a new prompt and policy (v2) is deployed and the waiting session moves to it with its transcript; the manager approves, the refund tool runs exactly once, and the agent replies." src="docs/assets/hero-dark.svg" width="100%">
     </picture>
   </a>
 </p>
