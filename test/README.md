@@ -27,7 +27,7 @@ npm run test:all
 
 | Script                 | What it covers                                    | Server needed |
 |------------------------|---------------------------------------------------|---------------|
-| `npm run test:unit`    | FFI loader, FNV-1a hash, bigInt utils             | No            |
+| `npm run test:unit`    | Engine loader, engine hash helpers (legacy FNV-1a), bigInt utils | No |
 | `npm run test:properties` | 7 invariants × 100–500 random inputs           | No            |
 | `npm run test:c`       | 36 C FFI direct tests against mock engine         | No            |
 | `npm run test:integration` | Event flow, auth, concurrency, definition CRUD | Yes           |
@@ -169,14 +169,9 @@ a 503 response and shows as unhealthy in the dashboard (`/dashboard/workers.html
 
 ## CI Pipeline
 
-```
-unit + properties  ──┬──> integration + statechart ──> coverage
-                      └──> c-ffi
-                      └──> legacy
-```
-
-All stages run on Ubuntu 22.04. The `statechart` stage runs SC1–SC7 in order
-against a fresh server instance with `libapv-mock.so` (always-stay mode).
+See `.github/workflows/ci.yml`. All jobs run on Ubuntu 24.04 with the bundled WebAssembly engine
+(`src/ffi/apv-engine.mjs`): unit/property/hot-path tests, the full suite (`scripts/run-tests.sh`,
+which starts its own server), and the full suite on PostgreSQL.
 
 ---
 
@@ -187,7 +182,7 @@ against a fresh server instance with `libapv-mock.so` (always-stay mode).
 | `STATEKEEP_DB_PATH` | Yes | Path for test SQLite database |
 | `STATEKEEP_ENCRYPTION_KEY` | Yes | 32-byte hex key for AES-256-GCM |
 | `PORT` | No (default 3099) | API server port |
-| `STATEKEEP_ENGINE_PATH` | No | Path to `libapv-engine.so` or mock |
+| `STATEKEEP_ENGINE_PATH` | No | Legacy, from the native-library era: only some old test and benchmark scripts read it. The server always loads the pre-built WebAssembly engine `src/ffi/apv-engine.mjs` |
 | `STRESS` | No | Set to `1` to enable Level 5 load tests |
 | `C_TESTS` | No | Set to `1` to include C FFI binary tests |
 

@@ -92,7 +92,7 @@ Both orders were in the same state. Their histories differed, so they got differ
 <td width="50%" valign="top">
 
 ### 🧭 History-targeted versioning
-Deploy a version for **all** running actors, or only those whose history matches a pattern (`historyPath`, or per-region `historyRegions` for parallel states). Chains of pending versions are followed to a fixpoint.
+Deploy a version for **all** running actors, or only those whose history *is* a given path, counted from their first event (`historyPath`, or per-region `historyRegions` for parallel states). It's an exact match, not a substring. Chains of pending versions are followed to a fixpoint.
 
 </td>
 <td width="50%" valign="top">
@@ -158,7 +158,7 @@ flowchart LR
     P --> C[("Commit state + event<br/>then acknowledge")]
 ```
 
-* Every deployment registers a **change-point**: *from logical time t, actors of this family whose history matches π go to version d′*. π is either an exact history or "all actors".
+* Every deployment registers a **change-point**: *from logical time t, actors of this family whose history is π go to version d′*. π is either an exact history, the actor's whole transition history from its first event (not a substring), or "all actors".
 * Every actor carries a **history fingerprint**, a length-prefixed SHA-256 chain over the events that changed its state. Storage is constant per actor (one fingerprint, plus one per parallel region) and never grows with the history; routing never scans the log.
 * Before each event, the actor is routed to a **fixpoint** through every pending version. Then the event runs.
 * A migration places the actor in its landing state **without running entry actions** and without replay, so it never fires side effects ([details](docs/apv.md#what-a-migration-does-and-does-not-do)).

@@ -566,7 +566,7 @@ Get full state for a single actor including decrypted context.
   "stateValue":         "underwriting",
   "status":             "active",
   "context":            { "applicantId": "usr-001", "amount": 50000 },
-  "historyFingerprint": "a3f1b2c4d5e6f7a8",
+  "historyFingerprint": "2:79cff0d92c527c446ce6978ad96cec1dafe8b38bd6902bbce1ea27caca22539c",
   "createdAt":          1716163200000,
   "updatedAt":          1716163260000,
   "done":               false

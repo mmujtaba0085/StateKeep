@@ -1,3 +1,3 @@
-module github.com/mmujtaba0085/statekeep/sdks/go
+module github.com/mmujtaba0085/StateKeep/sdks/go
 
 go 1.22

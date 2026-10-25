@@ -1,13 +1,15 @@
 # Scenario 2 — Loan Application Processing
 
-This scenario demonstrates **historyPath-targeted migration** — the core APV differentiator. You deploy three versions of a loan workflow, and each version only migrates actors whose event history matches a specific path.
+This scenario demonstrates **historyPath-targeted migration**, the core APV differentiator. You deploy three versions of a loan workflow: a wildcard version that moves everyone, then a targeted one that moves only actors whose event history is a specific path.
+
+> **Matching rule:** `historyPath` matches an actor whose **whole transition history so far, counted from its first event, is exactly** this sequence: at deploy time, or later if the actor reaches that point (it moves before processing its next event). It is not a substring or subsequence match, and an actor already past the path is not moved. Only events that caused a transition count; ignored events, events whose guard failed, and system events such as `SPAWN` and `MIGRATED` don't.
 
 **What you'll see:**
 - Deploy loan-v1 (basic loan flow, 10 states)
 - Spawn 20 loan actors at various lifecycle stages
-- Deploy loan-v2 (adds income verification — targeted with historyPath)
-- Deploy loan-v3 (adds compliance review — even more targeted historyPath)
-- Observe: old actors (without income verification in their history) stay on their version; new actors get the full flow
+- Deploy loan-v2 (adds income verification; a wildcard deploy, so every actor moves)
+- Deploy loan-v3 (adds compliance review; targeted with `historyPath`)
+- Observe: only actors whose history is exactly `APPLY → SUBMIT → INCOME_VERIFIED` move to loan-v3; everyone else stays on loan-v2
 
 **Set this once** before running any commands (replace with your own values):
 ```bash
@@ -97,9 +99,9 @@ curl -s "$BASE/v1/actors?limit=50" \
 
 ---
 
-## Step 4 — Deploy loan-v2 (adds income verification, historyPath targeted)
+## Step 4 — Deploy loan-v2 (adds income verification, wildcard)
 
-**What changes:** The flow now routes newly submitted applications through an `income_check` step before underwriting. **But** — actors already in `underwriting` or further along skipped income check. We don't want to disrupt them. `historyPath: ["APPLY"]` means only actors whose history starts with `APPLY` are eligible for this version. Since ALL loan actors have `APPLY` in their history, this migrates everyone — but the income_check step is only *encountered* by actors who haven't submitted yet.
+**What changes:** The flow now routes newly submitted applications through an `income_check` step before underwriting. **But** — actors already in `underwriting` or further along skipped income check. We don't want to disrupt them, and we don't have to. This deploy has **no `historyPath`** (a wildcard), so every non-final actor moves to loan-v2, but the income_check step is only *encountered* by actors that haven't submitted yet.
 
 > **Key insight:** The `income_check` state is inserted between `application` and `underwriting`. Actors already past `application` (in `underwriting`, `approved`, `active`) will still exist in those same states in loan-v2 — they just naturally skip income_check because they're already past it.
 
@@ -192,25 +194,26 @@ curl -s "$BASE/v1/actors/APPLICATION_ACTOR_ID/events" \
   -H "x-api-key: $API_KEY" | jq '[.events[] | {type: .type, at: .processedAt}]'
 ```
 
-**Expected output** — notice the full history including INCOME_VERIFIED:
+**Expected output**: the full log, including INCOME_VERIFIED. The log also shows system events such as `SPAWN` and `MIGRATED` (from the loan-v2 deploy), which are not part of the history fingerprint:
 ```json
 [
   { "type": "SPAWN",            "at": 1716163200000 },
   { "type": "APPLY",            "at": 1716163201000 },
+  { "type": "MIGRATED",         "at": 1716163230000 },
   { "type": "SUBMIT",           "at": 1716163260000 },
   { "type": "INCOME_VERIFIED",  "at": 1716163320000 }
 ]
 ```
 
-This event history fingerprint (`APPLY → SUBMIT → INCOME_VERIFIED`) is exactly what loan-v3 will use as its `historyPath`.
+The transitions this actor took are `APPLY → SUBMIT → INCOME_VERIFIED`. That exact sequence is what loan-v3 will use as its `historyPath`.
 
 ---
 
 ## Step 7 — Deploy loan-v3 (adds compliance review, surgically targeted)
 
-**What changes:** Adds `compliance_review` step between `underwriting` and `approved`. But — this should ONLY apply to actors who went through income verification (history contains `INCOME_VERIFIED`). Old v1-era actors that went straight from `application` to `underwriting` (no income check) should remain on loan-v2 without the compliance step.
+**What changes:** Adds `compliance_review` step between `underwriting` and `approved`. But it should only apply to applications that went through income verification. Old v1-era actors that went straight from `application` to `underwriting` (history `APPLY → SUBMIT`, no income check) should remain on loan-v2 without the compliance step.
 
-`historyPath: ["APPLY", "SUBMIT", "INCOME_VERIFIED"]` targets only actors with that exact event sequence in their history.
+`historyPath: ["APPLY", "SUBMIT", "INCOME_VERIFIED"]` targets actors whose whole history so far is exactly that sequence, which means they're sitting in `underwriting` after the income check. It also catches any actor that reaches that point later. An income-verified actor that has already been `APPROVE`d is past the path and stays on loan-v2.
 
 ```bash
 curl -s -X PUT "$BASE/v1/definitions" \
@@ -272,7 +275,7 @@ curl -s -X PUT "$BASE/v1/definitions" \
   }' | jq .
 ```
 
-**Expected:** `201` — only actors with `INCOME_VERIFIED` in their history migrate to loan-v3. Old v1-era actors stay on loan-v2.
+**Expected:** `201`. Only actors whose history is exactly `APPLY → SUBMIT → INCOME_VERIFIED` migrate to loan-v3. Old v1-era actors (history `APPLY → SUBMIT`) stay on loan-v2.
 
 ---
 
@@ -280,7 +283,7 @@ curl -s -X PUT "$BASE/v1/definitions" \
 
 Check the Machines page in the dashboard. You should see:
 - `loan-v2`: actors that predate income verification (old flow, no income_check history)
-- `loan-v3`: only actors that went through `INCOME_VERIFIED`
+- `loan-v3`: only actors whose history was exactly `APPLY → SUBMIT → INCOME_VERIFIED` when they were routed
 
 Verify via API:
 ```bash
@@ -345,7 +348,7 @@ curl -s -X POST "$BASE/v1/actors/OLD_UNDERWRITING_ACTOR_ID/event" \
 | Spawn + populate | 20 actors at different lifecycle stages |
 | Deploy loan-v2 | Additive migration — income_check inserted mid-flow |
 | Move through income_check | New step is live, actor event history builds up |
-| Deploy loan-v3 with historyPath | Surgical targeting — only actors with `INCOME_VERIFIED` in history get compliance_review |
+| Deploy loan-v3 with historyPath | Surgical targeting: only actors whose history is exactly `APPLY → SUBMIT → INCOME_VERIFIED` get compliance_review |
 | Check the split | loan-v2 and loan-v3 both have active actors based on their history |
 | Full v3 flow | compliance_review → approved → active |
 | v2 comparison | Old actors skip compliance_review, go straight to approved |

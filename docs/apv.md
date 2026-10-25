@@ -2,7 +2,9 @@
 
 A complete technical reference covering the formal model, implementation details, and how StateKeep handles flat, hierarchical, and parallel state machines.
 
-> **Formal basis:** APV is derived from *Localized Branch Accessibility in Versioned Time Travel* (Amjad, 2026), a prefix-class formulation with deterministic reachability, irreversibility, and paradox avoidance. The statechart extension (hierarchical and parallel routing) is developed in *Anchor-Point Versioning: A Formal Model for Deterministic, Memory-Safe Migration in Versioned State Systems* (Amjad, June 2026). All theorems referenced in this document correspond to sections of those papers.
+> **Formal basis:** *Anchor-Point Versioning: A Formal Model for Deterministic Migration in Distributed Actor Systems* (Muhammad Mujtaba Amjad, 2026). The current, machine-checked statements are in [`formal/`](../formal/) (Lean 4; [`formal/README.md`](../formal/README.md) maps each theorem to its Lean name), and the routing code is tested against them (`test/test_model_oracle.js`).
+>
+> Sections 3–6 below are an informal overview in the notation of the original formulation, and their theorem numbers are those of that draft. Where they differ from `formal/` (for example, wildcard patterns, per-family registries, combined scalar/parallel routing and the collection frontier), `formal/` and the code are authoritative.
 
 ---
 
@@ -14,7 +16,7 @@ A complete technical reference covering the formal model, implementation details
 4. [The Routing Law](#4-the-routing-law)
 5. [Determinism, Irreversibility, and GC Safety](#5-determinism-irreversibility-and-gc-safety)
 6. [Rescue Change-Points](#6-rescue-change-points)
-7. [The FNV-1a Fingerprint Chain](#7-the-fnv-1a-fingerprint-chain)
+7. [The History Fingerprint](#7-the-history-fingerprint)
 8. [The APV Engine (APV Registry)](#8-the-apv-engine-apv-registry)
 9. [Scalar (Flat) Routing — End to End](#9-scalar-flat-routing--end-to-end)
 10. [Hierarchical (Compound) State Machine Routing](#10-hierarchical-compound-state-machine-routing)
@@ -41,7 +43,7 @@ The standard workaround — event-log replay — fails on all three counts: it h
 
 ### What APV Does Instead
 
-APV records a compact hash of each actor's event history (16 bytes per actor) and uses that hash to determine, at migration time, which new definition version the actor should land on. No events are replayed. No side effects re-fire. The decision is deterministic: given the same hash and the same change-point registry, the answer is always the same.
+APV records a fixed-size fingerprint of each actor's transition history (a 32-byte SHA-256 digest per actor, plus one per parallel region; it never grows with the history) and uses that hash to determine, at migration time, which new definition version the actor should land on. No events are replayed. No side effects re-fire. The decision is deterministic: given the same hash and the same change-point registry, the answer is always the same.
 
 ---
 
@@ -53,7 +55,9 @@ A version `v` is a deployed machine definition together with the actor execution
 
 ### History-Prefix Class
 
-Two actors share a **prefix class** at logical time `t` if and only if they have processed exactly the same sequence of events before `t`. The prefix class `[v]_t` is represented as a 64-bit FNV-1a hash of that event sequence. Two actors with identical prefix hashes are in the same prefix class and will receive identical routing decisions.
+Two actors share a **prefix class** at logical time `t` if and only if they have processed exactly the same sequence of events before `t`. The prefix class `[v]_t` is represented by the actor's **history fingerprint**, a length-prefixed SHA-256 chain over that sequence of event types (§7). Two actors with the same fingerprint have the same history (barring a SHA-256 collision) and receive identical routing decisions.
+
+Only events that **caused a transition** count. An event the current state ignores, or whose guard fails, doesn't change the history. System events (`SPAWN`, `MIGRATED`, …) never count.
 
 ### Change-Point
 
@@ -160,63 +164,52 @@ In StateKeep terms: when actors have `needs_rescue` status, a subsequent deploym
 
 ---
 
-## 7. The FNV-1a Fingerprint Chain
+## 7. The History Fingerprint
 
-> **Current encoding (v2).** New fingerprints are a length-prefixed SHA-256 chain, written `2:<hex>`; the FNV-1a chain below hashes the plain concatenation of event types, so `[PAY, MENT_OK]` and `[PAYMENT_OK]` collide. It remains only for *legacy* actors. Those are upgraded from their event log when the replay provably determines their history (at start-up, `POST /v1/admin/fingerprints/upgrade`, or before an ambiguous history-targeted deployment; see `src/runtime/legacyFingerprints.js`). A legacy actor that cannot be upgraded is matched by a history pattern only when the pattern splits into the family's event types in exactly one way; otherwise the match is refused and the deployment warns `LEGACY_HISTORY_AMBIGUOUS`. The routing rule itself is formalized in `formal/APV.lean` and the code is tested against it by `test/test_model_oracle.js`. Storage is one fingerprint per actor, plus one per parallel region: constant per actor for a given definition, never growing with the history.
+The prefix class `[v]_t` is represented by a fixed-size fingerprint. Processing an event is one hash step, and routing is one lookup. This is APV's O(1)-per-event memory guarantee: one fingerprint per actor, plus one per parallel region, never growing with the history.
 
-The prefix class `[v]_t` is represented concretely as a 64-bit FNV-1a hash. This is the heart of APV's O(1) per-event memory guarantee.
+### Current encoding (v2): length-prefixed SHA-256 chain
 
-### Algorithm
+```
+h₀      = SHA-256("statekeep.fp.v2|empty")
+hₙ₊₁    = SHA-256(hₙ ‖ u32be(len(eₙ)) ‖ utf8(eₙ))       eₙ = event type of the n-th transition
+stored  = "2:" + hex(hₙ)                                 (66 characters; "0" = empty history)
+```
 
-FNV-1a operates on bytes with two constants:
-- `FNV_OFFSET = 0xcbf29ce484222325` (64-bit basis)
-- `FNV_PRIME  = 0x00000100000001B3` (64-bit prime)
-
-For each byte `b` in the input: `hash = (hash XOR b) * FNV_PRIME` (mod 2^64)
-
-### The Chain
-
-Every actor maintains a running `historyFingerprint` (a 16-char hex string). When an event arrives, the worker updates it:
+* **Injective.** The length prefix separates events, so `[PAY, MENT_OK]` and `[PAYMENT_OK]` have different fingerprints. Two different histories can only collide if SHA-256 collides.
+* **Order-sensitive.** `[START, SUBMIT]` ≠ `[SUBMIT, START]`.
+* **Event types only, never payloads.** Including payloads would make `historyPath` impossible to write, because you would need every past payload.
+* **Engine key.** The APV engine indexes change-points by the first 64 bits of the digest. Every hit is then **confirmed against the full 256-bit fingerprint**. A 64-bit key collision is detected and resolved by an exact scan, so it can't misroute an actor (§15).
 
 ```javascript
 // src/ffi/fingerprintChain.js
-export function updateFingerprint(currentHex, eventType) {
-  const current = (!currentHex || currentHex === '0')
-    ? FNV_OFFSET
-    : BigInt(`0x${String(currentHex).padStart(16, '0')}`);
-  return bigIntToHex64(fnv1aUpdate(current, eventType));
+export function updateFingerprint(current, eventType, hint = 2) {
+  return schemeOf(current, hint) === 1
+    ? updateV1(current, eventType)                                    // legacy actors only
+    : V2 + stepV2(digestOf(current), eventType).toString('hex');      // "2:<64 hex>"
 }
 ```
 
-The `'0'` sentinel means "no events processed" and maps to `FNV_OFFSET` as the starting value. This ensures a freshly-spawned actor begins at the canonical starting point of the FNV chain.
+### Legacy encoding (v1): FNV-1a, kept only for old actors
 
-**Critical properties:**
-- Only `event.type` contributes to the fingerprint, not the payload. Including payload would make `historyPath` declarations impossible to write — you would need to know the exact payload value of every past event.
-- No `fnv1aFinal()` is called between steps. Each event type is hashed directly into the running state. This is the incremental form of the chain.
-- The chain is order-sensitive: `[START, SUBMIT]` produces a different fingerprint than `[SUBMIT, START]`.
+Before v2, fingerprints were a 64-bit FNV-1a hash (16 hex characters) over the **plain concatenation** of event types (basis `0xcbf29ce484222325`, prime `0x100000001b3`). That encoding is not injective: `[PAY, MENT_OK]` and `[PAYMENT_OK]` collide by construction.
 
-### Where This Happens in Code
+It survives only for actors that took transitions before the upgrade:
+* They are upgraded to v2 from their event log when the replay provably determines their history. This happens at start-up, on `POST /v1/admin/fingerprints/upgrade`, or before an ambiguous history-targeted deployment (`src/runtime/legacyFingerprints.js`).
+* An actor that can't be upgraded keeps extending its v1 fingerprint. It's matched by a history pattern only when the pattern splits into the family's event types in exactly one way; otherwise the match is refused with `LEGACY_HISTORY_AMBIGUOUS`.
+* Every history-targeted change-point is registered under both encodings.
 
-The chain runs in the worker thread (`src/runtime/actorWorker.js`, `handleEvent`):
+New actors never get a v1 fingerprint.
 
-```javascript
-const newFingerprint = updateFingerprint(historyFingerprint, event.type);
-```
+### Where this happens in code
 
-The result is persisted to the `actors.history_fingerprint` column via the write buffer. Every subsequent routing decision reads this stored value.
+The chain runs where the event is processed (`src/runtime/interpreter.js`, via `updateFingerprint`), and only when the event causes a transition. The result is persisted to `actors.history_fingerprint` by the write buffer, and every routing decision reads that stored value.
 
-### Computing a Deployment's Prefix Hash
+### Computing a deployment's pattern fingerprint
 
-When an operator deploys a new definition with `historyPath: ['START', 'SUBMIT_INFO', 'PAY_FEE']`, the system must compute which fingerprint value to register as the change-point's `prefix_hash`. It uses `computeHistoryHash` from `src/ffi/hashUtils.js`:
+`historyPath: ['START', 'SUBMIT_INFO', 'PAY_FEE']` is hashed with the same function (`computeHistoryFingerprint` in `src/ffi/fingerprintChain.js`, re-exported as `computeHistoryHash` from `src/ffi/hashUtils.js`). The result equals the fingerprint of an actor whose transition history is exactly that sequence. The change-point is registered under the v2 engine key and the legacy v1 key, and the path itself is stored with the definition, so the full v2 fingerprint can be rebuilt after a restart.
 
-```javascript
-// Mirrors exactly what actorWorker produces
-export function computeHistoryHash(eventTypes) {
-  return computeHistoryFingerprint(eventTypes);
-}
-```
-
-This starts from `FNV_OFFSET` and chains `fnv1aUpdate` for each event type — identical to what the actor worker does — so the fingerprint matches exactly.
+**What matches.** A change-point with `historyPath` π applies to an actor when the actor's whole transition history so far, counted from its first event, is exactly π. That holds at deploy time, or at any later event if the actor reaches that point afterwards. It is not a substring or subsequence match. An actor already past π (its history is longer) is not moved retroactively.
 
 ---
 
@@ -238,7 +231,7 @@ The pre-built WASM engine (`src/ffi/apv-engine.mjs`) is included in the reposito
 | `apv_actor_started` | Notify registry that an actor started on a definition |
 | `apv_actor_stopped` | Notify registry that an actor terminated |
 | `apv_vacate_prefix` | Mark a prefix class as vacated (triggers GC) |
-| `apv_fnv1a_init` | Initialize an FNV hash accumulator |
+| `apv_fnv1a_init` | Initialize an FNV hash accumulator (legacy v1 fingerprints) |
 | `apv_fnv1a_update` | Update the hash with new bytes |
 | `apv_fnv1a_final` | Finalize the hash |
 | `apv_register_changepoint_parallel` | Register a parallel (multi-region) change-point |
@@ -319,10 +312,9 @@ PUT /v1/definitions
 
 In `src/api/routes/definitions.js`:
 
-1. `computeHistoryHash(['SUBMIT', 'VERIFY_DOCS', 'APPROVE'])` → produces a 64-bit hex fingerprint, e.g. `"a3f2c9018bd4e701"`
-2. `fingerprintToBigInt("a3f2c9018bd4e701")` → `BigInt("0xa3f2c9018bd4e701")`
-3. `eng.registerChangepoint(tStar, prefixHash, 1n, "loan-v2")` → stored in APV engine in-memory registry
-4. `insertChangepoint({ tStar, prefixHash: "a3f2c9018bd4e701", refinement: 1, childDefId: "loan-v2" })` → persisted to `changepoints` table
+1. `computeHistoryFingerprint(['SUBMIT', 'VERIFY_DOCS', 'APPROVE'])` → `"2:79cff0d92c527c44…22539c"` (full SHA-256 chain, 64 hex digits)
+2. `registerScalar(...)` (`src/runtime/routingRegistry.js`) registers the change-point in the engine under the fingerprint's 64-bit key `0x79cff0d92c527c44` (and under the legacy v1 key), in the family's scope, and keeps the full fingerprint to confirm hits
+3. `insertChangepoint({ tStar, prefixHash, refinement: 1, childDefId: "loan-v2" })` → persisted to the `changepoints` table
 
 The `_historyPath: ["SUBMIT", "VERIFY_DOCS", "APPROVE"]` is embedded in the stored definition JSON so it survives restarts.
 
@@ -331,13 +323,13 @@ The `_historyPath: ["SUBMIT", "VERIFY_DOCS", "APPROVE"]` is embedded in the stor
 An actor spawned on `loan-v1` processes events through the worker:
 
 ```
-SPAWN     → historyFingerprint = '0'            (FNV_OFFSET)
-SUBMIT    → historyFingerprint = fnv("SUBMIT")  = "7e9be..." 
-VERIFY_DOCS → historyFingerprint = fnv(fnv("SUBMIT") || "VERIFY_DOCS") = "c4a1..."
-APPROVE   → historyFingerprint = fnv(...|| "APPROVE") = "a3f2c9018bd4e701"
+SPAWN        → historyFingerprint = "0"                     (empty history; SPAWN is not a transition)
+SUBMIT       → historyFingerprint = "2:0469950248f1874c…"   = step(h₀, "SUBMIT")
+VERIFY_DOCS  → historyFingerprint = "2:a47acd00ca67691b…"   = step(…, "VERIFY_DOCS")
+APPROVE      → historyFingerprint = "2:79cff0d92c527c44…"   = step(…, "APPROVE")
 ```
 
-After the third event the actor's fingerprint exactly matches the registered `prefix_hash`. The worker returns the new fingerprint; the write buffer flushes it to `actors.history_fingerprint` within 50ms.
+After the third event the actor's fingerprint equals the pattern's fingerprint: its whole history so far is exactly `[SUBMIT, VERIFY_DOCS, APPROVE]`. The worker returns the new fingerprint; the write buffer flushes it to `actors.history_fingerprint` within 50ms.
 
 ### Step 3: Migration Job Enqueued
 
@@ -407,7 +399,7 @@ A compound state machine has nested states — e.g. `processing.waiting_for_docs
 
 ### Fingerprint is State-Structure Agnostic
 
-The FNV chain accumulates event types in order. Whether the machine transitions between top-level states or sub-states, the fingerprint chain is identical. `historyPath: ['START', 'DOCS_UPLOADED']` is computed the same way whether `DOCS_UPLOADED` transitions to `processing.waiting_for_approval` or `approved` at the top level.
+The fingerprint chain accumulates event types in order. Whether the machine transitions between top-level states or sub-states, the fingerprint chain is identical. `historyPath: ['START', 'DOCS_UPLOADED']` is computed the same way whether `DOCS_UPLOADED` transitions to `processing.waiting_for_approval` or `approved` at the top level.
 
 ### Landing State Resolution
 
@@ -482,7 +474,7 @@ This yields region paths `["active.setup.payment", "active.setup.shipping"]`. `e
 
 ### The Solution: Per-Region Fingerprints
 
-Each parallel region accumulates its own independent FNV-1a chain. A region's fingerprint only advances when an event causes a transition *in that region*.
+Each parallel region accumulates its own independent fingerprint chain (same encoding as the main fingerprint). A region's fingerprint only advances when an event causes a transition *in that region*.
 
 #### Detecting Region Transitions
 
@@ -551,7 +543,7 @@ export function encodeRegionFingerprint(regionPath, regionFingerprintHex) {
 }
 ```
 
-This produces a new 64-bit hash that is unique to the combination of `(regionPath, fingerprint)`. Two regions with the same event history but different paths produce different encoded values.
+This produces a 64-bit engine key that is unique to the combination of `(regionPath, fingerprint)`. The code above is the legacy (v1) form. For v2 fingerprints the key is the first 64 bits of `SHA-256("statekeep.region.v2|" ‖ u32be(len(path)) ‖ path ‖ digest)` (`regionKeyV2` in `src/ffi/fingerprintChain.js`), and hits are confirmed against the full regional fingerprints. Two regions with the same event history but different paths produce different encoded values.
 
 ### AND Semantics
 
@@ -682,7 +674,7 @@ APV state survives server restarts through three DB columns and two tables.
 
 ### `actors.history_fingerprint`
 
-A 16-char hex string. Updated by the write buffer every time an event is processed. This is the actor's current position in the FNV-1a chain — `[v]_t` in formal terms.
+`"2:<64 hex>"` (v2), `"0"` for an empty history, or a 16-char hex string for a legacy v1 actor. Updated by the write buffer whenever an event causes a transition. This is the actor's current position in the fingerprint chain: `[v]_t` in formal terms.
 
 ### `actors.region_fingerprints`
 
@@ -805,7 +797,7 @@ From empirical evaluation at 10^3–10^6 actors with 10–10^4 change-points:
 
 | Metric | APV | Event-sourcing replay |
 |---|---|---|
-| Memory per actor | 16 bytes (hash) | Full event log |
+| Memory per actor | 32 bytes (SHA-256 digest), plus 32 per parallel region | Full event log |
 | Routing time | O(log n) per actor | O(N) per actor (N = event count) |
 | Memory at 100k actors | 13.32 MB | 83.60 MB (−84.1%) |
 | Routing time at 100k actors | 19.01 ms | 313.04 ms (−93.9%) |
@@ -823,30 +815,15 @@ Each worker thread maintains a compiled definition cache (`_compiledCache`) capp
 
 ## 15. Known Limitations and Open Questions
 
-### Hash Collision Probability
+### Fingerprint collisions
 
-FNV-1a 64-bit is not collision-free. The birthday-bound collision probability — the probability that any two actors in the registry share an identical fingerprint despite genuinely different event histories — is:
+**Fingerprints (v2).** Two different histories have the same fingerprint only if SHA-256 collides, which isn't a practical concern. The length-prefixed encoding also rules out the *structural* collisions of plain concatenation (`[PAY, MENT_OK]` vs `[PAYMENT_OK]`).
 
-```
-P ≈ n² / (2 × 2⁶⁴)   where n = number of distinct prefix classes
-```
+**Engine keys.** The engine indexes change-points by the first 64 bits of a fingerprint, so two different fingerprints can share a key. By the birthday bound that becomes likely only around 2³² ≈ 4×10⁹ distinct histories, and it's **harmless**: every engine hit is confirmed against the full 256-bit fingerprint, and a mismatch falls back to an exact scan of the family's change-points (`verifyScalar` / `scalarByScan` in `src/runtime/routingRegistry.js`; tested by forging a key collision in `test/test_engine_ex.js`). A key collision costs a scan; it can't misroute.
 
-At StateKeep's operating scales:
+**Legacy v1 fingerprints** are 64-bit FNV-1a over the plain concatenation and are not injective. See §7 for how they're upgraded, or refused when a match would be ambiguous.
 
-| Active actors (n) | Birthday-bound collision probability |
-|---|---|
-| 1,000 | ~2.7 × 10⁻¹⁴ |
-| 100,000 | ~2.7 × 10⁻¹⁰ |
-| 1,000,000 | ~2.7 × 10⁻⁸ |
-| 1,000,000,000 | ~2.7 × 10⁻² |
-
-At a million actors the probability is roughly 1-in-37-million — negligible for production use. The threshold where 64-bit becomes a genuine concern is around 10⁹ (one billion) simultaneous active actors. Above that scale, migrating to 128-bit hashes (e.g. SHA-256 truncated) is advisable.
-
-**What a collision would mean:** Two actors with different event histories but identical fingerprints would receive the same migration decision — one of them would migrate to the wrong version. Because the hash chain is deterministic and actors in the same prefix class are routed identically by definition, this would be a silent incorrect routing, not a crash.
-
-**Path-keyed encoding and regional fingerprints** add no additional collision risk relative to the global fingerprint. `encodeRegionFingerprint(regionPath, fp)` hashes the region path *into* the value, so even if two regions' raw event fingerprints are identical, their encoded values differ.
-
-**Mitigation:** The stored `historyFingerprint` is the actor's authoritative event-history summary. Collision probability is independent of the number of change-points registered — only the number of distinct prefix classes (actors with distinct histories) matters. For systems requiring higher assurance, changing `FNV_PRIME` and `FNV_OFFSET` in `src/ffi/fingerprintChain.js` to 128-bit constants would require corresponding changes in the APV engine ABI.
+**Regional fingerprints** add no extra risk: the region path is hashed into each regional key, so identical histories in two regions give different keys.
 
 ---
 
@@ -1000,10 +977,10 @@ In the current implementation, vacating is per-actor not per-prefix-class (i.e.,
 | `Acc(v, T)` | Unique accessible version for actor v at time T |
 | `Live(t*, P)` | Active actors carrying prefix P at t* |
 | `APVClock` | Monotonic integer clock for deployment times |
-| `FNV_OFFSET` | `0xcbf29ce484222325` — FNV-1a 64-bit basis |
-| `FNV_PRIME` | `0x00000100000001B3` — FNV-1a 64-bit prime |
-| `historyFingerprint` | Actor's current prefix class hash (16-char hex) |
+| `h₀` | `SHA-256("statekeep.fp.v2|empty")`: start of the v2 fingerprint chain |
+| `historyFingerprint` | Actor's current prefix class: `"2:<64 hex>"` (v2), `"0"` (empty), or 16-char hex (legacy v1) |
+| `FNV_OFFSET`, `FNV_PRIME` | `0xcbf29ce484222325`, `0x100000001b3`: FNV-1a 64-bit, used for legacy v1 fingerprints and for family scopes (`scopeOf`) |
 | `regionFingerprints` | Per-region fingerprint map for parallel machines |
 | `logicalStartTick` | APV clock value at actor spawn (= T in Acc) |
 | `tStar` | APV clock value at deployment (= t* in change-point) |
-| `prefixHash` | `BigInt(historyFingerprint)` — passed to APV engine |
+| `prefixHash` | 64-bit engine key of a fingerprint (first 64 bits of the v2 digest; the value itself for v1) |

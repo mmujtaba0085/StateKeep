@@ -17,7 +17,8 @@ import FastifySwagger from '@fastify/swagger';
 import FastifySwaggerUI from '@fastify/swagger-ui';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
-import { mkdirSync } from 'fs';
+import { mkdirSync, readFileSync } from 'fs';
+const PKG_VERSION = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')).version;
 import { randomUUID } from 'crypto';
 
 import { engineReady, getEngine } from '../ffi/engine.js';
@@ -95,9 +96,9 @@ await fastify.register(FastifySwagger, {
     info: {
       title:       'StateKeep API',
       description: 'Actor lifecycle management with Anchor-Point Versioning (APV) for zero-downtime statechart migrations.',
-      version:     '1.0.0',
+      version:     PKG_VERSION,
       contact:     { name: 'StateKeep', url: 'https://github.com/mmujtaba0085/StateKeep', email: 'statekeep.support@gmail.com' },
-      license:     { name: 'Apache-2.0 WITH Commons-Clause' },
+      license:     { name: 'Apache-2.0 with Commons Clause (source-available)', url: 'https://github.com/mmujtaba0085/StateKeep/blob/master/LICENSE' },
     },
     tags: [
       { name: 'actors',      description: 'Actor lifecycle — spawn, events, state, terminate' },

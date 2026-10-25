@@ -1,7 +1,7 @@
 # StateKeep — Go SDK
 
 ```go
-import "github.com/mmujtaba0085/statekeep/sdks/go/statekeep"
+import "github.com/mmujtaba0085/StateKeep/sdks/go/statekeep"
 
 sk := statekeep.New("http://localhost:3001", os.Getenv("STATEKEEP_API_KEY"))
 a, err := sk.Spawn(ctx, "loan", map[string]any{"amount": 50000})

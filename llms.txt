@@ -4,7 +4,7 @@
 
 Key facts:
 - Deploy a definition: `PUT /v1/definitions` with `id`, `definition` (XState v5 JSON), and optionally `parentId`, `historyPath` (an exact event history that selects which running actors move), `historyRegions` (per parallel region), `stateMapping` and `contextTransform`.
-- Without `historyPath`, every actor of the parent's family is eligible. With it, only actors whose history equals the pattern move.
+- Without `historyPath`, every actor of the parent's family is eligible. With it, an actor moves when its whole transition history so far, counted from its first event, is exactly the path: at deploy time, or later when it reaches that point. It is not a substring or subsequence match; actors already past the path stay. Only events that caused a transition count.
 - If a version removes occupied states without a mapping, the deploy returns `requires_confirmation` with the affected actors and a `confirmToken`. Confirmed actors become `needs_rescue` and are never misplaced.
 - Actors: `POST /v1/actors` (spawn) and `POST /v1/actors/:id/event` (send). An event is acknowledged only after it is committed.
 - Side effects have delivery modes (`idempotent`, `verify`, ...). An unknown outcome is never silently repeated.

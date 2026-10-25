@@ -87,9 +87,9 @@ await PUT('/v1/definitions', {
 });
 ```
 
-StateKeep's APV engine hashes this path (FNV-1a chain) and compares it against each
-actor's accumulated history fingerprint. Only actors that processed exactly these events
-in this order are eligible. Zero lines of migration logic to write.
+StateKeep hashes this path (length-prefixed SHA-256 chain) and compares it with each
+actor's accumulated history fingerprint. Only actors whose transition history is exactly
+these events, in this order, from their first event, are eligible. Zero lines of migration logic to write.
 
 **Expected: 100% accuracy, fastest developer experience.**
 

@@ -448,11 +448,13 @@ This resets the actor to `active` and it will be re-evaluated for migration on t
 
 ## 9. historyPath — Targeting Specific Actors
 
-By default, deploying a new version migrates **all** actors from the parent that can safely migrate. With `historyPath`, you target only actors whose event history matches a specific sequence.
+By default, deploying a new version migrates **all** actors from the parent that can safely migrate. With `historyPath`, you target only actors whose event history *is* a specific sequence.
+
+> **The matching rule.** `historyPath` matches an actor whose **whole transition history so far, counted from its first event, is exactly** this sequence: at deploy time, or later if the actor reaches that point (it moves before processing its next event). It is not a substring or subsequence match, and an actor already past the path is not moved. Only events that caused a transition count; ignored events, events whose guard failed, and system events such as `SPAWN` and `MIGRATED` don't.
 
 ### Use case
 
-You're adding a compliance review step. You only want actors who went through the income verification step (they have `INCOME_VERIFIED` in their history) to get the new compliance_review state. Older actors that skipped income check should stay on the current version.
+You're adding a compliance review step. You only want applications that went through income verification to get the new compliance_review state: those whose history is `APPLY → SUBMIT → INCOME_VERIFIED`, which puts them in `underwriting`. Older actors that skipped the income check have a different history and stay on the current version.
 
 ```bash
 curl -X PUT https://your-statekeep-instance.com/v1/definitions \
@@ -483,7 +485,14 @@ curl -X PUT https://your-statekeep-instance.com/v1/definitions \
 
 **How it works:**
 
-StateKeep computes a fingerprint (FNV-1a hash) of each actor's event history and matches it against the `historyPath` sequence. Only actors whose history contains `APPLY → SUBMIT → INCOME_VERIFIED` (in that order, as a subsequence) are eligible for migration to loan-v3. All other loan-v2 actors continue on loan-v2.
+Every actor carries a fingerprint of its transition history: a length-prefixed SHA-256 chain, stored as `2:<hex>`. The deployment computes the fingerprint of `APPLY → SUBMIT → INCOME_VERIFIED`, and an actor moves to loan-v3 when its own fingerprint is equal to it. That means its history from the first event is exactly those three events: right now, or when it gets there later.
+
+Not eligible:
+- actors that never had `INCOME_VERIFIED`;
+- actors whose history merely *contains* the three events with others in between;
+- actors already past that point (for example, already `APPROVE`d).
+
+They all continue on loan-v2. To also reach actors further along, deploy one change-point per history you want to target, or use a wildcard deploy with a `stateMapping`.
 
 ### Empty historyPath = wildcard
 

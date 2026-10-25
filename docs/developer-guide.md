@@ -302,12 +302,12 @@ Actors already on `order-v1` continue there. New actors spawned with the machine
 
 ### Path-based routing (surgical migration)
 
-Only actors whose event history *starts with* a specific path migrate to the new version — those at that point when you deploy, and those who reach it afterwards. Everyone else stays:
+Only actors whose transition history, from their first event, is *exactly* the path migrate to the new version: those at that point when you deploy, and those who reach it afterwards. It isn't a substring or subsequence match, and actors already past the path stay:
 
 ```js
 await sk.deploy('order-v2', newDef, {
   parentId: 'order-v1',
-  historyPath: ['PAY'],  // actors whose history starts with PAY (now, or when they reach it)
+  historyPath: ['PAY'],  // actors whose history is exactly [PAY] (now, or when they reach it)
 });
 ```
 
