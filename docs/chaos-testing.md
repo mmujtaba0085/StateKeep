@@ -100,20 +100,20 @@ It runs the [generic workflow simulation](#generic-workflow-simulation) seven ti
 
 It then writes [`benchmarks/chaos/summary.json`](../benchmarks/chaos/summary.json). The raw per-run reports go to `benchmarks/chaos/runs/` and are not committed.
 
-Latest run (engine cleanup build, 2026-10-25):
+Latest run (registry epoch, ownership generations, cluster clock; 2026-10-26):
 
 | Run | Backend | Intensity | Actors | Deployments | Migrations | Server kills | DB drops | Service crashes | Violations |
 |---|---|---|---|---|---|---|---|---|---|
-| f-sq-n | SQLite | normal | 300 | 8 | 173 | 2 | 0 | 3 | **0** |
-| f-sq-h | SQLite | hard | 300 | 6 | 132 | 7 | 0 | 3 | **0** |
-| f-pg-n | PostgreSQL | normal | 300 | 7 | 244 | 3 | 0 | 1 | **0** |
-| f-pg-h | PostgreSQL | hard | 300 | 6 | 80 | 7 | 4 | 6 | **0** |
-| f-cl-n | 2-server cluster | normal | 300 | 5 | 92 | 2 | 3 | 2 | **0** |
-| f-cl-h | 2-server cluster | hard | 300 | 9 | 197 | 8 | 5 | 5 | **0** |
-| f-pg-big | PostgreSQL | hard | 800 | 13 | 984 | 12 | 5 | 5 | **0** |
-| **Total** | | | **2,600** | **54** | **1,902** | **41** | **17** | **25** | **0** |
+| f-sq-n | SQLite | normal | 300 | 4 | 69 | 0 | 0 | 3 | **0** |
+| f-sq-h | SQLite | hard | 300 | 7 | 133 | 9 | 0 | 4 | **0** |
+| f-pg-n | PostgreSQL | normal | 300 | 4 | 45 | 4 | 1 | 2 | **0** |
+| f-pg-h | PostgreSQL | hard | 300 | 9 | 196 | 6 | 5 | 2 | **0** |
+| f-cl-n | 2-server cluster | normal | 300 | 5 | 62 | 3 | 5 | 3 | **0** |
+| f-cl-h | 2-server cluster | hard | 300 | 8 | 261 | 8 | 1 | 6 | **0** |
+| f-pg-big | PostgreSQL | hard | 800 | 17 | 1651 | 12 | 9 | 9 | **0** |
+| **Total** | | | **2,600** | **54** | **2,417** | **42** | **21** | **29** | **0** |
 
-The runs also included 21 service outages and 51 migrate-worker or scheduler kills.
+The runs also included 28 service outages and 52 migrate-worker or scheduler kills.
 
 Limits of this evidence:
 - one host;
