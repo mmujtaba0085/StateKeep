@@ -282,8 +282,14 @@ export async function updateActorState(id, {
 
 export async function updateActorStatus(id, status) {
   if (isPostgres) {
-    const { query } = await import('./db-postgres.js');
-    await query('UPDATE actors SET status=$1, updated_at=$2 WHERE id=$3', [status, now(), id]);
+    // (cluster) Fenced like every other write of an actor: committed only while this server
+    // still holds the actor's ownership generation (src/cluster/ownership.js).
+    const { transaction } = await import('./db-postgres.js');
+    const { assertOwnerInTx } = await import('../cluster/ownership.js');
+    await transaction(async (client) => {
+      await assertOwnerInTx(client, id);
+      await client.query('UPDATE actors SET status=$1, updated_at=$2 WHERE id=$3', [status, now(), id]);
+    });
     return;
   }
   getStmts().updateStatus.run({ id, status, updated_at: now() });
@@ -644,9 +650,13 @@ export async function findStrandedWithoutOpenJob(limit = 1000) {
 export async function updateActorFingerprints(id, historyFingerprint, regionFingerprintsSerialized) {
   const now = Date.now();
   if (isPostgres) {
-    const { query } = await import('./db-postgres.js');
-    await query(`UPDATE actors SET history_fingerprint=$1, region_fingerprints=$2, updated_at=$3 WHERE id=$4`,
-      [historyFingerprint, regionFingerprintsSerialized, now, id]);
+    const { transaction } = await import('./db-postgres.js');
+    const { assertOwnerInTx } = await import('../cluster/ownership.js');
+    await transaction(async (client) => {
+      await assertOwnerInTx(client, id);           // (cluster) fenced by the ownership generation
+      await client.query(`UPDATE actors SET history_fingerprint=$1, region_fingerprints=$2, updated_at=$3 WHERE id=$4`,
+        [historyFingerprint, regionFingerprintsSerialized, now, id]);
+    });
     return;
   }
   getDb().prepare(`UPDATE actors SET history_fingerprint=?, region_fingerprints=?, updated_at=? WHERE id=?`)
