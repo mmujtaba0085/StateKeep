@@ -48,8 +48,8 @@ describe('StateKeepClient', { skip: SKIP }, async () => {
   let createClient, StateKeepError;
 
   before(async () => {
-    const mod = await import('../src/index.ts').catch(
-                  () => import('../src/index.js'));
+    const mod = await import('../dist/index.js').catch(
+                  () => import('../src/index.ts'));
     createClient   = mod.createClient;
     StateKeepError = mod.StateKeepError;
     sk = createClient({ baseUrl: BASE_URL, apiKey: API_KEY });

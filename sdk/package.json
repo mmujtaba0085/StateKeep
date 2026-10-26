@@ -1,24 +1,57 @@
 {
   "name": "@statekeep/sdk",
   "version": "0.1.0",
-  "description": "TypeScript client for StateKeep — statechart hosting with path-based actor migration",
+  "description": "JavaScript/TypeScript client for StateKeep: persistent XState v5 actors over HTTP, with history-targeted live migration of running workflows.",
+  "keywords": [
+    "statekeep",
+    "xstate",
+    "statechart",
+    "state-machine",
+    "workflow",
+    "durable-execution",
+    "live-migration",
+    "workflow-versioning",
+    "sdk"
+  ],
+  "author": "Muhammad Mujtaba Amjad",
+  "license": "MIT",
+  "homepage": "https://github.com/mmujtaba0085/StateKeep/tree/master/sdk#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mmujtaba0085/StateKeep.git",
+    "directory": "sdk"
+  },
+  "bugs": {
+    "url": "https://github.com/mmujtaba0085/StateKeep/issues"
+  },
   "type": "module",
-  "main": "src/index.js",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
   "exports": {
     ".": {
-      "import": "./src/index.js",
-      "types": "./src/index.ts"
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
     }
   },
+  "files": [
+    "dist/",
+    "src/index.ts",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
-    "build": "tsc --declaration --outDir dist",
-    "typecheck": "tsc --noEmit",
-    "test": "node --test test/client.test.js"
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "node --test test/client.test.js",
+    "prepublishOnly": "npm run build"
   },
   "devDependencies": {
     "typescript": "^5.4.0"
   },
-  "engines": { "node": ">=18.0.0" },
-  "license": "UNLICENSED",
-  "keywords": ["xstate", "statechart", "workflow", "state-machine", "migration"]
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
 }

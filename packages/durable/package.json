@@ -1,11 +1,42 @@
 {
   "name": "@statekeep/durable",
   "version": "0.1.0",
-  "description": "Code-first durable workflows stored in StateKeep, with history-based version routing",
+  "description": "Code-first durable workflows (steps, signals, timers) stored in StateKeep, with history-based version routing when you release a new workflow version.",
+  "keywords": [
+    "statekeep",
+    "durable-execution",
+    "workflow",
+    "durable-functions",
+    "workflow-versioning",
+    "saga",
+    "state-machine"
+  ],
+  "author": "Muhammad Mujtaba Amjad",
+  "license": "MIT",
+  "homepage": "https://github.com/mmujtaba0085/StateKeep/tree/master/packages/durable#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mmujtaba0085/StateKeep.git",
+    "directory": "packages/durable"
+  },
+  "bugs": {
+    "url": "https://github.com/mmujtaba0085/StateKeep/issues"
+  },
   "type": "module",
   "main": "index.js",
   "exports": "./index.js",
-  "engines": { "node": ">=20" },
-  "scripts": { "test": "node --test test.js" },
-  "license": "MIT"
+  "files": [
+    "index.js",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test test.js"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
 }

@@ -1,127 +1,204 @@
-export interface StateKeepConfig {
-    baseUrl: string;
-    apiKey: string;
-    /** Timeout in milliseconds for each request (default: 30000) */
-    timeoutMs?: number;
+export declare class StateKeepError extends Error {
+    readonly status: number;
+    readonly code: string;
+    readonly body: unknown;
+    constructor(message: string, status: number, code: string, body?: unknown);
 }
 export interface Actor {
-    id: string;
+    actorId: string;
     definitionId: string;
-    orgId: string;
-    status: 'active' | 'archived' | 'needs_rescue';
-    currentState: string;
+    machineId?: string;
+    stateValue: string | Record<string, unknown>;
     context: Record<string, unknown>;
-    createdAt: string;
-    updatedAt: string;
+    status: 'active' | 'migrating' | 'needs_rescue' | 'terminated' | 'archived';
+    historyFingerprint: string;
+    logicalStartTick: number;
+    done: boolean;
+    migratedTo?: string;
+    idempotent?: boolean;
+}
+export interface DeployResult {
+    id: string;
+    parentId: string | null;
+    deployedAt: number;
+    deploymentId: string | null;
+    affectedActors: number;
+    idempotent: boolean;
+    engineAvailable: boolean;
+    warnings: Warning[];
+}
+export interface ConfirmationRequired {
+    status: 'requires_confirmation';
+    confirmToken: string;
+    strandedActors: Array<{
+        currentState: string;
+        atVersion?: string;
+        reason?: string;
+        count: number;
+    }>;
+    safeActors: number;
+    expiresIn: number;
+    warnings: Warning[];
+    message?: string;
+    /** Why a fresh preview was returned instead of deploying (expired/used token, changed definition, new strandings). */
+    reason?: string;
+    /** How many actors would now be stranded that were not in the previous preview. */
+    notInPreview?: number;
+}
+/** A transition in a history pattern: an event type, or a delayed transition by state path and delay. */
+export type HistoryStep = string | {
+    after: string;
+    ms: number;
+};
+/** contextTransform entry: copy from a path, set a constant, or copy with a default. */
+export type ContextTransformSpec = string | {
+    value: unknown;
+} | {
+    from: string;
+    default?: unknown;
+};
+export interface Warning {
+    type: string;
+    severity: string;
+    message: string;
+}
+export interface PreviewResult {
+    wouldDeploy: boolean;
+    warnings: Warning[];
+    strandedActors: Array<{
+        currentState: string;
+        count: number;
+    }>;
+    migration: {
+        eligible: number;
+        wouldMigrate: Array<{
+            actorId: string;
+            currentState: string;
+            targetDefinitionId: string;
+        }>;
+        wouldStay: Array<{
+            actorId: string;
+            currentState: string;
+            reason: string;
+        }>;
+        engineAvailable: boolean;
+    };
 }
 export interface ActorEvent {
     id: number;
-    actorId: string;
-    eventType: string;
-    eventPayload: Record<string, unknown> | null;
-    tick: number;
-    processedAt: string;
-}
-export interface SpawnActorOptions {
-    definitionId: string;
-    initialContext?: Record<string, unknown>;
-    id?: string;
-}
-export interface SendEventOptions {
     type: string;
-    payload?: Record<string, unknown>;
+    payload: Record<string, unknown> | null;
+    tick: number;
+    processedAt: number;
 }
-export interface ListActorEventsOptions {
-    limit?: number;
-    afterId?: number;
-}
-export interface ListActorEventsResult {
-    actorId: string;
+export interface EventsResult {
     events: ActorEvent[];
-    limit: number;
-    afterId: number;
+    count: number;
+    hasMore: boolean;
     nextCursor: number | null;
 }
-export interface BulkSpawnOptions {
-    actors: Array<{
-        definitionId: string;
-        initialContext?: Record<string, unknown>;
-    }>;
-}
-export interface BulkSpawnResult {
-    created: Actor[];
-    failed: Array<{
-        input: unknown;
-        error: string;
-    }>;
-    total: number;
-}
-export interface StateMachineDefinition {
+export interface ScheduledEvent {
     id: string;
-    orgId: string;
-    parentId: string | null;
-    machineDefinition: Record<string, unknown>;
-    stateMapping?: Record<string, string>;
-    historyRegions?: string[];
-    createdAt: string;
+    actorId: string;
+    eventType: string;
+    fireAt: number;
+    status: 'pending' | 'fired' | 'failed' | 'cancelled';
 }
-export interface DeployDefinitionOptions {
-    id: string;
+export interface ValidationResult {
+    valid: boolean;
+    initialState: string;
+    stateCount: number;
+    states: string[];
+    finalStates: string[];
+    errors: Warning[];
+    warnings: Warning[];
+}
+export interface StateKeepConfig {
+    baseUrl: string;
+    apiKey: string;
+}
+export interface DeployOptions {
     parentId?: string;
-    machineDefinition: Record<string, unknown>;
+    /** Route only actors whose whole transition history equals this sequence. Omit for every actor. */
+    historyPath?: HistoryStep[];
+    /** Parallel machines: route by the histories of these regions (mutually exclusive with historyPath). */
+    historyRegions?: Record<string, HistoryStep[]>;
+    /** { "old.leaf.path": "new.leaf.path" } for removed or renamed states. */
     stateMapping?: Record<string, string>;
-    historyRegions?: string[];
-}
-export interface Webhook {
-    id: string;
-    orgId: string;
-    url: string;
-    events: string[];
-    active: boolean;
-    secret: string | null;
-    createdAt: string;
-}
-export interface CreateWebhookOptions {
-    url: string;
-    events: string[];
-    secret?: string;
-}
-export interface UpdateWebhookOptions {
-    url?: string;
-    events?: string[];
-    active?: boolean;
-}
-export interface ListWebhooksResult {
-    webhooks: Webhook[];
-    total: number;
-}
-export interface StateKeepError {
-    statusCode: number;
-    error: string;
-    message: string;
-}
-export declare class StateKeepRequestError extends Error {
-    readonly statusCode: number;
-    readonly body: StateKeepError;
-    constructor(statusCode: number, body: StateKeepError, message: string);
+    contextTransform?: Record<string, ContextTransformSpec>;
+    /** Token from a requires_confirmation response, to accept the listed strandings. */
+    confirmToken?: string;
 }
 export declare class StateKeepClient {
-    private readonly baseUrl;
-    private readonly headers;
-    private readonly timeoutMs;
+    private readonly base;
+    private readonly key;
     constructor(config: StateKeepConfig);
-    private request;
-    spawnActor(options: SpawnActorOptions): Promise<Actor>;
-    getActor(actorId: string): Promise<Actor>;
-    sendEvent(actorId: string, options: SendEventOptions): Promise<Actor>;
-    listActorEvents(actorId: string, options?: ListActorEventsOptions): Promise<ListActorEventsResult>;
-    bulkSpawnActors(options: BulkSpawnOptions): Promise<BulkSpawnResult>;
-    deployDefinition(options: DeployDefinitionOptions): Promise<StateMachineDefinition>;
-    getDefinition(definitionId: string): Promise<StateMachineDefinition>;
-    listWebhooks(): Promise<ListWebhooksResult>;
-    getWebhook(webhookId: string): Promise<Webhook>;
-    createWebhook(options: CreateWebhookOptions): Promise<Webhook>;
-    updateWebhook(webhookId: string, options: UpdateWebhookOptions): Promise<Webhook>;
+    private headers;
+    private req;
+    validate(definition: object): Promise<ValidationResult>;
+    deploy(id: string, definition: object, options?: DeployOptions): Promise<DeployResult>;
+    preview(id: string, definition: object, options?: Omit<DeployOptions, 'confirmToken'>): Promise<PreviewResult>;
+    getDefinition(id: string): Promise<object>;
+    getDefinitionStatus(id: string): Promise<object>;
+    getDefinitionDiff(id: string): Promise<object>;
+    getDefinitionStats(id: string): Promise<object>;
+    getMachineStats(machineId: string): Promise<object>;
+    listDefinitions(opts?: {
+        limit?: number;
+        offset?: number;
+    }): Promise<object>;
+    spawn(definitionId: string, initialContext?: Record<string, unknown>): Promise<Actor>;
+    send(actorId: string, eventType: string, payload?: Record<string, unknown>, idempotencyKey?: string): Promise<Actor>;
+    getState(actorId: string): Promise<Actor>;
+    getEvents(actorId: string, opts?: {
+        limit?: number;
+        after?: number;
+    }): Promise<EventsResult>;
+    getDecisions(actorId: string): Promise<object>;
+    exportActor(actorId: string): Promise<object>;
+    terminate(actorId: string): Promise<void>;
+    rescueActor(actorId: string): Promise<Actor>;
+    listActors(opts?: {
+        status?: string;
+        machineId?: string;
+        state?: string;
+        limit?: number;
+        offset?: number;
+    }): Promise<{
+        actors: Actor[];
+        count: number;
+    }>;
+    listNeedsRescue(opts?: {
+        definitionId?: string;
+        limit?: number;
+        offset?: number;
+    }): Promise<{
+        actors: Actor[];
+        count: number;
+    }>;
+    schedule(actorId: string, eventType: string, opts: {
+        delay?: number;
+        fireAt?: number;
+        payload?: Record<string, unknown>;
+    }): Promise<ScheduledEvent>;
+    listScheduled(actorId: string, opts?: {
+        status?: string;
+    }): Promise<{
+        scheduled: ScheduledEvent[];
+        count: number;
+    }>;
+    cancelScheduled(actorId: string, scheduleId: string): Promise<void>;
+    createWebhook(opts: {
+        url: string;
+        secret: string;
+        events: string[];
+    }): Promise<object>;
+    listWebhooks(): Promise<object>;
     deleteWebhook(webhookId: string): Promise<void>;
+    health(): Promise<{
+        status: string;
+    }>;
+    workerHealth(): Promise<object>;
 }
+export declare function createClient(config: StateKeepConfig): StateKeepClient;
 //# sourceMappingURL=index.d.ts.map

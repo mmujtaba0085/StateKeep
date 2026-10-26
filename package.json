@@ -1,6 +1,6 @@
 {
   "name": "statekeep",
-  "version": "1.1.2",
+  "version": "1.2.0",
   "description": "Self-hosted engine for persistent statechart actors (XState v5) that migrates running workflows to new versions by the path each one took. No replay, no migration scripts, no downtime.",
   "keywords": [
     "state-machine",
@@ -19,6 +19,7 @@
     "ai-agents",
     "lean4"
   ],
+  "author": "Muhammad Mujtaba Amjad",
   "homepage": "https://github.com/mmujtaba0085/StateKeep#readme",
   "repository": {
     "type": "git",
@@ -39,6 +40,15 @@
   "bin": {
     "statekeep": "src/cli/index.js"
   },
+  "files": [
+    "src/",
+    "!src/**/*.test.js",
+    "!src/ffi/Makefile",
+    ".env.example",
+    "LICENSE",
+    "README.md",
+    "llms.txt"
+  ],
   "scripts": {
     "start": "node --env-file=.env src/api/server.js",
     "migrate-worker": "node src/workers/migrate-worker.js",
@@ -77,7 +87,8 @@
     "test:e2e:api": "playwright test --project=api",
     "test:e2e:dashboard": "playwright test --project=dashboard",
     "test:e2e:headed": "playwright test --headed",
-    "test:sdk": "STATEKEEP_API_KEY=$(grep STATEKEEP_API_KEY .env | cut -d= -f2) STATEKEEP_URL=http://localhost:3001 node --test sdk/test/client.test.js"
+    "test:sdk": "STATEKEEP_API_KEY=$(grep STATEKEEP_API_KEY .env | cut -d= -f2) STATEKEEP_URL=http://localhost:3001 node --test sdk/test/client.test.js",
+    "serve": "node src/cli/index.js serve"
   },
   "dependencies": {
     "@fastify/rate-limit": "^10.3.0",
@@ -97,5 +108,8 @@
     "c8": "^10.1.2",
     "node-addon-api": "^8.3.0",
     "xstate": "^5.14.0"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

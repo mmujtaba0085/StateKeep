@@ -1,0 +1,65 @@
+name: Publish to npm
+
+# Manual: Actions → "Publish to npm" → Run workflow. Choose the package, and keep
+# "dry run" on for a first rehearsal. Needs the repository secret NPM_TOKEN (an npm
+# granular access token with publish rights on the statekeep package and the @statekeep
+# scope). Packages are published with provenance (signed build attestation).
+on:
+  workflow_dispatch:
+    inputs:
+      package:
+        description: Package to publish
+        required: true
+        type: choice
+        options: [all, statekeep, '@statekeep/sdk', '@statekeep/durable', '@statekeep/xstate-apv']
+      dry_run:
+        description: Dry run (pack and show, publish nothing)
+        required: true
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  id-token: write   # npm provenance
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - name: Install
+        run: npm ci
+
+      - name: Test the packages
+        run: |
+          (cd packages/xstate-apv && NODE_PATH=../../node_modules node --test test.js)
+          (cd packages/durable && node --test test.js)
+          (cd sdk && npm ci && npm run build)
+
+      - name: Publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          PKG: ${{ inputs.package }}
+          DRY: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          publish() {   # $1 = directory
+            flags="--access public --provenance"
+            [ "$DRY" = "true" ] && flags="$flags --dry-run"
+            (cd "$1" && name=$(node -p "require('./package.json').name") && ver=$(node -p "require('./package.json').version") &&
+              if npm view "$name@$ver" version >/dev/null 2>&1; then echo "skip $name@$ver (already published)";
+              else echo "publish $name@$ver"; npm publish $flags; fi)
+          }
+          case "$PKG" in
+            all)                    publish . ; publish sdk ; publish packages/durable ; publish packages/xstate-apv ;;
+            statekeep)              publish . ;;
+            '@statekeep/sdk')       publish sdk ;;
+            '@statekeep/durable')   publish packages/durable ;;
+            '@statekeep/xstate-apv') publish packages/xstate-apv ;;
+          esac

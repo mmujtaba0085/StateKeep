@@ -1,101 +1,169 @@
-// ── Types ──────────────────────────────────────────────────────────────────────
-// ── Client ─────────────────────────────────────────────────────────────────────
-export class StateKeepRequestError extends Error {
-    statusCode;
+// ── Error type ────────────────────────────────────────────────────────────────
+export class StateKeepError extends Error {
+    status;
+    code;
     body;
-    constructor(statusCode, body, message) {
+    constructor(message, status, code, body = null) {
         super(message);
-        this.statusCode = statusCode;
+        this.status = status;
+        this.code = code;
         this.body = body;
-        this.name = 'StateKeepRequestError';
+        this.name = 'StateKeepError';
     }
 }
+// ── Client ────────────────────────────────────────────────────────────────────
 export class StateKeepClient {
-    baseUrl;
-    headers;
-    timeoutMs;
+    base;
+    key;
     constructor(config) {
-        this.baseUrl = config.baseUrl.replace(/\/$/, '');
-        this.timeoutMs = config.timeoutMs ?? 30_000;
-        this.headers = {
-            'Content-Type': 'application/json',
-            'X-API-Key': config.apiKey,
-        };
+        this.base = config.baseUrl.replace(/\/$/, '');
+        this.key = config.apiKey;
     }
-    async request(method, path, body) {
-        const url = `${this.baseUrl}${path}`;
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), this.timeoutMs);
-        let response;
+    headers(withBody = true) {
+        const h = { 'X-API-Key': this.key };
+        if (withBody)
+            h['Content-Type'] = 'application/json';
+        return h;
+    }
+    async req(method, path, body, query, options) {
+        let url = `${this.base}${path}`;
+        if (query) {
+            const qs = Object.entries(query)
+                .filter(([, v]) => v !== undefined)
+                .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`);
+            if (qs.length)
+                url += '?' + qs.join('&');
+        }
+        const hasBody = body != null;
+        const res = await fetch(url, {
+            method,
+            headers: this.headers(hasBody),
+            body: hasBody ? JSON.stringify(body) : undefined,
+        });
+        let data;
         try {
-            response = await fetch(url, {
-                method,
-                headers: this.headers,
-                body: body !== undefined ? JSON.stringify(body) : undefined,
-                signal: controller.signal,
-            });
+            data = await res.json();
         }
-        finally {
-            clearTimeout(timer);
+        catch {
+            data = null;
         }
-        if (!response.ok) {
-            let errorBody;
-            try {
-                errorBody = await response.json();
-            }
-            catch {
-                errorBody = { statusCode: response.status, error: 'Unknown', message: response.statusText };
-            }
-            throw new StateKeepRequestError(response.status, errorBody, errorBody.message);
+        if (!res.ok) {
+            if (options?.soft400 && res.status === 400 && data?.valid === false)
+                return data;
+            const msg = data?.error ?? `HTTP ${res.status}`;
+            const code = data?.code ?? String(res.status);
+            throw new StateKeepError(msg, res.status, code, data);
         }
-        if (response.status === 204)
-            return undefined;
-        return response.json();
+        if (data?.status === 'requires_confirmation') {
+            throw new StateKeepError('Deployment requires confirmation due to stranded actors', 200, 'REQUIRES_CONFIRMATION', data);
+        }
+        return data;
     }
-    // ── Actors ──────────────────────────────────────────────────────────────────
-    async spawnActor(options) {
-        return this.request('POST', '/v1/actors', options);
+    // ── Definitions ───────────────────────────────────────────────────────────
+    async validate(definition) {
+        return this.req('POST', '/v1/definitions/validate', { definition }, undefined, { soft400: true });
     }
-    async getActor(actorId) {
-        return this.request('GET', `/v1/actors/${encodeURIComponent(actorId)}`);
+    async deploy(id, definition, options = {}) {
+        return this.req('PUT', '/v1/definitions', { id, definition, ...options });
     }
-    async sendEvent(actorId, options) {
-        return this.request('POST', `/v1/actors/${encodeURIComponent(actorId)}/events`, options);
+    async preview(id, definition, options = {}) {
+        return this.req('POST', '/v1/definitions/preview', { id, definition, ...options });
     }
-    async listActorEvents(actorId, options = {}) {
-        const params = new URLSearchParams();
-        if (options.limit !== undefined)
-            params.set('limit', String(options.limit));
-        if (options.afterId !== undefined)
-            params.set('afterId', String(options.afterId));
-        const qs = params.size > 0 ? `?${params.toString()}` : '';
-        return this.request('GET', `/v1/actors/${encodeURIComponent(actorId)}/events${qs}`);
+    async getDefinition(id) {
+        return this.req('GET', `/v1/definitions/${id}`);
     }
-    async bulkSpawnActors(options) {
-        return this.request('POST', '/v1/actors/bulk', options);
+    async getDefinitionStatus(id) {
+        return this.req('GET', `/v1/definitions/${id}/status`);
     }
-    // ── Definitions ─────────────────────────────────────────────────────────────
-    async deployDefinition(options) {
-        return this.request('PUT', '/v1/definitions', options);
+    async getDefinitionDiff(id) {
+        return this.req('GET', `/v1/definitions/${id}/diff`);
     }
-    async getDefinition(definitionId) {
-        return this.request('GET', `/v1/definitions/${encodeURIComponent(definitionId)}`);
+    async getDefinitionStats(id) {
+        return this.req('GET', `/v1/definitions/${id}/stats`);
     }
-    // ── Webhooks ────────────────────────────────────────────────────────────────
+    async getMachineStats(machineId) {
+        return this.req('GET', `/v1/machines/${machineId}/stats`);
+    }
+    async listDefinitions(opts = {}) {
+        return this.req('GET', '/v1/definitions', undefined, opts);
+    }
+    // ── Actors ────────────────────────────────────────────────────────────────
+    async spawn(definitionId, initialContext = {}) {
+        const res = await this.req('POST', '/v1/actors', { definitionId, initialContext });
+        // Spawn response uses { id } — normalize to { actorId } for consistent interface
+        if (res?.id && !res.actorId)
+            res.actorId = res.id;
+        return res;
+    }
+    async send(actorId, eventType, payload = {}, idempotencyKey) {
+        const body = { type: eventType, payload };
+        if (idempotencyKey)
+            body.idempotencyKey = idempotencyKey;
+        return this.req('POST', `/v1/actors/${actorId}/event`, body);
+    }
+    async getState(actorId) {
+        return this.req('GET', `/v1/actors/${actorId}`);
+    }
+    async getEvents(actorId, opts = {}) {
+        return this.req('GET', `/v1/actors/${actorId}/events`, undefined, opts);
+    }
+    async getDecisions(actorId) {
+        return this.req('GET', `/v1/actors/${actorId}/decisions`);
+    }
+    async exportActor(actorId) {
+        return this.req('GET', `/v1/actors/${actorId}/export`);
+    }
+    async terminate(actorId) {
+        await this.req('DELETE', `/v1/actors/${actorId}`);
+    }
+    async rescueActor(actorId) {
+        return this.req('PATCH', `/v1/actors/${actorId}`, { status: 'active' });
+    }
+    async listActors(opts = {}) {
+        return this.req('GET', '/v1/actors', undefined, opts);
+    }
+    async listNeedsRescue(opts = {}) {
+        return this.req('GET', '/v1/actors/needs-rescue', undefined, opts);
+    }
+    // ── Scheduled events ──────────────────────────────────────────────────────
+    async schedule(actorId, eventType, opts) {
+        const { delay, fireAt, payload } = opts;
+        if (!delay && !fireAt)
+            throw new Error('Provide either delay (ms) or fireAt (unix ms timestamp)');
+        if (delay && fireAt)
+            throw new Error('Provide either delay or fireAt, not both');
+        const resolvedFireAt = fireAt ?? (Date.now() + delay);
+        const res = await this.req('POST', `/v1/actors/${actorId}/schedule`, { type: eventType, payload, fireAt: resolvedFireAt });
+        if (res?.type && !res.eventType)
+            res.eventType = res.type;
+        return res;
+    }
+    async listScheduled(actorId, opts = {}) {
+        return this.req('GET', `/v1/actors/${actorId}/schedule`, undefined, opts);
+    }
+    async cancelScheduled(actorId, scheduleId) {
+        await this.req('DELETE', `/v1/actors/${actorId}/schedule/${scheduleId}`);
+    }
+    // ── Webhooks ──────────────────────────────────────────────────────────────
+    async createWebhook(opts) {
+        return this.req('POST', '/v1/webhooks', opts);
+    }
     async listWebhooks() {
-        return this.request('GET', '/v1/webhooks');
-    }
-    async getWebhook(webhookId) {
-        return this.request('GET', `/v1/webhooks/${encodeURIComponent(webhookId)}`);
-    }
-    async createWebhook(options) {
-        return this.request('POST', '/v1/webhooks', options);
-    }
-    async updateWebhook(webhookId, options) {
-        return this.request('PATCH', `/v1/webhooks/${encodeURIComponent(webhookId)}`, options);
+        return this.req('GET', '/v1/webhooks');
     }
     async deleteWebhook(webhookId) {
-        return this.request('DELETE', `/v1/webhooks/${encodeURIComponent(webhookId)}`);
+        await this.req('DELETE', `/v1/webhooks/${webhookId}`);
     }
+    // ── Health ────────────────────────────────────────────────────────────────
+    async health() {
+        return this.req('GET', '/v1/health');
+    }
+    async workerHealth() {
+        return this.req('GET', '/v1/health/workers');
+    }
+}
+// ── Factory ───────────────────────────────────────────────────────────────────
+export function createClient(config) {
+    return new StateKeepClient(config);
 }
 //# sourceMappingURL=index.js.map

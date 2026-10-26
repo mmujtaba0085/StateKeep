@@ -472,7 +472,7 @@ The `@fastify/rate-limit` package is included in dependencies if you want to ena
 The StateKeep CLI lets you push definitions from files without writing curl commands.
 
 ```bash
-npm install -g @statekeep/sdk  # CLI included with SDK
+npm install -g statekeep      # the CLI ships with the server package (or: npx statekeep …)
 ```
 
 ```bash

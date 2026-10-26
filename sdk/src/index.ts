@@ -42,11 +42,22 @@ export interface DeployResult {
 export interface ConfirmationRequired {
   status:         'requires_confirmation';
   confirmToken:   string;
-  strandedActors: Array<{ currentState: string; count: number }>;
+  strandedActors: Array<{ currentState: string; atVersion?: string; reason?: string; count: number }>;
   safeActors:     number;
   expiresIn:      number;
   warnings:       Warning[];
+  message?:       string;
+  /** Why a fresh preview was returned instead of deploying (expired/used token, changed definition, new strandings). */
+  reason?:        string;
+  /** How many actors would now be stranded that were not in the previous preview. */
+  notInPreview?:  number;
 }
+
+/** A transition in a history pattern: an event type, or a delayed transition by state path and delay. */
+export type HistoryStep = string | { after: string; ms: number };
+
+/** contextTransform entry: copy from a path, set a constant, or copy with a default. */
+export type ContextTransformSpec = string | { value: unknown } | { from: string; default?: unknown };
 
 export interface Warning {
   type:     string;
@@ -108,9 +119,14 @@ export interface StateKeepConfig {
 
 export interface DeployOptions {
   parentId?:         string;
-  historyPath?:      string[];
+  /** Route only actors whose whole transition history equals this sequence. Omit for every actor. */
+  historyPath?:      HistoryStep[];
+  /** Parallel machines: route by the histories of these regions (mutually exclusive with historyPath). */
+  historyRegions?:   Record<string, HistoryStep[]>;
+  /** { "old.leaf.path": "new.leaf.path" } for removed or renamed states. */
   stateMapping?:     Record<string, string>;
-  contextTransform?: Record<string, string>;
+  contextTransform?: Record<string, ContextTransformSpec>;
+  /** Token from a requires_confirmation response, to accept the listed strandings. */
   confirmToken?:     string;
 }
 

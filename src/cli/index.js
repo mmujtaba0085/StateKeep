@@ -3,6 +3,7 @@
  * statekeep CLI
  *
  * Usage:
+ *   statekeep serve                Run a complete StateKeep (server + workers) here
  *   statekeep push <file>          Push a machine definition to the server
  *   statekeep preview <file>       Preview migration impact (dry-run)
  *   statekeep dev [dir]            Start dev server + file watcher
@@ -22,6 +23,7 @@ import { previewCommand } from './preview.js';
 import { devCommand }     from './dev.js';
 import { importCommand }  from './import.js';
 import { planCommand }    from './plan.js';
+import { serveCommand }   from './serve.js';
 
 const argv = process.argv.slice(2);
 
@@ -53,6 +55,9 @@ const [command, ...rest] = argv;
 const { args, opts } = parseArgs(rest);
 
 switch (command) {
+  case 'serve':
+    serveCommand(args, opts);
+    break;
   case 'push':
     await pushCommand(args, opts);
     break;
@@ -76,6 +81,7 @@ switch (command) {
 statekeep CLI
 
 Commands:
+  serve            Run StateKeep here: API server + workers (--port, --host, --data)
   push <file>      Push a machine definition to the StateKeep server
   preview <file>   Preview migration impact without deploying
   dev [dir]        Start dev server + auto-push file watcher
