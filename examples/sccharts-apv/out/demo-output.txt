@@ -1,0 +1,17 @@
+
+400 ABRO controllers on v1 after a few ticks: { 'WaitA+WaitB': 252, 'DoneA+WaitB': 62, 'WaitA+DoneB': 56, Done: 30 }
+
+v2 preview: migrate 37, stay 363, strand 0, may match later 137
+  (controllers whose whole history is [WaitB->DoneB]: 37)
+  after deploy: { 'abro-v1 active': 363, 'abro-v2 active': 37 }
+  3 ticks later: 10 of the 137 late matchers reached [WaitB->DoneB] and moved at their next tick; { 'abro-v1 active': 353, 'abro-v2 active': 47 }
+
+v3 preview without stateMapping: migrate 220, stay 0, STRAND 180
+  deploy without consent → deployed: false (180 strandings not consented)
+v3 preview with stateMapping:    migrate 400, stay 0, strand 0
+  deployed: true; { 'abro-v3 active': 400 }
+  states now: { 'WaitA+WaitB': 220, Emitted: 64, 'GotA+WaitB': 61, 'WaitA+GotB': 55 }
+
+64 controllers were in Emitted; after K: { Acknowledged: 64 }
+
+SVG previews written to out/

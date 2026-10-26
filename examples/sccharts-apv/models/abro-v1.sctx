@@ -1,0 +1,25 @@
+// ABRO (Berry): emit O once both A and B have been present; R restarts.
+// Written in SCCharts' textual syntax, close to the KIELER tutorial version.
+scchart ABRO {
+  input bool A, B, R
+  output bool O = false
+
+  initial state ABthenO {
+    entry do O = false
+    initial state WaitAB {
+      region HandleA {
+        initial state WaitA
+          if A go to DoneA
+        final state DoneA
+      }
+      region HandleB {
+        initial state WaitB
+          if B go to DoneB
+        final state DoneB
+      }
+    }
+    do O = true join to Done
+    final state Done
+  }
+  if R abort to ABthenO
+}

@@ -1,0 +1,16 @@
+{
+  "name": "sccharts-apv",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Prototype: Anchor-Point Versioning (history-targeted live migration) for SCCharts instances, with ELK-laid-out migration previews.",
+  "type": "module",
+  "license": "MIT",
+  "scripts": {
+    "demo": "node demo.mjs",
+    "test": "node --test test.mjs"
+  },
+  "dependencies": {
+    "elkjs": "0.11.1"
+  },
+  "engines": { "node": ">=20" }
+}

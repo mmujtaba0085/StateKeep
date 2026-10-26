@@ -1,0 +1,27 @@
+// ABRO v3: states renamed (DoneA → GotA, DoneB → GotB, Done → Emitted) and a new
+// Acknowledge region: after O, the controller waits for an acknowledgement K.
+scchart ABRO {
+  input bool A, B, R, T, K
+  output bool O = false
+
+  initial state ABthenO {
+    entry do O = false
+    initial state WaitAB {
+      region HandleA {
+        initial state WaitA
+          if A || T go to GotA
+        final state GotA
+      }
+      region HandleB {
+        initial state WaitB
+          if B go to GotB
+        final state GotB
+      }
+    }
+    do O = true join to Emitted
+    state Emitted
+      if K do O = false go to Acknowledged
+    final state Acknowledged
+  }
+  if R abort to ABthenO
+}
