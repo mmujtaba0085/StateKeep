@@ -3,7 +3,10 @@ name: Release
 on:
   push:
     tags:
-      - 'v*'
+      # Real version tags only (v1.2.0) — not the floating major-version alias (v1),
+      # which is just force-moved to track the latest release and would otherwise
+      # re-trigger a Docker rebuild/push and a duplicate GitHub Release on every move.
+      - 'v[0-9]+.[0-9]+.[0-9]+'
 
 env:
   REGISTRY: ghcr.io
